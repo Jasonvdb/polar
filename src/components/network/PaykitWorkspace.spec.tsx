@@ -162,3 +162,38 @@ it('resets receiver drafts on selection and preserves uncertain peer-command ide
     peerReceiverPath: 'alice/wallet',
   });
 });
+
+it('starts the funded preset through the same asynchronous backend command', async () => {
+  service.state.mockResolvedValue(state);
+  service.command.mockResolvedValue({ operationId: newPaykitId() });
+  const view = setup();
+  const button = view
+    .getByText('Create funded Alice / Bob / Carol preset')
+    .closest('button')!;
+  await waitFor(() => expect(button).not.toBeDisabled());
+  fireEvent.click(button);
+  await waitFor(() =>
+    expect(service.command).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ command: 'preset.fund', input: {} }),
+    ),
+  );
+});
+
+it('keeps controls usable when credential preflight proves a command was never submitted', async () => {
+  service.state.mockResolvedValue(state);
+  service.command.mockRejectedValueOnce(
+    new Error('Paykit command not submitted: Local wallet authorization is unavailable.'),
+  );
+  const view = setup();
+  const button = view
+    .getByText('Create funded Alice / Bob / Carol preset')
+    .closest('button')!;
+  await waitFor(() => expect(button).not.toBeDisabled());
+  fireEvent.click(button);
+  await view.findByText(
+    'Paykit command not submitted: Local wallet authorization is unavailable.',
+  );
+  expect(view.queryByText('Retry command')).not.toBeInTheDocument();
+  expect(button).not.toBeDisabled();
+});

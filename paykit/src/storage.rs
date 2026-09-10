@@ -39,6 +39,22 @@ impl Vault {
             poisoned: AtomicBool::new(false),
         })
     }
+    pub(crate) fn shared_wallets(&self, environment: uuid::Uuid) -> anyhow::Result<Self> {
+        let parent = self
+            .root
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("receiver parent missing"))?;
+        let receivers = if parent.file_name().is_some_and(|n| n == "receivers") {
+            parent
+        } else {
+            &self.root
+        };
+        Self::new(
+            receivers.join("wallet-execution"),
+            *self.key,
+            format!("{environment}:wallet-execution"),
+        )
+    }
     pub fn lock(&self, name: &str) -> anyhow::Result<File> {
         let file = private_options()
             .create(true)

@@ -20,6 +20,8 @@ pub struct WalletConfig {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Wallet {
+    #[serde(default)]
+    pub bitcoin_backend_id: Option<String>,
     pub id: String,
     pub label: String,
     pub bitcoin: Core,
@@ -38,6 +40,12 @@ pub struct Lightning {
     pub url: String,
     pub tls_cert_path: PathBuf,
     pub macaroon_path: PathBuf,
+    #[serde(default)]
+    pub payment_macaroon_path: Option<PathBuf>,
+    #[serde(default)]
+    pub setup_macaroon_path: Option<PathBuf>,
+    #[serde(default)]
+    pub peer_address: Option<String>,
 }
 
 pub fn configured(environment: Uuid) -> anyhow::Result<Vec<Wallet>> {
@@ -154,7 +162,7 @@ impl Wallet {
         validate_endpoint(ONCHAIN, address, 1)?;
         Ok(address.clone())
     }
-    async fn core(
+    pub(crate) async fn core(
         &self,
         wallet: Option<&str>,
         method: &str,
@@ -232,14 +240,36 @@ impl Wallet {
         }
         Ok(())
     }
-    async fn lnd(&self, method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
+    pub(crate) async fn lnd(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+    ) -> anyhow::Result<Value> {
+        self.lnd_with_credential(method, path, body, "invoice")
+            .await
+    }
+    pub(crate) async fn lnd_with_credential(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<Value>,
+        credential: &str,
+    ) -> anyhow::Result<Value> {
         let lnd = self
             .lightning
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("wallet has no Lightning binding"))?;
         let cert = std::fs::read(&lnd.tls_cert_path)
             .map_err(|_| anyhow::anyhow!("Lightning TLS certificate not ready"))?;
-        let macaroon = std::fs::read(&lnd.macaroon_path)
+        let credential_path = match credential {
+            "payment" => lnd.payment_macaroon_path.as_ref(),
+            "setup" => lnd.setup_macaroon_path.as_ref(),
+            "invoice" => Some(&lnd.macaroon_path),
+            _ => None,
+        }
+        .ok_or_else(|| anyhow::anyhow!("required restricted Lightning credential unavailable"))?;
+        let macaroon = std::fs::read(credential_path)
             .map_err(|_| anyhow::anyhow!("Lightning invoice credential not ready"))?;
         let cert = reqwest::Certificate::from_pem(&cert)
             .map_err(|_| anyhow::anyhow!("invalid Lightning TLS certificate"))?;
@@ -249,7 +279,11 @@ impl Wallet {
             .add_root_certificate(cert)
             .build()?;
         let mut endpoint = url(&lnd.url, "https")?;
+        let (path, query) = path
+            .split_once('?')
+            .map_or((path, None), |(p, q)| (p, Some(q)));
         endpoint.set_path(path);
+        endpoint.set_query(query);
         let mut request = client
             .request(method.parse()?, endpoint)
             .header("Grpc-Metadata-macaroon", hex::encode(macaroon));

@@ -37,6 +37,7 @@ export interface PaykitState {
   operations: PaykitOperation[];
   receiverWorkspaces?: PaykitReceiverWorkspace[];
   lastEventSequence: number;
+  funding?: PaykitFunding;
 }
 export const paykitCommands = [
   'participant.create',
@@ -47,6 +48,7 @@ export const paykitCommands = [
   'receiver.stop',
   'receiver.restart',
   'preset.create',
+  'preset.fund',
   'link.initiate',
   'link.accept',
   'link.advance',
@@ -74,6 +76,14 @@ export const paykitCommands = [
   'reservation.reconcile',
   'paymentList.resolve',
   'paymentList.consume',
+  'request.create',
+  'request.accept',
+  'request.reject',
+  'request.cancel',
+  'payment.execute',
+  'payment.reconcile',
+  'proof.submit',
+  'proof.verify',
 ] as const;
 export type PaykitCommand = (typeof paykitCommands)[number];
 export interface PaykitCommandRequest {
@@ -93,7 +103,10 @@ export const isUuid = (value: unknown): value is string =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
   );
-export type PaykitInput = Record<string, string | string[] | number>;
+export type PaykitInput = Record<
+  string,
+  string | string[] | number | PaykitProofMaterial
+>;
 export interface PaykitLink {
   peerPublicKey: string;
   peerReceiverPath: string;
@@ -195,11 +208,113 @@ export interface PaykitResolution {
     | 'consumed';
   lastError?: string;
 }
+export type PaykitProofMaterial =
+  | { method: 'btc-onchain'; txid: string; outputIndex: number }
+  | { method: 'btc-lightning-bolt11'; paymentHash: string; preimage: string };
+export interface PaykitRequestEndpointBinding {
+  source: 'public' | 'private';
+  method: PaykitMethod;
+  endpoint: string;
+  reservationId: string;
+}
+export const isPaykitRequestEndpointBinding = (
+  value: unknown,
+): value is PaykitRequestEndpointBinding => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const binding = value as Record<string, unknown>;
+  return (
+    Object.keys(binding).length === 4 &&
+    (binding.source === 'public' || binding.source === 'private') &&
+    paykitMethods.includes(binding.method as PaykitMethod) &&
+    typeof binding.endpoint === 'string' &&
+    binding.endpoint.length > 0 &&
+    Buffer.byteLength(binding.endpoint, 'utf8') <= 16384 &&
+    !/[\u0000-\u0020\u007f-\u009f]/.test(binding.endpoint) &&
+    isUuid(binding.reservationId)
+  );
+};
+export interface PaykitPaymentRequest {
+  id: string;
+  peerPublicKey: string;
+  peerReceiverPath: string;
+  role: 'payer' | 'payee';
+  lifecycle:
+    | 'proposed'
+    | 'proposalExpired'
+    | 'accepted'
+    | 'rejected'
+    | 'canceled'
+    | 'proofSubmitted'
+    | 'recoveryRequired'
+    | 'invalidConflict';
+  amountSats: string;
+  description: string;
+  paymentReference: string;
+  endpointBindings: PaykitRequestEndpointBinding[];
+  proposalExpiresAt: string | null;
+  acceptedMethods: string[];
+  deliveryStatus: string;
+  createdAt: string;
+}
+export interface PaykitExecution {
+  id: string;
+  requestId: string;
+  walletId: string;
+  source: 'public' | 'private';
+  method: string;
+  endpoint: string;
+  amountSats: string;
+  status:
+    | 'prepared'
+    | 'signing'
+    | 'signed'
+    | 'inFlight'
+    | 'succeeded'
+    | 'failed'
+    | 'uncertain';
+  createdAt: string;
+  updatedAt: string;
+  txid: string | null;
+  outputIndex: number | null;
+  paymentHash: string | null;
+  lastError: string | null;
+}
+export interface PaykitProof {
+  id: string;
+  requestId: string;
+  method: string;
+  proof: PaykitProofMaterial;
+  deliveryStatus: string;
+  recordedAt: string;
+}
+export interface PaykitSettlement {
+  proofId: string;
+  requestId: string;
+  status: 'pending' | 'verified' | 'invalid' | 'failed';
+  requiredConfirmations: number;
+  confirmations: number;
+  verifiedAt: string | null;
+  lastError: string | null;
+}
+export interface PaykitFunding {
+  status: 'notStarted' | 'running' | 'ready' | 'uncertain' | 'failed';
+  funded: boolean;
+  step: string;
+  wallets: {
+    participant: string;
+    walletId: string;
+    onchainBalanceSats: string;
+    lightningBalanceSats: string;
+  }[];
+  channelPoints: string[];
+  lastError: string | null;
+}
 export interface PaykitOperationResult {
   participantId?: string;
   receiverId?: string;
   preset?: string;
   funded?: boolean;
+  funding?: PaykitFunding;
   peerPublicKey?: string;
   peerReceiverPath?: string;
   outboundMessageId?: string;
@@ -222,6 +337,10 @@ export interface PaykitReceiverWorkspace {
   publicPaymentList?: PaykitPublicPaymentList;
   reservations?: PaykitReservation[];
   resolutions?: PaykitResolution[];
+  requests?: PaykitPaymentRequest[];
+  executions?: PaykitExecution[];
+  proofs?: PaykitProof[];
+  settlements?: PaykitSettlement[];
   lastError?: string;
   updatedAt?: string;
 }
@@ -235,6 +354,7 @@ export const paykitCommandFields: Record<PaykitCommand, string[]> = {
   'receiver.stop': ['receiverId'],
   'receiver.restart': ['receiverId'],
   'preset.create': [],
+  'preset.fund': [],
   'link.initiate': peerFields,
   'link.accept': peerFields,
   'link.advance': peerFields,
@@ -262,6 +382,20 @@ export const paykitCommandFields: Record<PaykitCommand, string[]> = {
   'reservation.reconcile': ['receiverId', 'reservationId'],
   'paymentList.resolve': [...peerFields, 'source', 'amountSats', 'method'],
   'paymentList.consume': ['receiverId', 'resolutionId'],
+  'request.create': [
+    ...peerFields,
+    'amountSats',
+    'description',
+    'expirySeconds',
+    'acceptedMethods',
+  ],
+  'request.accept': ['receiverId', 'requestId'],
+  'request.reject': ['receiverId', 'requestId'],
+  'request.cancel': ['receiverId', 'requestId'],
+  'payment.execute': ['receiverId', 'requestId', 'walletId', 'source', 'method'],
+  'payment.reconcile': ['receiverId', 'executionId'],
+  'proof.submit': ['receiverId', 'requestId', 'executionId', 'proof'],
+  'proof.verify': ['receiverId', 'requestId', 'proofId', 'requiredConfirmations'],
 };
 export const isPaykitPublicKey = (value: string) =>
   /^[ybndrfg8ejkmcpqxot1uwisza345h769]{51}[yo]$/.test(value);
@@ -294,6 +428,27 @@ export const safePaykitAvatar = (value: unknown): string | undefined => {
     return;
   }
 };
+export const validatePaykitProof = (value: unknown): void => {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error('Invalid Paykit proof');
+  const proof = value as Record<string, unknown>;
+  const hex = (input: unknown) =>
+    typeof input === 'string' && /^[a-fA-F0-9]{64}$/.test(input);
+  const valid =
+    proof.method === 'btc-onchain'
+      ? Object.keys(proof).length === 3 &&
+        hex(proof.txid) &&
+        typeof proof.outputIndex === 'number' &&
+        Number.isSafeInteger(proof.outputIndex) &&
+        proof.outputIndex >= 0 &&
+        proof.outputIndex <= 4294967295
+      : proof.method === 'btc-lightning-bolt11' &&
+        Object.keys(proof).length === 3 &&
+        hex(proof.paymentHash) &&
+        hex(proof.preimage);
+  if (!valid) throw new Error('Invalid Paykit proof');
+};
+
 export const validatePaykitCommand = (request: PaykitCommandRequest) => {
   if (!request || !isUuid(request.commandId) || !paykitCommands.includes(request.command))
     throw new Error('Invalid Paykit command or command ID');
@@ -307,12 +462,37 @@ export const validatePaykitCommand = (request: PaykitCommandRequest) => {
     throw new Error('Invalid Paykit command input');
   for (const field of expected) {
     const value = request.input[field];
-    if (field === 'method' && value === undefined) continue;
-    if (field === 'enabledMethods' || field === 'preference') {
+    if (
+      (field === 'method' ||
+        field === 'requiredConfirmations' ||
+        (request.command === 'proof.submit' &&
+          ['executionId', 'proof'].includes(field))) &&
+      value === undefined
+    )
+      continue;
+    if (field === 'proof') {
+      validatePaykitProof(value);
+      continue;
+    }
+    if (field === 'requiredConfirmations') {
+      if (
+        typeof value !== 'number' ||
+        !Number.isInteger(value) ||
+        value < 1 ||
+        value > 144
+      )
+        throw new Error('Invalid Paykit requiredConfirmations');
+      continue;
+    }
+    if (
+      field === 'enabledMethods' ||
+      field === 'preference' ||
+      field === 'acceptedMethods'
+    ) {
       if (
         !Array.isArray(value) ||
         value.length > 2 ||
-        (field === 'enabledMethods' && !value.length) ||
+        (field !== 'preference' && !value.length) ||
         new Set(value).size !== value.length ||
         value.some(method => !paykitMethods.includes(method as PaykitMethod))
       )
@@ -344,8 +524,9 @@ export const validatePaykitCommand = (request: PaykitCommandRequest) => {
     if (
       typeof value !== 'string' ||
       (!['label', 'about'].includes(field) && !value.trim()) ||
-      (['name', 'displayName', 'label', 'about'].includes(field) &&
-        (Buffer.byteLength(value, 'utf8') > (field === 'about' ? 2000 : 80) ||
+      (['name', 'displayName', 'label', 'about', 'description'].includes(field) &&
+        (Buffer.byteLength(value, 'utf8') >
+          (field === 'about' ? 2000 : field === 'description' ? 500 : 80) ||
           /[\u0000-\u001f\u007f-\u009f]/.test(
             value.replace(field === 'about' ? /[\n\t]/g : /$^/, ''),
           ))) ||
@@ -362,6 +543,11 @@ export const validatePaykitCommand = (request: PaykitCommandRequest) => {
     )
       throw new Error(`Invalid Paykit ${field}`);
   }
+  if (
+    request.command === 'proof.submit' &&
+    (request.input.executionId === undefined) === (request.input.proof === undefined)
+  )
+    throw new Error('Provide exactly one executionId or proof');
   if (
     request.command === 'method.configure' &&
     (request.input.preference as string[]).some(

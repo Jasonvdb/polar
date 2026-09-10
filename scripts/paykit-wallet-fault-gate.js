@@ -5,7 +5,7 @@ const http = require('node:http');
 const https = require('node:https');
 const fs = require('node:fs');
 const path = require('node:path');
-const { randomBytes, createHmac } = require('node:crypto');
+const { randomBytes, createHmac, createHash } = require('node:crypto');
 
 const LIMIT = 2 * 1024 * 1024;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -14,7 +14,7 @@ const sockets = new Set();
 const upstreams = new Set();
 const holds = new Set();
 const servers = [];
-const counts = { core: { requests: 0, issuanceSuccess: 0 }, lnd: { requests: 0, issuanceSuccess: 0 } };
+const counts = { core: { requests: 0, issuanceSuccess: 0, executionSuccess: 0, channelSuccess: 0 }, lnd: { requests: 0, issuanceSuccess: 0, executionSuccess: 0, channelSuccess: 0 } };
 let sequence = 0;
 let stopping = false;
 let config;
@@ -67,6 +67,8 @@ function loadConfig() {
   value.holdTimeoutMs = integer(value.holdTimeoutMs, 60000, 300000);
   value.coreAuth = `Basic ${Buffer.from(`${privateFile(value.core.usernameFile).toString().trim()}:${privateFile(value.core.passwordFile).toString().trim()}`).toString('base64')}`;
   value.lndMacaroon = privateFile(value.lnd.macaroonFile).toString('hex');
+  value.lndPaymentMacaroon = value.lnd.paymentMacaroonFile ? privateFile(value.lnd.paymentMacaroonFile).toString('hex') : undefined;
+  value.lndSetupMacaroon = value.lnd.setupMacaroonFile ? privateFile(value.lnd.setupMacaroonFile).toString('hex') : undefined;
   value.lndCa = fs.readFileSync(value.lnd.upstreamCertFile);
   value.gateCert = fs.readFileSync(value.lnd.gateCertFile);
   value.gateKey = privateFile(value.lnd.gateKeyFile);
@@ -80,20 +82,25 @@ function safeRoute(channel, request, body) {
     let rpc;
     try { rpc = JSON.parse(body); } catch (_) { throw new Error('Invalid Core JSON'); }
     if (!rpc || Array.isArray(rpc) || typeof rpc.method !== 'string') throw new Error('Expected single Core RPC');
+    if (rpc.method === 'sendrawtransaction') return { operation: 'sendrawtransaction', issuance: false, execution: true };
     return { operation: rpc.method === 'getnewaddress' ? 'getnewaddress' : 'other-rpc', issuance: rpc.method === 'getnewaddress' };
   }
+  if (request.method === 'POST' && pathname === '/v1/channels') return { operation: 'openchannel', issuance: false, channel: true };
+  if (request.method === 'POST' && pathname === '/v1/channels/transactions') return { operation: 'sendpayment', issuance: false, execution: true };
   // Origin is fixed; lookup hashes and query values are deliberately not logged.
   return { operation: request.method === 'POST' && pathname === '/v1/invoices' ? 'addinvoice' : 'other-rest', issuance: request.method === 'POST' && pathname === '/v1/invoices' };
 }
-function claim(channel, issuance) {
-  if (!issuance) return undefined;
+function claim(channel, route) {
+  if (!route.issuance && !route.execution && !route.channel) return undefined;
   const file = path.join(config.controlDir, `${channel}.arm.json`);
   let arm;
   try { arm = JSON.parse(privateFile(file)); }
   catch (error) { if (error.code === 'ENOENT') return undefined; throw error; }
-  if (!arm || !UUID.test(arm.nonce) || !['hold', 'drop'].includes(arm.action) || Object.keys(arm).some(k => !['nonce', 'action'].includes(k))) {
+  if (!arm || !UUID.test(arm.nonce) || !['hold', 'drop'].includes(arm.action) || Object.keys(arm).some(k => !['nonce', 'action', 'operation'].includes(k))) {
     throw new Error('Invalid arm control');
   }
+  if (arm.operation !== undefined && !(channel === 'core' ? ['sendrawtransaction'] : ['sendpayment', 'openchannel']).includes(arm.operation)) throw new Error('Invalid arm operation');
+  if (arm.operation ? arm.operation !== route.operation : !route.issuance) return undefined;
   const prefix = path.join(config.controlDir, `${channel}.${arm.nonce}`);
   if (fs.existsSync(`${prefix}.claimed.json`)) throw new Error('Nonce already claimed');
   fs.renameSync(file, `${prefix}.claimed.json`); // Synchronous atomic one-shot claim.
@@ -118,6 +125,13 @@ function headersWithoutHop(headers) {
   for (const token of String(headers.connection || '').split(',')) ignored.add(token.trim().toLowerCase());
   return Object.fromEntries(Object.entries(headers).filter(([key]) => !ignored.has(key.toLowerCase())));
 }
+function lndCredentialKind(request) {
+  const route = `${request.method} ${request.url.split('?')[0]}`;
+  // Keep GetInfo on its existing payment grant for actual wallet identity checks.
+  if (['POST /v1/channels/transactions', 'GET /v1/payments', 'GET /v1/getinfo'].includes(route)) return 'payment';
+  if (['GET /v1/newaddress', 'GET /v1/balance/blockchain', 'GET /v1/peers', 'POST /v1/peers', 'GET /v1/channels', 'POST /v1/channels', 'GET /v1/channels/pending'].includes(route)) return 'setup';
+  return 'invoices';
+}
 function forward(channel, req, body) {
   const isLnd = channel === 'lnd';
   const target = isLnd ? config.lndUrl : config.coreUrl;
@@ -128,7 +142,12 @@ function forward(channel, req, body) {
   // the selected real wallet's fixed origin.
   delete headers.authorization;
   delete headers['grpc-metadata-macaroon'];
-  if (isLnd) headers['grpc-metadata-macaroon'] = config.lndMacaroon;
+  if (isLnd) {
+    const kind = lndCredentialKind(req);
+    const macaroon = kind === 'payment' ? config.lndPaymentMacaroon : kind === 'setup' ? config.lndSetupMacaroon : config.lndMacaroon;
+    if (!macaroon) throw new Error('Requested restricted grant unavailable');
+    headers['grpc-metadata-macaroon'] = macaroon;
+  }
   else headers.authorization = config.coreAuth;
   return new Promise((resolve, reject) => {
     const transport = isLnd ? https : http;
@@ -155,6 +174,33 @@ function issuanceSucceeded(channel, response) {
     ? value && value.error == null && typeof value.result === 'string' && value.result.length > 0
     : value && typeof value.payment_request === 'string' && value.payment_request.length > 0 && typeof value.r_hash === 'string';
 }
+function executionSucceeded(channel, response) {
+  if (response.status < 200 || response.status >= 300) return false;
+  let value;
+  try { value = JSON.parse(response.body); } catch (_) { return false; }
+  if (channel === 'core') return value?.error == null && typeof value?.result === 'string' && /^[a-fA-F0-9]{64}$/.test(value.result);
+  if (!value || value.payment_error || typeof value.payment_preimage !== 'string' || typeof value.payment_hash !== 'string') return false;
+  const preimage = Buffer.from(value.payment_preimage, 'base64');
+  const hash = Buffer.from(value.payment_hash, 'base64');
+  return preimage.length === 32 && hash.length === 32 && preimage.some(byte => byte !== 0) && createHash('sha256').update(preimage).digest().equals(hash);
+}
+function channelPoint(response) {
+  if (response.status < 200 || response.status >= 300) return undefined;
+  let value;
+  try { value = JSON.parse(response.body); } catch (_) { return undefined; }
+  if (!value || !Number.isInteger(value.output_index) || value.output_index < 0 || value.output_index > 4294967295) return undefined;
+  const hex = value.funding_txid_str;
+  const base64 = value.funding_txid_bytes;
+  let txid;
+  if (typeof hex === 'string' && /^[a-fA-F0-9]{64}$/.test(hex) && !base64) txid = hex.toLowerCase();
+  else if (!hex && typeof base64 === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(base64)) {
+    const bytes = Buffer.from(base64, 'base64');
+    if (bytes.length !== 32 || bytes.toString('base64') !== base64) return undefined;
+    txid = Buffer.from(bytes).reverse().toString('hex');
+  } else return undefined;
+  return { fundingTxid: txid, outputIndex: value.output_index };
+}
+function channelSucceeded(response) { return channelPoint(response) !== undefined; }
 function relay(response, result) {
   const headers = headersWithoutHop(result.headers);
   headers['content-length'] = String(result.body.length);
@@ -208,20 +254,25 @@ async function handle(channel, req, res) {
     clearTimeout(initialTimer); initialTimer = undefined;
     const route = safeRoute(channel, req, body);
     const identityDigest = createHmac('sha256', secret).update(body).digest('hex');
-    const arm = claim(channel, route.issuance);
+    const arm = claim(channel, route);
     const detail = { channel, id, operation: route.operation, identityDigest, ...(arm ? { nonce: arm.nonce } : {}) };
     evidence('request.forwarded', detail);
     const result = await forward(channel, req, body);
     const successfulIssuance = route.issuance && issuanceSucceeded(channel, result);
     if (successfulIssuance) counts[channel].issuanceSuccess++;
-    evidence('upstream.completed', { ...detail, status: result.status, successfulIssuance, counts: counts[channel] });
-    if (!arm || !successfulIssuance) {
+    const successfulExecution = !!route.execution && executionSucceeded(channel, result);
+    if (successfulExecution) counts[channel].executionSuccess++;
+    const point = route.channel ? channelPoint(result) : undefined;
+    const successfulChannel = point !== undefined;
+    if (successfulChannel) counts[channel].channelSuccess++;
+    evidence('upstream.completed', { ...detail, status: result.status, successfulIssuance, successfulExecution, successfulChannel, ...(point || {}), counts: counts[channel] });
+    if (!arm || (!successfulIssuance && !successfulExecution && !successfulChannel)) {
       if (arm) evidence('arm.not-triggered', { ...detail, reason: 'upstream-not-successful' });
       relay(res, result); return;
     }
     // This file proves a complete successful REAL wallet response was received
     // before any response bytes were sent to the calling Paykit adapter.
-    save(`${arm.prefix}.ready.json`, { ...detail, upstreamCompletedAt: new Date().toISOString(), successfulIssuance: true, action: arm.action, counts: counts[channel] });
+    save(`${arm.prefix}.ready.json`, { ...detail, upstreamCompletedAt: new Date().toISOString(), successfulIssuance, successfulExecution, successfulChannel, ...(point || {}), action: arm.action, counts: counts[channel] });
     if (arm.action === 'drop') { evidence('response.dropped', detail); res.destroy(); return; }
     await hold(res, result, arm, detail);
   } catch (_) {
@@ -268,4 +319,4 @@ async function main() {
   }
 }
 if (require.main === module) main().catch(() => { process.exitCode = 1; shutdown(); });
-module.exports = { issuanceSucceeded, headersWithoutHop, safeRoute };
+module.exports = { channelPoint, channelSucceeded, lndCredentialKind, executionSucceeded, issuanceSucceeded, headersWithoutHop, safeRoute };

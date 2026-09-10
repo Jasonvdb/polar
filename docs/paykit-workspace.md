@@ -10,9 +10,14 @@ For this development increment, build `polar-paykit/service:pr2` using the
 pulls the pinned PostgreSQL 18 image if it is not already installed. Missing
 service images and unavailable host ports cause a visible startup failure.
 
-Create named participants, or choose **Create Alice / Bob / Carol preset**. The
-preset supplies Alice and Carol's wallet receivers plus Bob's wallet and server
-receivers. It does not fund wallets or implement payments in this increment.
+Create named participants, or choose **Create funded Alice / Bob / Carol preset**
+on a network with at least three LND nodes sharing a Bitcoin Core backend. This
+creates Alice and Carol's wallet receivers plus Bob's wallet and server receivers,
+then provisions regtest funds and usable Lightning channels through the backend.
+Funding progress and wallet balances are visible; readiness is reported only after
+verification. Repeating the command reconciles the existing setup. The separate
+**Create Alice / Bob / Carol preset** action creates identities without funding
+and remains usable in a Pubky-only environment.
 Select a participant to create or rename its receivers. Start, stop and restart
 a selected receiver independently. Renaming changes its display name; the path,
 identity and cryptographic state stay the same. Public keys, receiver path,
@@ -36,7 +41,8 @@ The MCP `paykit` tool uses the same commands as the CLI and UI:
 
 Commands are `participant.create`, `participant.rename`, `receiver.create`,
 `receiver.rename`, `receiver.start`, `receiver.stop`, `receiver.restart` and
-`preset.create`. Tool metadata documents required fields. The backend guide
+`preset.create`. Receiving, links, profiles and request/payment/proof commands
+are documented below and in tool metadata, including every required field. The backend guide
 covers CLI invocation, authenticated HTTP and the replayable event stream.
 
 ## Persistence and isolation
@@ -184,3 +190,56 @@ and exposes that directory read-only to the service. Missing startup credentials
 are retried during workspace queries; they do not prevent Pubky readiness.
 LND connections verify the certificate and hostname. The UI and MCP accept wallet
 catalog IDs, never credential paths, authentication values or arbitrary RPC URLs.
+
+## Payment requests and real payments
+
+First create the funded preset. Select the payee receiver, establish an encrypted
+link to the payer using **Encrypted links**, and configure its receiving methods.
+Publish a fresh public payment list or create/rotate a private reservation for
+the exact request amount and every accepted method. Previously claimed endpoints
+cannot be reused for a new request; private reservations must target this payer. Private lists remain receiver-scoped and require explicit private resolution.
+
+In **Requests and payments**, select or enter the payer public key and receiver
+path. Edit the exact satoshi amount, description, proposal expiry and accepted
+methods, then choose **Create payment request**. On the payer receiver, inspect
+its terms and immutable endpoint bindings (source, method, endpoint and reservation)
+and choose **Accept request** or **Reject request**. **Cancel request**
+sends the SDK cancellation for eligible requests. Proposal expiry is shown as a
+proposal term; acceptance does not invent a new payment deadline.
+
+To pay, select the accepted request, spending wallet, endpoint source and method.
+An omitted method requires a saved preference. **Pay accepted request** executes
+against the immutable accepted amount and its bound endpoint. The chosen source
+and method must match one of the request bindings. Older requests without valid
+bindings require a new proposal; they cannot be executed or verified as a new payment. The history shows
+its wallet, endpoint, transaction output or Lightning payment hash and execution
+status. A recorded execution prevents another payment from this form. If the
+outcome is uncertain, **Reconcile execution** queries the original wallet payment
+or rebroadcasts the identical signed transaction. Reconciliation never creates a
+replacement payment. Wallet failures and insufficient funds remain visible.
+
+## Proofs and independent settlement
+
+In **Proofs and settlement**, select a request and its successful execution to
+submit a prepared proof. **Enter proof manually** instead accepts either an
+on-chain transaction ID and output index, or a Lightning payment hash and payment
+preimage. These are public payment proof material. Session keys, wallet credentials
+and transaction signing data are never displayed.
+
+Switch to the payee receiver to inspect the delivered proof and choose **Verify
+settlement**. On-chain settlement defaults to one confirmation; the editable depth
+supports 1–144. A matching transaction below that depth remains pending. Invalid
+proofs show a concrete mismatch; an unavailable wallet shows a verification error.
+The request lifecycle, execution, proof delivery and settlement verification have
+separate statuses. A submitted proof is not a settlement confirmation. Receipt
+issuance follows in the next increment.
+
+The MCP/CLI commands are `preset.fund`, `request.create`, `request.accept`,
+`request.reject`, `request.cancel`, `payment.execute`, `payment.reconcile`,
+`proof.submit` and `proof.verify`. All return operation IDs using the existing
+asynchronous interface. The main process bakes separate URI-restricted LND payment
+and setup credentials from each selected local node, using verified TLS; only the
+restricted files enter the Paykit service mount. Initial authorization happens
+before command acceptance and failures leave the backend operation unsubmitted.
+The same backend funding/payment commands work in the standalone CLI without
+Electron.

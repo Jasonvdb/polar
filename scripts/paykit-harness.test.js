@@ -11,14 +11,14 @@ function walletEvidence(environment) {
   return {
     coreContainer: `${environment}-core`, lndContainers: [0, 1, 2].map(i => `${environment}-lnd-${i}`), gateContainer: `${environment}-gate`,
     readiness: [0, 1, 2].map(i => ({ syncedToChain: true, publicKey: `${environment}-wallet-${i}`, version: '0.20.0' })),
-    gateCounts: { core: { issuanceSuccess: 2 }, lnd: { issuanceSuccess: 1 } },
-    gateEvents: [completed('core', 1), dropped('core', 1), completed('lnd', 2), dropped('lnd', 2), completed('core', 3), { event: 'hold.finished', channel: 'core', id: 3, nonce: 'nonce-3', action: 'relay', reason: 'control' }],
-    storageFaults: [
-      { receiverId: 'receiver', faultId: 'fault', phase: 'host', active: true },
-      { receiverId: 'receiver', faultId: 'fault', phase: 'guest', active: true, observed: 'directory' },
-      { receiverId: 'receiver', faultId: 'fault', phase: 'host', active: false },
-      { receiverId: 'receiver', faultId: 'fault', phase: 'guest', active: false, observed: 'originalFile' },
-    ],
+    gateCounts: { core: { issuanceSuccess: 2, executionSuccess: 1 }, lnd: { issuanceSuccess: 1, executionSuccess: 1 } },
+    gateEvents: [completed('core', 1), dropped('core', 1), completed('lnd', 2), dropped('lnd', 2), completed('core', 3), { event: 'hold.finished', channel: 'core', id: 3, nonce: 'nonce-3', action: 'relay', reason: 'control' }, { ...completed('core', 4), successfulIssuance: false, successfulExecution: true }, dropped('core', 4), { ...completed('lnd', 5), successfulIssuance: false, successfulExecution: true }, dropped('lnd', 5)],
+    storageFaults: ['payments', 'workspace', 'requests', 'executions'].flatMap(ledger => [
+      { receiverId: 'receiver', faultId: ledger, boundary: `${ledger}.cbor atomic rename`, phase: 'host', active: true },
+      { receiverId: 'receiver', faultId: ledger, boundary: `${ledger}.cbor atomic rename`, phase: 'guest', active: true, observed: 'directory' },
+      { receiverId: 'receiver', faultId: ledger, boundary: `${ledger}.cbor atomic rename`, phase: 'host', active: false },
+      { receiverId: 'receiver', faultId: ledger, boundary: `${ledger}.cbor atomic rename`, phase: 'guest', active: false, observed: 'originalFile' },
+    ]),
   };
 }
 const { validateReport, requiredStages } = require('./paykit-ci');
@@ -89,15 +89,18 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
   const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
   const write = value => fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(value));
   write(report); assert.equal(validateReport(root).passed, true);
-  assert.equal(requiredStages.length, 35);
+  assert.equal(requiredStages.length, 48);
   write({ ...report, survivingWalletEnvironmentVerified: false }); assert.throws(() => validateReport(root));
-  for (const missing of ['issuance-reconciliation', 'storage-commit-safety']) {
+  for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery']) {
     write({ ...report, environments: report.environments.map(environment => ({ ...environment, stages: environment.stages.filter(stage => stage !== missing) })) });
     assert.throws(() => validateReport(root));
   }
   write(report);
   for (const change of [
     wallets => { wallets.gateEvents = []; },
+    wallets => { wallets.gateEvents = wallets.gateEvents.filter(event => !event.successfulExecution); },
+    wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.boundary !== 'executions.cbor atomic rename'); },
+    wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.boundary !== 'requests.cbor atomic rename'); },
     wallets => { wallets.gateEvents.find(event => event.event === 'upstream.completed').nonce = 'unrelated'; },
     wallets => { wallets.storageFaults.pop(); },
     wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.phase !== 'guest'); },

@@ -9,7 +9,7 @@ const { execFileSync } = require('child_process');
 const { run } = require('./paykit-scenarios');
 const { createWalletFixture } = require('./paykit-wallet-fixture');
 const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
-const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, 'complete'];
+const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, 'complete'];
 
 function validateReport(root) {
   const report = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));
@@ -43,8 +43,15 @@ function validateReport(root) {
     const held = wallets.gateEvents.find(event => event.event === 'hold.finished' && event.action === 'relay' && event.reason === 'control');
     assert(held && held.nonce);
     assert(wallets.gateEvents.some(event => event.nonce === held.nonce && event.id === held.id && event.event === 'upstream.completed' && event.successfulIssuance));
-    assert(wallets.storageFaults.some(event => event.active === true));
-    const finalFaults = new Map(wallets.storageFaults.map(event => [event.receiverId, event.active]));
+    for (const channel of ['core', 'lnd']) {
+      assert(wallets.gateCounts[channel].executionSuccess >= 1, 'Missing real execution gate success');
+      const completed = wallets.gateEvents.find(event => event.channel === channel && event.event === 'upstream.completed' && event.successfulExecution && wallets.gateEvents.some(drop => drop.event === 'response.dropped' && drop.channel === channel && drop.id === event.id && drop.nonce === event.nonce));
+      assert(completed?.nonce, 'Missing lost successful execution response');
+    }
+    for (const ledger of ['payments', 'workspace', 'requests', 'executions']) {
+      assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active && event.boundary === `${ledger}.cbor atomic rename`), `Missing ${ledger} commit fault evidence`);
+    }
+    const finalFaults = new Map(wallets.storageFaults.map(event => [`${event.receiverId}:${event.boundary}`, event.active]));
     assert([...finalFaults.values()].every(active => active === false));
     for (const fault of wallets.storageFaults.filter(event => event.phase === 'host' && event.active)) {
       assert(fault.faultId);

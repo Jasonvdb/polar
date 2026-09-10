@@ -140,3 +140,46 @@ test('guest probes use bounded exec in service namespace and keep digests out of
   assert(!args.some(value => String(value).includes(digest)));
   assert.throws(() => readGuestLedger(docker, 'owned-service', '../escape'));
 });
+
+test('execution and request commit faults are limited to their exact distinct ledgers', t => {
+  const root = temporary(t); const receiverId = randomUUID();
+  for (const [ledger, id] of [['executions', 'wallet-execution'], ['requests', receiverId], ['workspace', receiverId]]) {
+    const directory = path.join(root, 'receivers', id); fs.mkdirSync(directory, { recursive: true });
+    const target = path.join(directory, `${ledger}.cbor`); fs.writeFileSync(target, `original ${ledger}`);
+    const sdk = path.join(directory, 'sdk.cbor'); fs.writeFileSync(sdk, 'untouched');
+    const fault = storageFaults(root, () => {}, ledger);
+    assert.throws(() => fault.setLedgerWritable(ledger === 'executions' ? receiverId : 'wallet-execution', false), /scope/);
+    fault.setLedgerWritable(id, false);
+    assert(fs.statSync(target).isDirectory());
+    assert.equal(fs.readFileSync(sdk, 'utf8'), 'untouched');
+    fault.restoreFaults();
+    assert.equal(fs.readFileSync(target, 'utf8'), `original ${ledger}`);
+  }
+  assert.throws(() => storageFaults(root, () => {}, '../sdk'));
+});
+test('execution gate controls specify a matching wallet operation and accept proven execution readiness', async t => {
+  const root = temporary(t); const controls = gateControls(root);
+  const nonce = controls.arm('core', 'drop', 'sendrawtransaction');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'core.arm.json'))), { nonce, action: 'drop', operation: 'sendrawtransaction' });
+  assert.throws(() => controls.arm('lnd', 'drop', 'sendrawtransaction'));
+  atomicJson(path.join(root, `core.${nonce}.ready.json`), { nonce, successfulIssuance: false, successfulExecution: true });
+  assert.equal((await controls.waitReady('core', nonce)).successfulExecution, true);
+});
+test('shared execution guest probe uses only the fixed coordinator location', () => {
+  let args;
+  const docker = { withTimeout: (...input) => { args = input; return 'directory'; } };
+  assert.deepEqual(readGuestLedger(docker, 'owned-service', 'wallet-execution', 'executions'), { kind: 'directory' });
+  assert.equal(args.at(-1), '/data/receivers/wallet-execution/executions.cbor');
+  assert.throws(() => readGuestLedger(docker, 'owned-service', '../wallet-execution', 'executions'));
+  assert.throws(() => readGuestLedger(docker, 'owned-service', randomUUID(), 'executions'));
+});
+
+test('optional channel gate control accepts only LND openchannel and proven channel readiness', async t => {
+  const root = temporary(t); const controls = gateControls(root);
+  assert.throws(() => controls.arm('core', 'hold', 'openchannel'));
+  const nonce = controls.arm('lnd', 'hold', 'openchannel');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'lnd.arm.json'))), { nonce, action: 'hold', operation: 'openchannel' });
+  atomicJson(path.join(root, `lnd.${nonce}.ready.json`), { nonce, successfulIssuance: false, successfulExecution: false, successfulChannel: true, operation: 'openchannel', fundingTxid: 'a'.repeat(64), outputIndex: 0 });
+  const ready = await controls.waitReady('lnd', nonce);
+  assert.equal(ready.successfulChannel, true); assert.equal(ready.outputIndex, 0);
+});

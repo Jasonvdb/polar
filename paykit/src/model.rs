@@ -81,6 +81,8 @@ pub struct Event {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicState {
+    #[serde(default)]
+    pub funding: crate::request_model::FundingView,
     pub receiver_workspaces: Vec<crate::workspace_model::Workspace>,
     pub api_version: u8,
     pub environment_id: Uuid,
@@ -110,6 +112,8 @@ pub struct OperationRecord {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppState {
     #[serde(default)]
+    pub funding: crate::request_model::FundingView,
+    #[serde(default)]
     pub receiver_workspaces: Vec<crate::workspace_model::Workspace>,
     pub environment_id: Uuid,
     pub participants: Vec<OwnerRecord>,
@@ -123,6 +127,7 @@ impl AppState {
     pub fn new(environment_id: Uuid) -> Self {
         Self {
             environment_id,
+            funding: crate::request_model::FundingView::default(),
             receiver_workspaces: vec![],
             participants: vec![],
             receivers: vec![],
@@ -134,6 +139,7 @@ impl AppState {
     pub fn public(&self, ready: bool) -> PublicState {
         PublicState {
             api_version: 1,
+            funding: self.funding.clone(),
             receiver_workspaces: self.receiver_workspaces.clone(),
             environment_id: self.environment_id,
             ready,
@@ -203,3 +209,27 @@ impl std::fmt::Display for PublicError {
     }
 }
 impl std::error::Error for PublicError {}
+
+#[cfg(test)]
+mod funding_migration_tests {
+    use super::*;
+    #[test]
+    fn legacy_application_snapshot_projects_not_started_funding() {
+        let environment = Uuid::new_v4();
+        let state = AppState::new(environment);
+        let mut legacy = ciborium::value::Value::serialized(&state).unwrap();
+        legacy
+            .as_map_mut()
+            .unwrap()
+            .retain(|(key, _)| key.as_text() != Some("funding"));
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&legacy, &mut encoded).unwrap();
+        let recovered: AppState = ciborium::from_reader(encoded.as_slice()).unwrap();
+        assert_eq!(recovered.environment_id, environment);
+        assert_eq!(recovered.funding.status, "notStarted");
+        assert!(!recovered.funding.funded);
+        let public = serde_json::to_value(recovered.public(true)).unwrap();
+        assert_eq!(public["funding"]["status"], "notStarted");
+        assert_eq!(public["funding"]["funded"], false);
+    }
+}

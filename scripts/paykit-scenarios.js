@@ -140,7 +140,11 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     inspectMarker(wallet);
   }
   await require('./paykit-workspace-scenarios').run({ initial, state, command, request, stage, docker, serviceContainer, signal });
-  if (scope === 'full') await require('./paykit-payment-scenarios').run({ initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture });
+  if (scope === 'full') {
+    const context = { initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture };
+    await require('./paykit-payment-scenarios').run(context);
+    await require('./paykit-request-scenarios').run(context);
+  }
   stage('complete');
   return { scope, stages, environmentId: initial.environmentId, participantKeys: initial.participants.map(p => p.publicKey), receiverNoiseKeys: initial.receivers.map(r => r.noisePublicKey), passed: true };
 }

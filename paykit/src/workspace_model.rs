@@ -6,6 +6,14 @@ use uuid::Uuid;
 pub struct Workspace {
     pub receiver_id: Uuid,
     #[serde(default)]
+    pub requests: Vec<crate::request_model::RequestView>,
+    #[serde(default)]
+    pub executions: Vec<crate::request_model::ExecutionView>,
+    #[serde(default)]
+    pub proofs: Vec<crate::request_model::ProofView>,
+    #[serde(default)]
+    pub settlements: Vec<crate::request_model::SettlementView>,
+    #[serde(default)]
     pub payment_methods: crate::payment_model::MethodsView,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub public_payment_list: Option<crate::payment_model::ListView>,

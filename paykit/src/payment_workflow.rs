@@ -158,7 +158,10 @@ impl Runtime {
         self.payments.project(&mut self.state.view)?;
         Ok(json!({"receiverId":self.state.view.receiver_id,"workspace":self.state.view}))
     }
-    async fn validate_current_resolution(&self, r: &ResolutionView) -> anyhow::Result<()> {
+    pub(super) async fn validate_current_resolution(
+        &self,
+        r: &ResolutionView,
+    ) -> anyhow::Result<()> {
         anyhow::ensure!(
             !self.state.view.delivery_paused && r.source == "private" && r.status == "payable",
             "private resolution is not eligible"
@@ -197,7 +200,7 @@ impl Runtime {
             .find(|r| r.view.id == id)
             .ok_or_else(|| anyhow::anyhow!("reservation missing"))
     }
-    fn ensure_payment_peer(&self, key: &str, path: &str) -> anyhow::Result<()> {
+    pub(super) fn ensure_payment_peer(&self, key: &str, path: &str) -> anyhow::Result<()> {
         anyhow::ensure!(
             self.state
                 .view
@@ -552,7 +555,11 @@ impl Runtime {
         }
         Ok(())
     }
-    async fn resolve_payment(&self, id: String, i: Resolve) -> anyhow::Result<ResolutionView> {
+    pub(super) async fn resolve_payment(
+        &self,
+        id: String,
+        i: Resolve,
+    ) -> anyhow::Result<ResolutionView> {
         self.payments.selection(i.method.clone())?;
         let key = PubkyPublicKey::new(&i.peer_public_key)?;
         let path = PaykitReceiverPath::new(&i.peer_receiver_path)?;
@@ -714,6 +721,7 @@ mod publication_recovery_tests {
                 last_error: None,
             },
             wallet: Wallet {
+                bitcoin_backend_id: None,
                 id: "core-0".into(),
                 label: "offline test binding".into(),
                 bitcoin: Core {

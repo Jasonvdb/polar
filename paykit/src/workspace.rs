@@ -147,6 +147,9 @@ impl Runtime {
     }
     async fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let name = command.command.as_str();
+        if crate::request_input::is_command(name) {
+            return self.request_command(command).await;
+        }
         if crate::payment_input::is_command(name) {
             return self.payment_command(command).await;
         }
@@ -567,6 +570,7 @@ impl Runtime {
         Ok(())
     }
     pub async fn refresh(&mut self) -> anyhow::Result<()> {
+        self.project_requests().await?;
         self.payments.project(&mut self.state.view)?;
         let peers = self.sdk.linked_peers().await?;
         self.state.view.links = self
@@ -1108,3 +1112,6 @@ mod tests {
 
 #[path = "payment_workflow.rs"]
 mod payments;
+
+#[path = "request_workflow.rs"]
+mod requests;
