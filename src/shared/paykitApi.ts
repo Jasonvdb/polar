@@ -25,7 +25,7 @@ export interface PaykitOperation {
   id: string;
   command: string;
   status: 'queued' | 'running' | 'succeeded' | 'failed';
-  result?: unknown;
+  result?: PaykitOperationResult;
   error?: { code: string; message: string };
 }
 export interface PaykitState {
@@ -64,6 +64,16 @@ export const paykitCommands = [
   'contact.discover',
   'contact.publish',
   'contact.unpublish',
+  'method.configure',
+  'method.prefer',
+  'paymentList.publish',
+  'paymentList.unpublish',
+  'reservation.create',
+  'reservation.rotate',
+  'reservation.cancel',
+  'reservation.reconcile',
+  'paymentList.resolve',
+  'paymentList.consume',
 ] as const;
 export type PaykitCommand = (typeof paykitCommands)[number];
 export interface PaykitCommandRequest {
@@ -83,7 +93,7 @@ export const isUuid = (value: unknown): value is string =>
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
     value,
   );
-export type PaykitInput = Record<string, string | string[]>;
+export type PaykitInput = Record<string, string | string[] | number>;
 export interface PaykitLink {
   peerPublicKey: string;
   peerReceiverPath: string;
@@ -121,6 +131,85 @@ export interface PaykitDiscovery {
   receiverPaths: string[];
   updatedAt: string;
 }
+export const paykitMethods = ['btc-onchain', 'btc-lightning-bolt11'] as const;
+export type PaykitMethod = (typeof paykitMethods)[number];
+export interface PaykitPaymentMethods {
+  walletId?: string;
+  enabledMethods: string[];
+  preference: string[];
+  wallets: {
+    id: string;
+    label: string;
+    supportedMethods: string[];
+    status: 'configured';
+  }[];
+}
+export type PaykitDeliveryStatus = 'pending' | 'published' | 'queued' | 'sent' | 'failed';
+export type PaykitCleanupStatus = 'notRequired' | 'pending' | 'complete' | 'failed';
+export interface PaykitPublicPaymentList {
+  id: string;
+  amountSats: string;
+  createdAt: string;
+  expiresAt: string;
+  status: 'issuing' | 'active' | 'withdrawn' | 'expired' | 'superseded' | 'uncertain';
+  deliveryStatus: PaykitDeliveryStatus;
+  cleanupStatus: PaykitCleanupStatus;
+  lastError?: string;
+  reservationIds: string[];
+}
+export interface PaykitReservation {
+  id: string;
+  listId: string;
+  walletId: string;
+  source: 'public' | 'private';
+  peerPublicKey?: string;
+  peerReceiverPath?: string;
+  method: string;
+  endpoint?: string;
+  amountSats: string;
+  createdAt: string;
+  expiresAt: string;
+  status: 'issuing' | 'active' | 'cancelled' | 'expired' | 'superseded' | 'uncertain';
+  deliveryStatus: PaykitDeliveryStatus;
+  cleanupStatus: PaykitCleanupStatus;
+  outboundMessageId?: string;
+  lastError?: string;
+}
+export interface PaykitResolution {
+  id: string;
+  peerPublicKey: string;
+  peerReceiverPath: string;
+  source: 'public' | 'private';
+  amountSats: string;
+  createdAt: string;
+  method?: string;
+  endpoint?: string;
+  version?: string;
+  expiresAt?: string;
+  status:
+    | 'payable'
+    | 'noEndpoint'
+    | 'unsupportedEndpoint'
+    | 'waitingForUpdatedPaymentList'
+    | 'recoveryPending'
+    | 'consumed';
+  lastError?: string;
+}
+export interface PaykitOperationResult {
+  participantId?: string;
+  receiverId?: string;
+  preset?: string;
+  funded?: boolean;
+  peerPublicKey?: string;
+  peerReceiverPath?: string;
+  outboundMessageId?: string;
+  deliveryPaused?: boolean;
+  status?: string;
+  path?: string;
+  imageUri?: string;
+  workspace?: PaykitReceiverWorkspace;
+  resolution?: PaykitResolution;
+}
 export interface PaykitReceiverWorkspace {
   receiverId: string;
   deliveryPaused: boolean;
@@ -129,6 +218,10 @@ export interface PaykitReceiverWorkspace {
   profiles: PaykitProfile[];
   contacts: PaykitContact[];
   discoveries: PaykitDiscovery[];
+  paymentMethods?: PaykitPaymentMethods;
+  publicPaymentList?: PaykitPublicPaymentList;
+  reservations?: PaykitReservation[];
+  resolutions?: PaykitResolution[];
   lastError?: string;
   updatedAt?: string;
 }
@@ -159,6 +252,16 @@ export const paykitCommandFields: Record<PaykitCommand, string[]> = {
   'contact.discover': ['receiverId', 'peerPublicKey'],
   'contact.publish': peerFields,
   'contact.unpublish': peerFields,
+  'method.configure': ['receiverId', 'walletId', 'enabledMethods', 'preference'],
+  'method.prefer': ['receiverId', 'preference'],
+  'paymentList.publish': ['receiverId', 'amountSats', 'expirySeconds'],
+  'paymentList.unpublish': ['receiverId'],
+  'reservation.create': [...peerFields, 'amountSats', 'expirySeconds'],
+  'reservation.rotate': [...peerFields, 'amountSats', 'expirySeconds'],
+  'reservation.cancel': ['receiverId', 'reservationId'],
+  'reservation.reconcile': ['receiverId', 'reservationId'],
+  'paymentList.resolve': [...peerFields, 'source', 'amountSats', 'method'],
+  'paymentList.consume': ['receiverId', 'resolutionId'],
 };
 export const isPaykitPublicKey = (value: string) =>
   /^[ybndrfg8ejkmcpqxot1uwisza345h769]{51}[yo]$/.test(value);
@@ -204,6 +307,28 @@ export const validatePaykitCommand = (request: PaykitCommandRequest) => {
     throw new Error('Invalid Paykit command input');
   for (const field of expected) {
     const value = request.input[field];
+    if (field === 'method' && value === undefined) continue;
+    if (field === 'enabledMethods' || field === 'preference') {
+      if (
+        !Array.isArray(value) ||
+        value.length > 2 ||
+        (field === 'enabledMethods' && !value.length) ||
+        new Set(value).size !== value.length ||
+        value.some(method => !paykitMethods.includes(method as PaykitMethod))
+      )
+        throw new Error(`Invalid Paykit ${field}`);
+      continue;
+    }
+    if (field === 'expirySeconds') {
+      if (
+        typeof value !== 'number' ||
+        !Number.isSafeInteger(value) ||
+        value < 1 ||
+        value > 604800
+      )
+        throw new Error('Invalid Paykit expirySeconds');
+      continue;
+    }
     if (field === 'avatarBase64' || field === 'avatarMime') continue;
     if (field === 'receiverPaths') {
       if (
@@ -224,13 +349,26 @@ export const validatePaykitCommand = (request: PaykitCommandRequest) => {
           /[\u0000-\u001f\u007f-\u009f]/.test(
             value.replace(field === 'about' ? /[\n\t]/g : /$^/, ''),
           ))) ||
-      (field.endsWith('Id') && !isUuid(value)) ||
+      (field.endsWith('Id') && field !== 'walletId' && !isUuid(value)) ||
+      (field === 'walletId' && value.length > 128) ||
+      (field === 'amountSats' &&
+        (!/^[1-9][0-9]{0,15}$/.test(value) ||
+          BigInt(value) > BigInt('2100000000000000'))) ||
+      (field === 'source' && !['public', 'private'].includes(value)) ||
+      (field === 'method' && !paykitMethods.includes(value as PaykitMethod)) ||
       (field === 'kind' && !['wallet', 'server'].includes(value)) ||
       (field === 'peerPublicKey' && !isPaykitPublicKey(value)) ||
       (field === 'peerReceiverPath' && !isPaykitReceiverPath(value))
     )
       throw new Error(`Invalid Paykit ${field}`);
   }
+  if (
+    request.command === 'method.configure' &&
+    (request.input.preference as string[]).some(
+      method => !(request.input.enabledMethods as string[]).includes(method),
+    )
+  )
+    throw new Error('Preference must contain enabled methods');
   if (request.command === 'profile.publish') {
     const { avatarBase64, avatarMime } = request.input;
     if (avatarBase64 !== undefined || avatarMime !== undefined) {

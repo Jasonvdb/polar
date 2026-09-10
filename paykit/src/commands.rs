@@ -61,6 +61,7 @@ pub fn validate(command: &Command) -> Result<(), PublicError> {
             Ok(())
         }
         "preset.create" if command.input == serde_json::json!({}) => Ok(()),
+        value if crate::payment_input::is_command(value) => crate::payment_input::validate(command),
         value if workspace_command(value) => validate_workspace(command),
         _ => Err(PublicError::new(
             "unsupported_command",
@@ -205,26 +206,27 @@ pub struct ProfileInput {
     pub avatar_mime: Option<String>,
 }
 pub fn workspace_command(command: &str) -> bool {
-    matches!(
-        command,
-        "link.initiate"
-            | "link.accept"
-            | "link.advance"
-            | "link.block"
-            | "link.unblock"
-            | "link.sendEmptyList"
-            | "delivery.pause"
-            | "delivery.resume"
-            | "delivery.sync"
-            | "profile.publish"
-            | "profile.delete"
-            | "profile.fetch"
-            | "contact.save"
-            | "contact.remove"
-            | "contact.discover"
-            | "contact.publish"
-            | "contact.unpublish"
-    )
+    crate::payment_input::is_command(command)
+        || matches!(
+            command,
+            "link.initiate"
+                | "link.accept"
+                | "link.advance"
+                | "link.block"
+                | "link.unblock"
+                | "link.sendEmptyList"
+                | "delivery.pause"
+                | "delivery.resume"
+                | "delivery.sync"
+                | "profile.publish"
+                | "profile.delete"
+                | "profile.fetch"
+                | "contact.save"
+                | "contact.remove"
+                | "contact.discover"
+                | "contact.publish"
+                | "contact.unpublish"
+        )
 }
 fn valid_id(id: Uuid) -> Result<(), PublicError> {
     if id.is_nil() {

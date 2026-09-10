@@ -7,8 +7,9 @@ const path = require('path');
 const { randomUUID, randomBytes } = require('crypto');
 const { execFileSync } = require('child_process');
 const { run } = require('./paykit-scenarios');
+const { createWalletFixture } = require('./paykit-wallet-fixture');
 const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
-const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, 'complete'];
+const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, 'complete'];
 
 function validateReport(root) {
   const report = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));
@@ -25,7 +26,26 @@ function validateReport(root) {
   assert.equal(ledger.environments.length, 2);
   for (const environment of report.environments) {
     assert.equal(environment.passed, true);
-    assert(ledger.environments.some(item => item.environmentId === environment.environmentId));
+    const owned = ledger.environments.find(item => item.environmentId === environment.environmentId);
+    assert(owned);
+    const wallets = owned.wallets;
+    assert(wallets && wallets.lndContainers.length === 3);
+    assert.equal(new Set([wallets.coreContainer, ...wallets.lndContainers, wallets.gateContainer]).size, 5);
+    assert(wallets.readiness.every(item => item.syncedToChain && item.publicKey && item.version));
+    assert.equal(wallets.readiness.length, 3);
+    assert(wallets.gateCounts.core.issuanceSuccess >= 2);
+    assert(wallets.gateCounts.lnd.issuanceSuccess >= 1);
+    for (const channel of ['core', 'lnd']) {
+      const dropped = wallets.gateEvents.find(event => event.channel === channel && event.event === 'response.dropped');
+      assert(dropped && dropped.nonce);
+      assert(wallets.gateEvents.some(event => event.channel === channel && event.nonce === dropped.nonce && event.id === dropped.id && event.event === 'upstream.completed' && event.successfulIssuance));
+    }
+    const held = wallets.gateEvents.find(event => event.event === 'hold.finished' && event.action === 'relay' && event.reason === 'control');
+    assert(held && held.nonce);
+    assert(wallets.gateEvents.some(event => event.nonce === held.nonce && event.id === held.id && event.event === 'upstream.completed' && event.successfulIssuance));
+    assert(wallets.storageFaults.some(event => event.active === true));
+    const finalFaults = new Map(wallets.storageFaults.map(event => [event.receiverId, event.active]));
+    assert([...finalFaults.values()].every(active => active === false));
     assert.deepEqual(environment.stages, requiredStages);
     assert.equal(new Set(environment.participantKeys).size, 3);
     assert.equal(new Set(environment.receiverNoiseKeys).size, 4);
@@ -35,6 +55,8 @@ function validateReport(root) {
   assert(!a.participantKeys.some(key => b.participantKeys.includes(key)));
   assert(!a.receiverNoiseKeys.some(key => b.receiverNoiseKeys.includes(key)));
   assert.equal(report.survivingEnvironmentVerified, true);
+  assert.equal(report.survivingWalletEnvironmentVerified, true);
+  assert(!ledger.environments[0].wallets.readiness.some(aWallet => ledger.environments[1].wallets.readiness.some(bWallet => aWallet.publicKey === bWallet.publicKey)));
   return report;
 }
 
@@ -43,8 +65,9 @@ function start() {
   const runId = randomUUID();
   const label = `polar-paykit.test-run=${runId}`;
   const startedAt = new Date().toISOString();
-  const resources = { root, runId, nodeVersion: process.version, containers: [], networks: [], environments: [] };
+  const resources = { root, runId, nodeVersion: process.version, containers: [], containerDetails: [], networks: [], environments: [] };
   const journal = [];
+  const walletFixtures = [];
   let lastScenarioStage = 'run:started';
   const image = process.env.PAYKIT_TEST_IMAGE || 'polar-paykit/service:pr2';
   const postgres = 'postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af';
@@ -57,12 +80,21 @@ function start() {
     fs.writeFileSync(path.join(root, 'progress.json'), JSON.stringify(journal, null, 2));
     console.log(`[${entry.at}] ${stage}`);
   }
+  function recordContainer(id) {
+    resources.containers.push(id);
+    record();
+    const details = JSON.parse(docker('inspect', '--format', '{"id":{{json .Id}},"name":{{json .Name}},"created":{{json .Created}},"startedAt":{{json .State.StartedAt}},"image":{{json .Image}},"owner":{{json (index .Config.Labels "polar-paykit.test-run")}},"mounts":{{json .Mounts}}}', id));
+    assert.equal(details.owner, runId);
+    resources.containerDetails.push(details); record();
+  }
   async function environment(suffix, signal) {
     signal.throwIfAborted(); progress(`${suffix}:provisioning`);
     const environmentId = randomUUID();
     const prefix = `polar-paykit-ci-${runId.slice(0, 8)}-${suffix}`;
     const data = path.join(root, suffix);
     const secrets = path.join(data, 'credentials');
+    const entry = { environmentId, suffix, networkName: prefix };
+    resources.environments.push(entry); record();
     fs.mkdirSync(secrets, { recursive: true, mode: 0o700 });
     for (const name of ['master-key', 'api-token', 'postgres-password']) fs.writeFileSync(path.join(secrets, name), randomBytes(32).toString('hex'), { mode: 0o600 });
     for (const name of ['state', 'postgres']) fs.mkdirSync(path.join(data, name));
@@ -74,7 +106,7 @@ function start() {
     const database = docker('run', '-d', '--name', `${prefix}-postgres`, '--label', label, '--network', prefix, '--network-alias', 'paykit-postgres', '--user', uid,
       '-v', `${secrets}:/run/paykit:ro`, '-v', `${path.join(data, 'postgres')}:/var/lib/postgresql`,
       '-e', 'POSTGRES_USER=pubky', '-e', 'POSTGRES_DB=pubky', '-e', 'PGDATA=/var/lib/postgresql/18/docker', '-e', 'POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', postgres).trim();
-    resources.containers.push(database); record();
+    entry.database = database; recordContainer(database);
     let ready = false;
     for (let attempt = 0; attempt < 60; attempt++) {
       signal.throwIfAborted();
@@ -83,22 +115,25 @@ function start() {
     }
     if (!ready) throw new Error('PostgreSQL readiness timed out');
     signal.throwIfAborted();
+    const walletFixture = await createWalletFixture({ data, secrets, prefix, environmentId, uid, runId, docker, recordContainer, signal,
+      recordWallets: details => { entry.wallets = details; record(); } });
+    walletFixtures.push(walletFixture);
     const service = docker('run', '-d', '--init', '--name', `${prefix}-service`, '--label', label, '--network', prefix, '--user', uid,
       '-p', '127.0.0.1::10090', '-v', `${secrets}:/run/paykit:ro`, '-v', `${path.join(data, 'state')}:/data`,
       '-e', `PAYKIT_ENVIRONMENT_ID=${environmentId}`, '-e', 'PAYKIT_DATA_DIR=/data', '-e', 'PAYKIT_KEY_FILE=/run/paykit/master-key',
-      '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', image).trim();
-    resources.containers.push(service);
-    resources.environments.push({ environmentId, suffix, service, database }); record();
+      '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', '-e', 'PAYKIT_WALLET_CONFIG_FILE=/run/paykit/wallet-config.json', image).trim();
+    entry.service = service; recordContainer(service);
     signal.throwIfAborted();
     const base = serviceBase(service, docker);
     progress(`${suffix}:provisioned`);
     progress(`${suffix}:endpoint:${base}`);
-    return { base, tokenFile: path.join(secrets, 'api-token'), serviceContainer: service, postgresContainer: database };
+    return { base, tokenFile: path.join(secrets, 'api-token'), serviceContainer: service, postgresContainer: database, walletFixture };
   }
   async function work(signal) {
     const a = await environment('a', signal);
     const b = await environment('b', signal);
     const reportB = await run({ ...b, signal, progress: stage => progress(`b:${stage}`) });
+    const walletSurvivorBefore = b.walletFixture.walletSnapshot();
     const reportA = await run({ ...a, signal, progress: stage => progress(`a:${stage}`) });
     progress('isolation:survivor-check');
     signal.throwIfAborted();
@@ -108,11 +143,19 @@ function start() {
     assert.equal(survivor.status, 200);
     assert.deepEqual(survivor.data.participants.map(p => p.publicKey), reportB.participantKeys);
     assert(survivor.data.receivers.every(r => r.status === 'running'));
-    return { environments: [reportA, reportB], survivingEnvironmentVerified: true };
+    assert.deepEqual(b.walletFixture.walletSnapshot(), walletSurvivorBefore, 'Environment B wallets changed while A ran');
+    return { environments: [reportA, reportB], survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true };
   }
   function cleanup() {
     progress('cleanup:started');
     const result = { completed: false, remainingContainers: [], remainingNetworks: [], errors: [] };
+    for (const fixture of walletFixtures) {
+      try {
+        fixture.restoreFaults();
+        const entry = resources.environments.find(item => item.wallets?.gateContainer === fixture.gateContainer);
+        entry.wallets = fixture.evidence(); record();
+      } catch (_) { result.errors.push('Wallet fault restoration or evidence capture failed'); }
+    }
     // A timed-out Docker create may have committed before its ID reached stdout.
     // Reconcile the unique run label before deciding which resources require cleanup.
     try {

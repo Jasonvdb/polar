@@ -5,7 +5,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use paykit_sdk::{
-    PaykitReceiverCapabilities, PaykitReceiverPath, PaykitSdk, PaykitSdkConfig, PaymentAdapter,
+    PaykitReceiverCapabilities, PaykitReceiverPath, PaykitSdk, PaykitSdkConfig,
     PubkyLocalSecretKey, PubkySessionAccess, PubkySessionBootstrap, PubkySessionProvider,
     ReceiverNoiseSecretKey,
 };
@@ -75,10 +75,15 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
         secrets: Arc::new(Mutex::new(secrets)),
         vault: credentials.clone(),
     };
+    let payments = crate::wallet_adapter::WalletAdapter::open(
+        credentials.clone(),
+        config.environment_id,
+        owner.public_key().to_string(),
+    )?;
     let sdk = PaykitSdk::new(
         storage.clone(),
         provider.clone(),
-        UnsupportedPayments,
+        payments.clone(),
         sdk_config,
     )?;
     anyhow::ensure!(
@@ -107,6 +112,7 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
         id,
         owner.public_key(),
         provider,
+        payments,
     )?;
     runtime.refresh().await?;
     println!("{}", serde_json::json!({"ready":true,"receiverId":id}));
@@ -171,9 +177,6 @@ fn session_error() -> paykit_sdk::PaykitSdkError {
         source: None,
     }
 }
-pub(crate) struct UnsupportedPayments;
-#[async_trait]
-impl PaymentAdapter for UnsupportedPayments {}
 
 /// Fetch an actual public Pubky marker without opening local application state.
 pub async fn inspect_marker(owner: &str, path: &str) -> anyhow::Result<serde_json::Value> {
@@ -267,7 +270,7 @@ pub async fn inspect_private_list(
         let mut items=tx.private_stream_items(&owner,&path);
         items.sort_by_key(|i|i.stream_item_id);
         let valid=items.into_iter().filter_map(|item|paykit_lib::parse_private_payment_list_json(&item.raw_json).ok().map(|list|(item.stream_item_id,list))).collect::<Vec<_>>();
-        Ok(serde_json::json!({"receiverId":id,"validListCount":valid.len(),"latestStreamItemId":valid.last().map(|(id,_)|id.to_string()),"endpointCount":valid.last().map(|(_,list)|list.payment_endpoints.len())}))
+        Ok(serde_json::json!({"receiverId":id,"validListCount":valid.len(),"latestStreamItemId":valid.last().map(|(id,_)|id.to_string()),"endpointCount":valid.last().map(|(_,list)|list.payment_endpoints.len()),"paymentEndpoints":valid.last().map(|(_,list)|list.payment_endpoints.iter().map(|(id,payload)|serde_json::json!({"method":id.as_str(),"endpoint":payload.as_str()})).collect::<Vec<_>>())}))
     }).await.map_err(Into::into)
 }
 /// Independently read the explicit receiver-scoped public contact marker.
@@ -340,4 +343,28 @@ pub async fn inspect_avatar(
     Ok(
         serde_json::json!({"exists":true,"mime":mime,"size":bytes.len(),"base64":base64::engine::general_purpose::STANDARD.encode(bytes)}),
     )
+}
+
+/// Read actual public receiving endpoints without opening a receiver SDK snapshot.
+pub async fn inspect_payment_endpoints(
+    owner: &str,
+    path: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let owner = paykit_sdk::PubkyPublicKey::new(owner)?.to_public_key()?;
+    let path = PaykitReceiverPath::new(path)?;
+    let storage = pubky::Pubky::testnet()?.public_storage();
+    let mut endpoints = vec![];
+    for method in [crate::payment_model::ONCHAIN, crate::payment_model::BOLT11] {
+        if let Some(payload) = paykit_lib::get_payment_endpoint(
+            &storage,
+            &owner,
+            &path,
+            &paykit_lib::PaymentEndpointIdentifier::new(method)?,
+        )
+        .await?
+        {
+            endpoints.push(serde_json::json!({"method":method,"endpoint":payload.as_str()}));
+        }
+    }
+    Ok(serde_json::json!({"paymentEndpoints":endpoints}))
 }

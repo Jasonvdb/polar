@@ -120,3 +120,88 @@ The cumulative real scenario runner retains all eleven environment stages and ad
 Read caches retain the 16 most recent fetched profiles and 64 discovery results. Saved contacts and linked peers are never silently evicted: each receiver permits 128 contacts and 64 peer records, with visible limit errors before creating more. Existing records remain editable at the limit. This bounds receiver IPC previews independently of original avatar size.
 
 `inspect-avatar OWNER_KEY RECEIVER_PATH BLOB_NAME` reads one scoped original public avatar with the same size/content validation and returns its MIME, size and public base64 bytes (or `exists:false`). Real scenarios compare those bytes to the uploaded fixtures independently of thumbnail rendering.
+
+## Receiving methods and endpoint reservations
+
+Each receiver selects one trusted wallet binding with `method.configure`. Main owns
+`wallet-config.json` beside the API credentials and mounts that directory read-only.
+`PAYKIT_WALLET_CONFIG_FILE` points to the file; omitting it preserves the earlier
+Pubky-only environment with an empty wallet catalog. The version 1 file contains
+`environmentId` and `wallets`, each with `id`, `label`, `bitcoin` (`url`, `username`,
+`password`) and optional `lightning` (`url`, `tlsCertPath`, `macaroonPath`). Receiver
+commands accept a wallet ID, never RPC URLs or credentials. TLS verification stays
+enabled. The invoice macaroon needs only `invoices:read` and `invoices:write`.
+
+Canonical methods are `btc-onchain` and `btc-lightning-bolt11`. `enabledMethods` is
+nonempty and unique; `preference` is an ordered subset that may be empty. Amounts
+are canonical positive decimal **satoshi strings**, at most `2100000000000000`.
+SDK selection receives the same exact decimal with asset `sat`; no floating point
+or implicit BTC conversion is used. `expirySeconds` is an integer from 1 through 604800. BOLT11 validation checks the signature, regtest network, exact millisatoshi
+amount and actual invoice expiry against the system clock. Address validation uses
+the Bitcoin library's checksummed regtest address parser.
+
+The following commands use the existing asynchronous operation API, CLI and MCP
+command registry. Every input includes `receiverId`:
+
+- `method.configure`: `walletId`, `enabledMethods`, `preference`.
+- `method.prefer`: `preference`.
+- `paymentList.publish`: `amountSats`, `expirySeconds`. Creates and publishes the
+  complete enabled method set. `paymentList.unpublish` explicitly withdraws it.
+- `reservation.create` and `reservation.rotate`: `peerPublicKey`,
+  `peerReceiverPath`, `amountSats`, `expirySeconds`. Require an explicitly linked
+  peer; rotate supersedes the earlier whole private list.
+- `reservation.cancel` and `reservation.reconcile`: `reservationId`. Cancellation
+  makes the entire associated list ineligible before wallet cleanup and queues a
+  private withdrawal. Reconciliation uses the original issuance identity.
+- `paymentList.resolve`: `peerPublicKey`, `peerReceiverPath`, `source` (`public` or
+  `private`), `amountSats`, optional `method`. An explicit method or saved preference
+  is required. Private resolution never falls back to public storage.
+- `paymentList.consume`: `resolutionId`. Durably consumes a whole private list
+  version for this receiver, peer and path. This reserves use of the list; it does
+  **not** execute a payment. Another resolution of the same version, even on the
+  other rail, becomes ineligible. A newer list is required after restart too.
+
+Workspace fields `paymentMethods`, `publicPaymentList`, `reservations` and
+`resolutions` expose safe current state. Lifecycle, delivery and wallet cleanup
+have separate statuses. A queued withdrawal does not mean the remote receiver
+has observed it. Public history shows the latest 128 reservations and resolutions;
+internal issuance identities and consumed-version tombstones remain durable.
+
+The receiver's encrypted atomic `payments.cbor` ledger persists issuance IDs and
+reconciliation material before calling a wallet, then persists the actual endpoint
+before SDK publication. LND uses a random preimage saved before AddInvoice and
+reconciles by its hash; a confirmed missing invoice can be recreated only with
+that same identity. Core uses a unique `paykit-reservation-<UUID>` label in the
+participant wallet `paykit-<Pubky public key>`. An uncertain address issuance is
+looked up by label and is never blindly repeated. Bob's receivers share participant
+funds while keeping distinct receiver ledgers and reservation labels. Original
+wallet bindings remain with historical records for cleanup.
+
+Cancelled, expired and superseded Bitcoin addresses stay permanently assigned;
+withdrawal cannot invalidate an already disclosed address. No address pool is
+reused. Failed atomic commits poison further writes and prevent publication.
+Uncertain issuance blocks replacement until explicit reconciliation or cancellation.
+The SDK cancellation callback verifies reservation ID, peer, receiver path,
+identifier, payload hash and attribution before cleanup. Already shared endpoints
+are cleaned by the application; errors and SDK partial publication failures remain
+visible. Background expiry and cleanup continue while private delivery is paused.
+
+For independent diagnostics, `inspect-payment-endpoints OWNER PATH` reads actual
+public Pubky endpoints. `inspect-private-list RECEIVER PEER PATH` additionally
+returns the latest decrypted `paymentEndpoints`; the receiver must be stopped so
+the diagnostic can acquire its existing exclusive SDK lock. These commands expose
+endpoint payloads, never preimages, session grants, Noise keys or wallet credentials.
+Actual payments and settlement/proof processing follow in the next increment.
+
+The full disposable CLI demonstration is `node scripts/paykit-ci.js`: it provisions
+real wallets and the response-loss fixture, requires all 35 stages in both
+isolated environments and verifies owned-resource cleanup. Running
+`scripts/paykit-scenarios.js` against a pre-existing Pubky-only environment requires
+explicit `--pubky-only`; its report labels that narrower scope and contains the
+earlier 23 stages. A missing wallet fixture never silently counts as a full run.
+
+LND's generated certificate is trusted explicitly by the native TLS backend,
+which accepts its self-signed CA certificate as the server certificate while still
+checking its hostname and validity. This is scoped to the LND client. Independent
+verification must reject a different node's certificate and an unmatched hostname;
+TLS verification is never disabled.

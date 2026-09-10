@@ -21,6 +21,7 @@ describe('BitcoindService', () => {
   beforeEach(() => {
     // update the prototype of new classes to specify the return values
     mockProto.listWallets = jest.fn().mockResolvedValue(['']);
+    mockProto.loadWallet = jest.fn().mockRejectedValue({ code: -18 });
     mockProto.createWallet = jest.fn().mockResolvedValue({ name: '' });
     mockProto.getBlockchainInfo = jest.fn().mockResolvedValue({ blocks: 10 });
     mockProto.getWalletInfo = jest.fn().mockResolvedValue({ balance: 5 });
@@ -43,6 +44,31 @@ describe('BitcoindService', () => {
     await bitcoindService.createDefaultWallet(node);
     expect(getInst().listWallets).toBeCalledTimes(1);
     expect(getInst().createWallet).toBeCalledTimes(0);
+  });
+
+  it('addresses the default wallet explicitly when participant wallets are loaded', async () => {
+    mockProto.listWallets = jest.fn().mockResolvedValue(['', 'paykit-bob']);
+    await bitcoindService.createDefaultWallet(node);
+    expect(mockBitcoin.mock.instances[0]).toHaveProperty('allowDefaultWallet', true);
+    expect(getInst().createWallet).not.toHaveBeenCalled();
+    expect(getInst().loadWallet).not.toHaveBeenCalled();
+  });
+
+  it('loads an existing default wallet even if only Paykit wallets are loaded', async () => {
+    mockProto.listWallets = jest.fn().mockResolvedValue(['paykit-bob']);
+    mockProto.loadWallet = jest.fn().mockResolvedValue({ name: '' });
+    await bitcoindService.createDefaultWallet(node);
+    expect(getInst().loadWallet).toHaveBeenCalledWith('');
+    expect(getInst().createWallet).not.toHaveBeenCalled();
+  });
+
+  it('does not create another default wallet after an uncertain load failure', async () => {
+    mockProto.listWallets = jest.fn().mockResolvedValue(['paykit-bob']);
+    mockProto.loadWallet = jest.fn().mockRejectedValue(new Error('RPC unavailable'));
+    await expect(bitcoindService.createDefaultWallet(node)).rejects.toThrow(
+      'RPC unavailable',
+    );
+    expect(getInst().createWallet).not.toHaveBeenCalled();
   });
 
   it('should get blockchain info', async () => {

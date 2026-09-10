@@ -286,6 +286,7 @@ class ComposeFile {
         PAYKIT_TOKEN_FILE: '/run/paykit/api-token',
         PAYKIT_POSTGRES_PASSWORD_FILE: '/run/paykit/postgres-password',
         PAYKIT_POSTGRES_HOST: 'paykit-postgres',
+        PAYKIT_WALLET_CONFIG_FILE: '/run/paykit/wallet-config.json',
       },
       volumes: ['./volumes/paykit:/data', `${secrets}:/run/paykit:ro`],
       depends_on: { 'paykit-postgres': { condition: 'service_healthy' } },

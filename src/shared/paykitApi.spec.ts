@@ -135,3 +135,77 @@ describe('Paykit receiver command validation', () => {
     ).toThrow('PNG');
   });
 });
+
+describe('Payment method and reservation command validation', () => {
+  const receiverId = newPaykitId();
+  const peer = {
+    receiverId,
+    peerPublicKey: 'y'.repeat(52),
+    peerReceiverPath: 'bob/wallet',
+  };
+  const validate = (
+    command: PaykitCommandRequest['command'],
+    input: PaykitCommandRequest['input'],
+  ) => validatePaykitCommand({ commandId: newPaykitId(), command, input });
+  it('keeps exact satoshis as strings and expiry as bounded integers', () => {
+    expect(() =>
+      validate('paymentList.publish', {
+        receiverId,
+        amountSats: '2100000000000000',
+        expirySeconds: 604800,
+      }),
+    ).not.toThrow();
+    for (const amountSats of ['0', '-1', '1.5', '01', '1e3', '2100000000000001', 1000]) {
+      expect(() =>
+        validate('paymentList.publish', { receiverId, amountSats, expirySeconds: 3600 }),
+      ).toThrow('amountSats');
+    }
+    for (const expirySeconds of [0, 604801, 1.5, '3600']) {
+      expect(() =>
+        validate('reservation.create', { ...peer, amountSats: '1000', expirySeconds }),
+      ).toThrow('expirySeconds');
+    }
+  });
+  it('requires an explicit discovery source and rejects overrides and secret configuration', () => {
+    const input = { ...peer, source: 'private', amountSats: '1000' };
+    expect(() => validate('paymentList.resolve', input)).not.toThrow();
+    expect(() => validate('paymentList.resolve', { ...input, source: '' })).toThrow(
+      'source',
+    );
+    expect(() => validate('paymentList.resolve', { ...input, method: 'bolt12' })).toThrow(
+      'method',
+    );
+    expect(() =>
+      validate('paymentList.resolve', { ...input, url: 'https://other' }),
+    ).toThrow('input');
+    expect(() =>
+      validate('paymentList.consume', { receiverId, resolutionId: newPaykitId() }),
+    ).not.toThrow();
+  });
+  it('requires unique supported rails and a preference subset when configuring', () => {
+    const input = {
+      receiverId,
+      walletId: 'lnd-0-core-0',
+      enabledMethods: ['btc-onchain'],
+      preference: [],
+    };
+    expect(() => validate('method.configure', input)).not.toThrow();
+    for (const enabledMethods of [[], ['btc-onchain', 'btc-onchain'], ['bolt12']]) {
+      expect(() => validate('method.configure', { ...input, enabledMethods })).toThrow(
+        'enabledMethods',
+      );
+    }
+    expect(() =>
+      validate('method.configure', { ...input, preference: ['btc-lightning-bolt11'] }),
+    ).toThrow('Preference');
+    expect(() =>
+      validate('method.prefer', {
+        receiverId,
+        preference: ['btc-onchain', 'btc-onchain'],
+      }),
+    ).toThrow('preference');
+    expect(() =>
+      validate('method.configure', { ...input, macaroonPath: '/secret' }),
+    ).toThrow('input');
+  });
+});

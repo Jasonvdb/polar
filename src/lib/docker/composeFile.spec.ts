@@ -259,6 +259,12 @@ describe('Paykit compose isolation', () => {
       '/run/paykit/postgres-password',
     );
     expect(database.environment?.POSTGRES_PASSWORD).toBeUndefined();
+    expect(paykit.environment?.PAYKIT_WALLET_CONFIG_FILE).toBe(
+      '/run/paykit/wallet-config.json',
+    );
+    expect(paykit.volumes).not.toEqual(
+      expect.arrayContaining([expect.stringContaining('/volumes/lnd')]),
+    );
     expect(paykit.depends_on).toEqual({
       'paykit-postgres': { condition: 'service_healthy' },
     });

@@ -2,7 +2,7 @@ import { randomBytes } from 'crypto';
 import { promises as fs } from 'fs';
 import { request as httpRequest } from 'http';
 import { createServer } from 'net';
-import { join, resolve } from 'path';
+import { join, resolve, relative, isAbsolute } from 'path';
 import {
   isUuid,
   safePaykitAvatar,
@@ -11,7 +11,8 @@ import {
   PaykitRequest,
   validatePaykitCommand,
 } from '../src/shared/paykitApi';
-import { paykitConfig } from '../src/shared/paykitConfig';
+import { bitcoinCredentials } from '../src/shared/bitcoinConfig';
+import { getNamespacedContainerName, paykitConfig } from '../src/shared/paykitConfig';
 
 const credentialsRoot = () => join(paykitConfig.dataPath, 'paykit-credentials');
 const referencePath = (networkId: number) =>
@@ -64,7 +65,7 @@ async function getBinding(networkId: number): Promise<PaykitEnvironment> {
   };
 }
 
-async function writeCredential(path: string, value: string) {
+async function writeCredential(path: string, value: string | Buffer) {
   const file = await fs.open(path, 'wx', 0o600);
   try {
     await file.writeFile(value);
@@ -143,6 +144,137 @@ async function provision(networkId: number): Promise<PaykitEnvironment> {
   await pending;
   return result!;
 }
+
+interface WalletBinding {
+  id: string;
+  label: string;
+  bitcoin: { url: string; username: string; password: string };
+  lightning?: { url: string; tlsCertPath: string; macaroonPath: string };
+}
+/** Derive trusted endpoints from persisted local nodes, never from command input. */
+export function walletBindings(network: any): WalletBinding[] {
+  const bitcoin = network.nodes?.bitcoin;
+  const lightning = network.nodes?.lightning;
+  if (!Array.isArray(bitcoin) || !Array.isArray(lightning))
+    throw new Error('Invalid Paykit wallet nodes');
+  const names = new Set<string>();
+  for (const nodes of [bitcoin, lightning]) {
+    const ids = new Set<number>();
+    for (const node of nodes) {
+      if (
+        !Number.isSafeInteger(node.id) ||
+        node.id < 0 ||
+        ids.has(node.id) ||
+        node.networkId !== network.id ||
+        typeof node.name !== 'string' ||
+        !/^[a-z0-9][a-z0-9-]{0,63}$/.test(node.name) ||
+        names.has(node.name)
+      )
+        throw new Error('Invalid Paykit wallet node identity');
+      names.add(node.name);
+      ids.add(node.id);
+    }
+  }
+  const core = bitcoin.filter(node => node.implementation === 'bitcoind');
+  const coreConfig = (node: any) => ({
+    url: `http://${getNamespacedContainerName(network.id, node.name)}:18443`,
+    username: bitcoinCredentials.user,
+    password: bitcoinCredentials.pass,
+  });
+  const wallets: WalletBinding[] = core.map(node => ({
+    id: `core-${node.id}`,
+    label: `Bitcoin / ${node.name}`,
+    bitcoin: coreConfig(node),
+  }));
+  for (const node of lightning.filter(node => node.implementation === 'LND')) {
+    const backend = core.find(item => item.name === node.backendName);
+    if (!backend) continue;
+    const id = `lnd-${node.id}-core-${backend.id}`;
+    wallets.push({
+      id,
+      label: `Lightning / ${node.name} + Bitcoin / ${backend.name}`,
+      bitcoin: coreConfig(backend),
+      lightning: {
+        url: `https://${getNamespacedContainerName(network.id, node.name)}:8080`,
+        tlsCertPath: `/run/paykit/wallets/${id}/tls.cert`,
+        macaroonPath: `/run/paykit/wallets/${id}/invoices.macaroon`,
+      },
+    });
+  }
+  return wallets;
+}
+async function replaceCredential(path: string, value: Buffer | string) {
+  try {
+    if ((await fs.readFile(path)).equals(Buffer.from(value))) return;
+  } catch (error: any) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  const temporary = `${path}.${newPaykitId()}.tmp`;
+  try {
+    await writeCredential(temporary, value);
+    await fs.rename(temporary, path);
+  } finally {
+    await fs.rm(temporary, { force: true });
+  }
+}
+// Main refreshes only two narrow credential files after LND creates them. No wallet
+// directory is mounted into Paykit; initial absence leaves Pubky usable.
+export async function refreshWalletConfig(network: any, binding: PaykitEnvironment) {
+  const wallets = walletBindings(network);
+  const root = join(credentialsRoot(), binding.environmentId);
+  for (const wallet of wallets) {
+    if (!wallet.lightning) continue;
+    const node = network.nodes.lightning.find((item: any) =>
+      wallet.id.startsWith(`lnd-${item.id}-core-`),
+    );
+    const sourceRoot = join(network.path, 'volumes', 'lnd', node.name);
+    const targetRoot = join(root, 'wallets', wallet.id);
+    await fs.mkdir(targetRoot, { recursive: true, mode: 0o700 });
+    for (const [name, source] of [
+      ['tls.cert', join(sourceRoot, 'tls.cert')],
+      [
+        'invoices.macaroon',
+        join(sourceRoot, 'data', 'chain', 'bitcoin', 'regtest', 'invoices.macaroon'),
+      ],
+    ]) {
+      try {
+        const real = await fs.realpath(source);
+        const networkRoot = await fs.realpath(network.path);
+        const within = relative(networkRoot, real);
+        if (
+          within.startsWith('..') ||
+          isAbsolute(within) ||
+          real !== resolve(networkRoot, relative(network.path, source))
+        )
+          throw new Error('Paykit wallet credential escaped its network');
+        const stat = await fs.stat(real);
+        if (!stat.isFile() || stat.size > 65536)
+          throw new Error('Invalid Paykit wallet credential file');
+        await replaceCredential(join(targetRoot, name), await fs.readFile(real));
+      } catch (error: any) {
+        if (error.code !== 'ENOENT') throw error;
+        // A removed credential must not leave an old authorization copy in use.
+        await fs.rm(join(targetRoot, name), { force: true });
+      }
+    }
+    await syncDirectory(targetRoot);
+  }
+  await replaceCredential(
+    join(root, 'wallet-config.json'),
+    JSON.stringify({
+      apiVersion: 1,
+      environmentId: binding.environmentId,
+      wallets,
+    }),
+  );
+  await syncDirectory(root);
+}
+let walletRefresh = Promise.resolve();
+const refreshWallets = (network: any, binding: PaykitEnvironment) => {
+  const pending = walletRefresh.then(() => refreshWalletConfig(network, binding));
+  walletRefresh = pending.catch(() => undefined);
+  return pending;
+};
 
 /** Finite, authenticated requests. Only fixed loopback paths and public payloads are accepted. */
 async function callService(
@@ -236,8 +368,74 @@ const publicProfile = (value: any) => ({
     ? { avatarDataUrl: safePaykitAvatar(value.avatarDataUrl) }
     : {}),
 });
+const publicResolution = (value: any) =>
+  fields(value, [
+    'id',
+    'peerPublicKey',
+    'peerReceiverPath',
+    'source',
+    'amountSats',
+    'createdAt',
+    'method',
+    'endpoint',
+    'version',
+    'expiresAt',
+    'status',
+    'lastError',
+  ]);
+const publicReservation = (value: any) =>
+  fields(value, [
+    'id',
+    'listId',
+    'walletId',
+    'source',
+    'peerPublicKey',
+    'peerReceiverPath',
+    'method',
+    'endpoint',
+    'amountSats',
+    'createdAt',
+    'expiresAt',
+    'status',
+    'deliveryStatus',
+    'cleanupStatus',
+    'outboundMessageId',
+    'lastError',
+  ]);
 export const publicWorkspace = (value: any) => ({
   ...fields(value, ['receiverId', 'deliveryPaused', 'lastError', 'updatedAt']),
+  ...(value.paymentMethods && typeof value.paymentMethods === 'object'
+    ? {
+        paymentMethods: {
+          ...fields(value.paymentMethods, ['walletId']),
+          enabledMethods: strings(value.paymentMethods.enabledMethods),
+          preference: strings(value.paymentMethods.preference),
+          wallets: list(value.paymentMethods.wallets, item => ({
+            ...fields(item, ['id', 'label', 'status']),
+            supportedMethods: strings(item.supportedMethods),
+          })),
+        },
+      }
+    : {}),
+  ...(value.publicPaymentList && typeof value.publicPaymentList === 'object'
+    ? {
+        publicPaymentList: {
+          ...fields(value.publicPaymentList, [
+            'id',
+            'amountSats',
+            'createdAt',
+            'expiresAt',
+            'status',
+            'deliveryStatus',
+            'cleanupStatus',
+            'lastError',
+          ]),
+          reservationIds: strings(value.publicPaymentList.reservationIds),
+        },
+      }
+    : {}),
+  reservations: list(value.reservations, publicReservation),
+  resolutions: list(value.resolutions, publicResolution),
   links: list(value.links, item =>
     fields(item, [
       'peerPublicKey',
@@ -291,6 +489,9 @@ export const publicOperation = (value: any) => ({
             'path',
             'imageUri',
           ]),
+          ...(value.result.resolution && typeof value.result.resolution === 'object'
+            ? { resolution: publicResolution(value.result.resolution) }
+            : {}),
           ...(value.result.workspace && typeof value.result.workspace === 'object'
             ? { workspace: publicWorkspace(value.result.workspace) }
             : {}),
@@ -326,7 +527,11 @@ export const publicState = (value: any, environmentId: string) => {
 
 export async function paykitProxy(args: PaykitRequest): Promise<any> {
   const network = await getNetwork(args.networkId);
-  if (args.action === 'provision') return provision(args.networkId);
+  if (args.action === 'provision') {
+    const binding = await provision(args.networkId);
+    await refreshWallets(network, binding);
+    return binding;
+  }
   const binding = await getBinding(args.networkId);
   if (
     !network.paykit ||
@@ -336,6 +541,8 @@ export async function paykitProxy(args: PaykitRequest): Promise<any> {
   ) {
     throw new Error('Paykit environment binding does not match this network');
   }
+  if (['checkPort', 'state', 'command'].includes(args.action))
+    await refreshWallets(network, binding);
   if (args.action === 'checkPort') return checkPort(binding.servicePort);
   if (args.action === 'remove') {
     await fs.rm(join(credentialsRoot(), binding.environmentId), {

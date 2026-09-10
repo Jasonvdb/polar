@@ -1,6 +1,12 @@
 import { promises as fs } from 'fs';
-import { join } from 'path';
-import { paykitProxy, publicOperation, publicState } from '../../electron/paykitProxy';
+import { join, resolve } from 'path';
+import {
+  paykitProxy,
+  publicOperation,
+  publicState,
+  walletBindings,
+  refreshWalletConfig,
+} from '../../electron/paykitProxy';
 import { paykitConfig } from './paykitConfig';
 
 jest.mock('fs', () => ({
@@ -13,6 +19,9 @@ jest.mock('fs', () => ({
     mkdir: jest.fn(),
     rm: jest.fn(),
     unlink: jest.fn(),
+    rename: jest.fn(),
+    realpath: jest.fn(),
+    stat: jest.fn(),
   },
 }));
 jest.mock('net', () => ({
@@ -118,7 +127,10 @@ describe('Main process Paykit boundary', () => {
   });
   it('provisions exclusive credential files outside export directories and returns no secrets', async () => {
     fsMock.readFile.mockImplementation(async path => {
-      if (`${path}`.endsWith('network-1.json'))
+      if (
+        `${path}`.endsWith('network-1.json') ||
+        `${path}`.endsWith('wallet-config.json')
+      )
         throw Object.assign(new Error('missing'), { code: 'ENOENT' });
       return JSON.stringify({ networks: [network()] });
     });
@@ -129,7 +141,7 @@ describe('Main process Paykit boundary', () => {
       'servicePort',
     ]);
     const writes = fsMock.open.mock.calls.filter(([, mode]) => mode === 'wx');
-    expect(writes).toHaveLength(4);
+    expect(writes).toHaveLength(5);
     for (const [path, flags, mode] of writes) {
       expect(`${path}`).toContain('paykit-credentials');
       expect(`${path}`).not.toContain('/networks/');
@@ -214,5 +226,204 @@ describe('Recursive public receiver projection', () => {
       'app/wallet',
     ]);
     expect(operation.result).not.toHaveProperty('receiverId');
+  });
+});
+
+describe('Trusted receiving wallet configuration', () => {
+  const walletNetwork = () => ({
+    ...network(),
+    nodes: {
+      bitcoin: [
+        { id: 0, networkId: 1, name: 'backend1', implementation: 'bitcoind' },
+        { id: 3, networkId: 1, name: 'backend2', implementation: 'bitcoind' },
+      ],
+      lightning: [
+        {
+          id: 0,
+          networkId: 1,
+          name: 'alice',
+          implementation: 'LND',
+          backendName: 'backend1',
+          paths: { tlsCert: '/ignored/untrusted/path' },
+        },
+      ],
+    },
+  });
+  beforeEach(() => {
+    fsMock.readFile.mockRejectedValue(
+      Object.assign(new Error('not ready'), { code: 'ENOENT' }),
+    );
+    fsMock.realpath.mockImplementation(async path => resolve(`${path}`));
+    fsMock.stat.mockResolvedValue({ isFile: () => true, size: 32 } as any);
+    fsMock.open.mockResolvedValue({
+      writeFile: jest.fn(),
+      sync: jest.fn(),
+      close: jest.fn(),
+    } as any);
+  });
+  it('uses stable zero-based IDs and exact backend bindings independently of order or labels', () => {
+    const input = walletNetwork();
+    const original = walletBindings(input);
+    expect(original.map(wallet => wallet.id)).toEqual([
+      'core-0',
+      'core-3',
+      'lnd-0-core-0',
+    ]);
+    expect(original[2].lightning?.url).toMatch(
+      /^https:\/\/polar-paykit.*-n1-alice:8080$/,
+    );
+    expect(original[2].bitcoin.url).toMatch(/-n1-backend1:18443$/);
+    input.nodes.bitcoin.reverse();
+    input.nodes.bitcoin[1].name = 'renamed';
+    input.nodes.lightning[0].backendName = 'renamed';
+    expect(walletBindings(input)[2].id).toBe(original[2].id);
+    input.nodes.lightning[0].backendName = 'missing';
+    expect(walletBindings(input)).toHaveLength(2);
+  });
+  it('rejects path injection, duplicate IDs and cross-network nodes', () => {
+    for (const change of [
+      { name: '../escape' },
+      { name: 'bad:8080' },
+      { networkId: 2 },
+      { id: -1 },
+    ]) {
+      const input = walletNetwork();
+      Object.assign(input.nodes.lightning[0], change);
+      expect(() => walletBindings(input)).toThrow('identity');
+    }
+    const input = walletNetwork();
+    input.nodes.bitcoin[1].id = 0;
+    expect(() => walletBindings(input)).toThrow('identity');
+  });
+  it('publishes atomic versioned config while missing LND credentials leave Pubky available', async () => {
+    await expect(
+      refreshWalletConfig(walletNetwork(), binding as any),
+    ).resolves.toBeUndefined();
+    const writes = fsMock.open.mock.calls.filter(([, mode]) => mode === 'wx');
+    expect(writes).toHaveLength(1);
+    expect(`${writes[0][0]}`).toMatch(/wallet-config\.json\..*\.tmp$/);
+    expect(writes[0][2]).toBe(0o600);
+    expect(fsMock.rename).toHaveBeenCalledWith(
+      writes[0][0],
+      expect.stringMatching(/wallet-config\.json$/),
+    );
+    const handle = await fsMock.open.mock.results[0].value;
+    const data = JSON.parse(handle.writeFile.mock.calls[0][0]);
+    expect(data).toMatchObject({ apiVersion: 1, environmentId: envId });
+    expect(data.wallets[2].lightning.macaroonPath).toContain('/invoices.macaroon');
+    expect(JSON.stringify(data)).not.toContain('/ignored/untrusted/path');
+  });
+  it('copies only bounded TLS and invoice authorization files and does not rewrite unchanged files', async () => {
+    fsMock.readFile.mockImplementation(async path => {
+      if (`${path}`.includes('/volumes/lnd/')) return Buffer.from('credential');
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    await refreshWalletConfig(walletNetwork(), binding as any);
+    const sources = fsMock.readFile.mock.calls
+      .map(([path]) => `${path}`)
+      .filter(path => path.includes('/volumes/lnd/'));
+    expect(sources).toEqual([
+      expect.stringMatching(/\/alice\/tls.cert$/),
+      expect.stringMatching(/\/alice\/data\/chain\/bitcoin\/regtest\/invoices.macaroon$/),
+    ]);
+    expect(sources.join()).not.toContain('admin.macaroon');
+    expect(fsMock.mkdir).toHaveBeenCalledWith(
+      expect.stringContaining('/wallets/lnd-0-core-0'),
+      { recursive: true, mode: 0o700 },
+    );
+    fsMock.rename.mockClear();
+    const config = JSON.stringify({
+      apiVersion: 1,
+      environmentId: envId,
+      wallets: walletBindings(walletNetwork()),
+    });
+    fsMock.readFile.mockImplementation(async path =>
+      Buffer.from(`${path}`.endsWith('wallet-config.json') ? config : 'credential'),
+    );
+    await refreshWalletConfig(walletNetwork(), binding as any);
+    expect(fsMock.rename).not.toHaveBeenCalled();
+  });
+  it('rejects escaped or oversized credential files before copying', async () => {
+    fsMock.realpath.mockImplementation(async path =>
+      `${path}`.endsWith('tls.cert') ? '/other/network/tls.cert' : resolve(`${path}`),
+    );
+    await expect(refreshWalletConfig(walletNetwork(), binding as any)).rejects.toThrow(
+      'escaped',
+    );
+    expect(fsMock.rename).not.toHaveBeenCalled();
+    fsMock.realpath.mockImplementation(async path => resolve(`${path}`));
+    fsMock.stat.mockResolvedValue({ isFile: () => true, size: 65537 } as any);
+    await expect(refreshWalletConfig(walletNetwork(), binding as any)).rejects.toThrow(
+      'Invalid',
+    );
+  });
+  it('does not replace valid configuration if the atomic credential write fails', async () => {
+    fsMock.open.mockRejectedValue(new Error('Storage unavailable'));
+    await expect(refreshWalletConfig(walletNetwork(), binding as any)).rejects.toThrow(
+      'Storage unavailable',
+    );
+    expect(fsMock.rename).not.toHaveBeenCalled();
+  });
+});
+
+describe('Public payment projections', () => {
+  it('recursively drops wallet credentials, private issuance data and injected objects', () => {
+    const secret = { secret: 'hidden' };
+    const resolution = {
+      id: 'resolution',
+      amountSats: '2100000000000000',
+      version: '18446744073709551615',
+      source: 'private',
+      status: 'payable',
+      endpoint: 'lnbcrt1public',
+      preimage: 'hidden',
+      lastError: secret,
+    };
+    const workspace = {
+      receiverId: 'receiver',
+      paymentMethods: {
+        walletId: 'lnd-0-core-0',
+        enabledMethods: ['btc-onchain', secret],
+        preference: ['btc-onchain'],
+        wallets: [
+          {
+            id: 'lnd-0-core-0',
+            label: 'Alice',
+            status: 'configured',
+            supportedMethods: ['btc-onchain'],
+            bitcoin: secret,
+            lightning: secret,
+          },
+        ],
+      },
+      publicPaymentList: { id: 'list', reservationIds: ['reservation', secret], secret },
+      reservations: [
+        {
+          id: 'reservation',
+          amountSats: '2100000000000000',
+          endpoint: 'bcrt1public',
+          preimage: 'hidden',
+          payloadHash: 'hidden',
+          walletConfig: secret,
+        },
+      ],
+      resolutions: [resolution],
+    };
+    const projected = publicOperation({
+      id: 'operation',
+      result: { receiverId: 'receiver', workspace, resolution, masterKey: 'hidden' },
+    });
+    expect(JSON.stringify(projected)).not.toContain('hidden');
+    expect(projected.result?.resolution).toEqual({
+      id: 'resolution',
+      amountSats: '2100000000000000',
+      version: '18446744073709551615',
+      source: 'private',
+      status: 'payable',
+      endpoint: 'lnbcrt1public',
+    });
+    expect(projected.result?.workspace?.paymentMethods?.enabledMethods).toEqual([
+      'btc-onchain',
+    ]);
   });
 });

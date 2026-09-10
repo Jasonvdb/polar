@@ -18,7 +18,7 @@ use uuid::Uuid;
 pub(crate) type Sdk = PaykitSdk<
     Arc<ReceiverStorage>,
     crate::receiver::SessionProvider,
-    crate::receiver::UnsupportedPayments,
+    crate::wallet_adapter::WalletAdapter,
 >;
 const FAILURE: &str = "The receiver operation failed. Check peer state and local services. An interrupted command requires reconciliation before another attempt.";
 #[derive(Clone, Serialize, Deserialize)]
@@ -43,6 +43,7 @@ pub struct Runtime {
     state: LocalState,
     owner: PubkyPublicKey,
     sessions: crate::receiver::SessionProvider,
+    payments: crate::wallet_adapter::WalletAdapter,
 }
 impl Runtime {
     pub(crate) fn new(
@@ -52,6 +53,7 @@ impl Runtime {
         id: Uuid,
         owner: PubkyPublicKey,
         sessions: crate::receiver::SessionProvider,
+        payments: crate::wallet_adapter::WalletAdapter,
     ) -> anyhow::Result<Self> {
         let mut state: LocalState = vault.load("workspace.cbor")?.unwrap_or_else(|| LocalState {
             view: Workspace {
@@ -86,6 +88,7 @@ impl Runtime {
             state,
             owner,
             sessions,
+            payments,
         })
     }
     pub fn view(&self) -> Workspace {
@@ -151,6 +154,9 @@ impl Runtime {
     }
     async fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let name = command.command.as_str();
+        if crate::payment_input::is_command(name) {
+            return self.payment_command(command).await;
+        }
         if name.starts_with("link.") {
             let i: PeerInput = serde_json::from_value(command.input.clone())?;
             let key = PubkyPublicKey::new(&i.peer_public_key)?;
@@ -534,7 +540,7 @@ impl Runtime {
         Ok(())
     }
     async fn sync(&self) -> anyhow::Result<()> {
-        let mut failed = false;
+        let mut failed = self.payment_maintenance().await.is_err();
         for peer in self.sdk.linked_peers().await? {
             if peer.state == LinkedPeerState::Linking
                 && !self.state.uncertain_peers.contains(&(
@@ -572,6 +578,7 @@ impl Runtime {
         Ok(())
     }
     pub async fn refresh(&mut self) -> anyhow::Result<()> {
+        self.payments.project(&mut self.state.view)?;
         let peers = self.sdk.linked_peers().await?;
         self.state.view.links = self
             .storage
@@ -761,10 +768,13 @@ mod tests {
                 .unwrap(),
         );
         let provider = crate::receiver::SessionProvider::without_access(vault.clone());
+        let payments =
+            crate::wallet_adapter::WalletAdapter::open(vault.clone(), receiver, "test".into())
+                .unwrap();
         let sdk = PaykitSdk::new(
             storage.clone(),
             provider.clone(),
-            crate::receiver::UnsupportedPayments,
+            payments.clone(),
             paykit_sdk::PaykitSdkConfig::new(PaykitReceiverPath::new("test/wallet").unwrap()),
         )
         .unwrap();
@@ -775,6 +785,7 @@ mod tests {
             receiver,
             PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
             provider,
+            payments,
         )
         .unwrap()
     }
@@ -1105,3 +1116,6 @@ mod tests {
         assert!(serde_json::from_value::<Workspace>(view).is_err());
     }
 }
+
+#[path = "payment_workflow.rs"]
+mod payments;

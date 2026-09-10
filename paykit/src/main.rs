@@ -41,6 +41,14 @@ async fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
         }
+        Some("inspect-payment-endpoints") => {
+            anyhow::ensure!(args.len() == 3, "owner and path required");
+            println!(
+                "{}",
+                receiver::inspect_payment_endpoints(&args[1], &args[2]).await?
+            );
+            Ok(())
+        }
         Some("inspect-private-list") => {
             anyhow::ensure!(args.len() == 4, "receiver, peer and path required");
             let value = receiver::inspect_private_list(
