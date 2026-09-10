@@ -266,7 +266,7 @@ describe('EclairService', () => {
         implementation: 'eclair',
         name: 'carol',
         networkId: 1,
-        ports: { p2p: 9937, rest: 8283 },
+        ports: { p2p: 29937, rest: 28283 },
         status: 3,
         type: 'lightning',
         version: defaultRepoState.images.eclair.latest,

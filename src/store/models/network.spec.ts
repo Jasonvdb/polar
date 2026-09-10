@@ -656,14 +656,14 @@ describe('Network model', () => {
       const network = firstNetwork();
       await start(network.id);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning[0].ports.grpc).toBe(10001);
-      expect(lightning[4].ports.grpc).toBe(10005);
+      expect(lightning[0].ports.grpc).toBe(30001);
+      expect(lightning[4].ports.grpc).toBe(30005);
       expect(injections.dockerService.saveComposeFile).toHaveBeenCalledTimes(0);
       expect(injections.dockerService.saveNetworks).toHaveBeenCalledTimes(0);
     });
 
     it('should save compose file and networks when a port is in use', async () => {
-      const portsInUse = [10001];
+      const portsInUse = [30001];
       detectPortMock.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -680,8 +680,8 @@ describe('Network model', () => {
       const network = firstNetwork();
       await start(network.id);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning[0].ports.grpc).toBe(10002);
-      expect(lightning[4].ports.grpc).toBe(10005);
+      expect(lightning[0].ports.grpc).toBe(30002);
+      expect(lightning[4].ports.grpc).toBe(30005);
       expect(injections.dockerService.saveComposeFile).toHaveBeenCalledTimes(1);
       expect(injections.dockerService.saveNetworks).toHaveBeenCalledTimes(1);
     });
@@ -941,7 +941,7 @@ describe('Network model', () => {
     });
 
     it('should update node ports when starting', async () => {
-      const portsInUse = [8084];
+      const portsInUse = [28084];
       detectPortMock.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -950,7 +950,7 @@ describe('Network model', () => {
       await toggleNode(node);
       // get a reference to the updated nodes
       node = firstNetwork().nodes.lightning[4];
-      expect(node.ports.rest).toBe(8085);
+      expect(node.ports.rest).toBe(28085);
     });
 
     it('should start the node with its updated ports, not the stale ones', async () => {

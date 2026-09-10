@@ -329,14 +329,14 @@ describe('LightningDetails', () => {
         const { getByText, findByText } = renderComponent(Status.Started);
         fireEvent.click(await findByText('Connect'));
         expect(getByText('REST Host')).toBeInTheDocument();
-        expect(getByText('http://127.0.0.1:8182')).toBeInTheDocument();
+        expect(getByText('http://127.0.0.1:28182')).toBeInTheDocument();
       });
 
       it('should display the GRPC Host', async () => {
         const { getByText, findByText } = renderComponent(Status.Started);
         fireEvent.click(await findByText('Connect'));
         expect(getByText('GRPC Host')).toBeInTheDocument();
-        expect(getByText('127.0.0.1:11002')).toBeInTheDocument();
+        expect(getByText('127.0.0.1:31002')).toBeInTheDocument();
       });
 
       it('should not display grpc host for unsupported versions', async () => {
@@ -381,7 +381,7 @@ describe('LightningDetails', () => {
         const { getByText, findByText } = renderComponent(Status.Started);
         fireEvent.click(await findByText('Connect'));
         expect(getByText('REST Host')).toBeInTheDocument();
-        expect(getByText('http://127.0.0.1:8283')).toBeInTheDocument();
+        expect(getByText('http://127.0.0.1:28283')).toBeInTheDocument();
       });
 
       it('should open API Doc links in the browser', async () => {
@@ -470,23 +470,23 @@ describe('LightningDetails', () => {
         const { getByText, findByText } = renderComponent(Status.Started);
         fireEvent.click(await findByText('Connect'));
         expect(getByText('REST Host')).toBeInTheDocument();
-        expect(getByText('https://127.0.0.1:8385')).toBeInTheDocument();
+        expect(getByText('https://127.0.0.1:28385')).toBeInTheDocument();
       });
 
       it('should display the GRPC Host', async () => {
         const { getByText, findByText } = renderComponent(Status.Started);
         fireEvent.click(await findByText('Connect'));
         expect(getByText('GRPC Host')).toBeInTheDocument();
-        expect(getByText('127.0.0.1:8447')).toBeInTheDocument();
+        expect(getByText('127.0.0.1:28447')).toBeInTheDocument();
       });
 
       it('should open API Doc links in the browser', async () => {
         shell.openExternal = jest.fn().mockResolvedValue(true);
         const { getByText, findByText } = renderComponent(Status.Started);
         fireEvent.click(await findByText('Connect'));
-        fireEvent.click(getByText('https://127.0.0.1:8447', { selector: 'a' }));
+        fireEvent.click(getByText('https://127.0.0.1:28447', { selector: 'a' }));
         await waitFor(() => {
-          expect(shell.openExternal).toHaveBeenCalledWith('https://127.0.0.1:8447');
+          expect(shell.openExternal).toHaveBeenCalledWith('https://127.0.0.1:28447');
         });
       });
 
@@ -559,7 +559,7 @@ describe('LightningDetails', () => {
         lightningServiceMock.getInfo.mockResolvedValue(undefined as any);
         const { queryByText, findByText } = renderComponent(Status.Started);
         fireEvent.click(await findByText('Connect'));
-        expect(queryByText('http://127.0.0.1:8183')).toBeNull();
+        expect(queryByText('http://127.0.0.1:28183')).toBeNull();
       });
 
       it('should display hex values for paths', async () => {

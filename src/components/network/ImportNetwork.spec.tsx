@@ -24,7 +24,7 @@ const filesMock = files as jest.Mocked<typeof files>;
 const ipcMock = ipc as jest.Mocked<typeof ipc>;
 
 describe('ImportNetwork component', () => {
-  const exportFilePath = join('/', 'tmp', 'polar', 'file', 'export.json');
+  const exportFilePath = join('/', 'tmp', 'polar-paykit', 'file', 'export.json');
   let network: Network;
   let chart: IChart;
 
