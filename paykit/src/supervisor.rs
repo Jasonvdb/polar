@@ -13,15 +13,22 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader},
+    io::BufReader,
     process::{Child, Command as ProcessCommand},
 };
 use uuid::Uuid;
 
+struct ReceiverChild {
+    child: Child,
+    input: tokio::process::ChildStdin,
+    reader: tokio::task::JoinHandle<()>,
+    responses: tokio::sync::mpsc::Receiver<crate::receiver_ipc::Frame>,
+}
+
 pub struct Supervisor {
     config: Config,
     pub repository: Arc<Repository>,
-    children: HashMap<Uuid, Child>,
+    children: HashMap<Uuid, ReceiverChild>,
 }
 impl Supervisor {
     pub fn new(config: Config, repository: Arc<Repository>) -> Self {
@@ -109,8 +116,26 @@ impl Supervisor {
     async fn execute(&mut self, operation: OperationRecord) -> anyhow::Result<()> {
         self.operation_status(operation.public.id, OperationStatus::Running, None, None)?;
         let result = self.dispatch(&operation.request).await;
-        match result { Ok(value)=>self.operation_status(operation.public.id,OperationStatus::Succeeded,Some(value),None),
-            Err(_)=>self.operation_status(operation.public.id,OperationStatus::Failed,None,Some(PublicError::new("operation_failed","The operation could not complete. Check services and receiver state, then retry."))) }
+        match result {
+            Ok(value) => self.operation_status(
+                operation.public.id,
+                OperationStatus::Succeeded,
+                Some(value),
+                None,
+            ),
+            Err(error) => {
+                let public=error.downcast_ref::<PublicError>().cloned().unwrap_or_else(||PublicError::new(
+                    "operation_failed",
+                    "The operation could not complete. Check services and receiver state. Reuse the existing command ID to inspect an uncertain outcome.",
+                ));
+                self.operation_status(
+                    operation.public.id,
+                    OperationStatus::Failed,
+                    None,
+                    Some(public),
+                )
+            }
+        }
     }
     fn operation_status(
         &self,
@@ -173,8 +198,37 @@ impl Supervisor {
                 Ok(json!({"receiverId":input.receiver_id}))
             }
             "preset.create" => self.preset().await,
+            value if commands::workspace_command(value) => self.receiver_command(command).await,
             _ => anyhow::bail!("unsupported command"),
         }
+    }
+    async fn receiver_command(&mut self, command: &Command) -> anyhow::Result<Value> {
+        let id: Uuid = serde_json::from_value(command.input["receiverId"].clone())?;
+        let child = self
+            .children
+            .get_mut(&id)
+            .ok_or_else(|| anyhow::anyhow!("receiver is stopped"))?;
+        anyhow::ensure!(child.child.try_wait()?.is_none(), "receiver exited");
+        crate::receiver_ipc::write_frame(&mut child.input, command).await?;
+        let frame = tokio::time::timeout(Duration::from_secs(90), async {
+            loop {
+                let response = child
+                    .responses
+                    .recv()
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("receiver IPC closed"))?;
+                if response.command_id == Some(command.command_id) {
+                    return Ok::<_, anyhow::Error>(response);
+                }
+            }
+        })
+        .await??;
+        if let Some(error) = frame.error {
+            return Err(PublicError::new("receiver_operation_failed", &error).into());
+        }
+        frame
+            .result
+            .ok_or_else(|| anyhow::anyhow!("receiver result missing"))
     }
     async fn create_participant(&mut self, id: Uuid, name: &str) -> anyhow::Result<()> {
         self.repository.update(|state| {
@@ -311,7 +365,7 @@ impl Supervisor {
                 && self
                     .children
                     .get_mut(&id)
-                    .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+                    .is_some_and(|child| matches!(child.child.try_wait(), Ok(None)))
             {
                 return Ok(());
             }
@@ -329,6 +383,7 @@ impl Supervisor {
             .arg("receiver")
             .arg(id.to_string())
             .env_remove("TEST_PUBKY_CONNECTION_STRING")
+            .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()?;
@@ -336,16 +391,73 @@ impl Supervisor {
             .stdout
             .take()
             .ok_or_else(|| anyhow::anyhow!("receiver output missing"))?;
-        self.children.insert(id, child);
-        let mut lines = BufReader::new(stdout).lines();
-        let line = tokio::time::timeout(Duration::from_secs(60), lines.next_line())
-            .await??
-            .ok_or_else(|| anyhow::anyhow!("receiver exited before readiness"))?;
-        let result: Value = serde_json::from_str(&line)?;
-        anyhow::ensure!(
-            result["ready"] == true && result["receiverId"] == id.to_string(),
-            "receiver readiness rejected"
+        let input = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("receiver input missing"))?;
+        let (tx, responses) = tokio::sync::mpsc::channel(8);
+        let repository = self.repository.clone();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let reader = tokio::spawn(async move {
+            let mut stdout = BufReader::new(stdout);
+            let ready = async {
+                let line = crate::receiver_ipc::read_frame(&mut stdout, 4096)
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("receiver exited"))?;
+                let result: Value = serde_json::from_slice(&line)?;
+                anyhow::ensure!(
+                    result["ready"] == true && result["receiverId"] == id.to_string(),
+                    "receiver readiness rejected"
+                );
+                Ok::<_, anyhow::Error>(())
+            }
+            .await;
+            let valid = ready.is_ok();
+            let _ = ready_tx.send(ready);
+            if !valid {
+                return;
+            }
+            while let Ok(Some(bytes)) =
+                crate::receiver_ipc::read_frame(&mut stdout, crate::receiver_ipc::MAX_FRAME).await
+            {
+                let Ok(frame) = serde_json::from_slice::<crate::receiver_ipc::Frame>(&bytes) else {
+                    break;
+                };
+                if frame.receiver_id != id || frame.workspace.receiver_id != id {
+                    break;
+                }
+                let changed = repository.snapshot().is_ok_and(|state| {
+                    state
+                        .receiver_workspaces
+                        .iter()
+                        .find(|w| w.receiver_id == id)
+                        != Some(&frame.workspace)
+                });
+                if changed
+                    && repository
+                        .update(|state| {
+                            state.set_workspace(frame.workspace.clone());
+                            Ok(())
+                        })
+                        .is_err()
+                {
+                    break;
+                }
+                if frame.command_id.is_some() && tx.send(frame).await.is_err() {
+                    break;
+                }
+            }
+        });
+        self.children.insert(
+            id,
+            ReceiverChild {
+                child,
+                input,
+                reader,
+                responses,
+            },
         );
+        tokio::time::timeout(Duration::from_secs(60), ready_rx).await???;
         self.repository.update(|s| {
             find_receiver(s, id)?.public.status = ReceiverStatus::Running;
             s.event("receiver.running", json!({"receiverId":id}));
@@ -354,15 +466,17 @@ impl Supervisor {
     }
     async fn stop_child(&mut self, id: Uuid) -> anyhow::Result<()> {
         if let Some(child) = self.children.get_mut(&id) {
-            if let Some(pid) = child.id() {
+            if let Some(pid) = child.child.id() {
                 // SAFETY: this PID is held by our unreaped Child handle; no arbitrary process is targeted.
                 let result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
-                if result != 0 && child.try_wait()?.is_none() {
+                if result != 0 && child.child.try_wait()?.is_none() {
                     anyhow::bail!("receiver termination failed");
                 }
             }
-            tokio::time::timeout(Duration::from_secs(10), child.wait()).await??;
-            self.children.remove(&id);
+            tokio::time::timeout(Duration::from_secs(10), child.child.wait()).await??;
+            if let Some(child) = self.children.remove(&id) {
+                child.reader.abort();
+            }
         }
         self.repository.update(|s| {
             find_receiver(s, id)?.public.status = ReceiverStatus::Stopped;
@@ -373,12 +487,14 @@ impl Supervisor {
     fn check_children(&mut self) -> anyhow::Result<()> {
         let mut exited = vec![];
         for (id, child) in &mut self.children {
-            if child.try_wait()?.is_some() {
+            if child.child.try_wait()?.is_some() {
                 exited.push(*id);
             }
         }
         for id in exited {
-            self.children.remove(&id);
+            if let Some(child) = self.children.remove(&id) {
+                child.reader.abort();
+            }
             self.set_receiver_error(id)?;
         }
         Ok(())

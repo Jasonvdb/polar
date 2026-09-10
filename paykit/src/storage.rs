@@ -164,9 +164,11 @@ impl StorageAdapter for ReceiverStorage {
     ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
         let mut state = self.state.lock().map_err(|_| storage_error())?;
         let (updated, value) = run_storage_state_transaction(state.clone(), f)?;
-        self.vault
-            .save("sdk.cbor", &updated)
-            .map_err(|_| storage_error())?;
+        if updated != *state {
+            self.vault
+                .save("sdk.cbor", &updated)
+                .map_err(|_| storage_error())?;
+        }
         *state = updated;
         Ok(value)
     }
@@ -181,6 +183,24 @@ fn storage_error() -> PaykitSdkError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn readonly_sdk_transactions_do_not_reencrypt_or_replace_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = ReceiverStorage::open(
+            Vault::new(dir.path().into(), [3; 32], "receiver".into()).unwrap(),
+        )
+        .unwrap();
+        storage
+            .transaction(|tx| Ok(tx.allocate_receive_batch_id()))
+            .await
+            .unwrap();
+        let before = std::fs::read(dir.path().join("sdk.cbor")).unwrap();
+        storage
+            .transaction(|tx| Ok(tx.export_storage_state()))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(dir.path().join("sdk.cbor")).unwrap(), before);
+    }
     #[test]
     fn cbor_preserves_tuple_map_keys() {
         let dir = tempfile::tempdir().unwrap();

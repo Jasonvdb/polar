@@ -50,3 +50,88 @@ describe('Paykit public commands', () => {
     ).toThrow();
   });
 });
+
+describe('Paykit receiver command validation', () => {
+  const receiverId = newPaykitId();
+  const peer = {
+    receiverId,
+    peerPublicKey: 'y'.repeat(52),
+    peerReceiverPath: 'test/wallet',
+  };
+  const validate = (
+    command: PaykitCommandRequest['command'],
+    input: PaykitCommandRequest['input'],
+  ) => validatePaykitCommand({ commandId: newPaykitId(), command, input });
+  it('requires canonical scoped peer inputs and exact string arrays', () => {
+    expect(() => validate('link.initiate', peer)).not.toThrow();
+    for (const path of [
+      'private/wallet',
+      '../wallet',
+      'Test/wallet',
+      'test/other',
+      'test/wallet/child',
+    ])
+      expect(() => validate('link.accept', { ...peer, peerReceiverPath: path })).toThrow(
+        'peerReceiverPath',
+      );
+    expect(() =>
+      validate('link.block', { ...peer, peerPublicKey: 'z'.repeat(52) }),
+    ).toThrow('peerPublicKey');
+    expect(() =>
+      validate('contact.save', {
+        receiverId,
+        peerPublicKey: peer.peerPublicKey,
+        label: '',
+        receiverPaths: ['a/wallet', 'a/server'],
+      }),
+    ).not.toThrow();
+    for (const receiverPaths of [
+      [],
+      ['a/wallet', 'a/wallet'],
+      ['../../secret'],
+      'a/wallet',
+    ])
+      expect(() =>
+        validate('contact.save', {
+          receiverId,
+          peerPublicKey: peer.peerPublicKey,
+          label: '',
+          receiverPaths,
+        }),
+      ).toThrow('receiverPaths');
+  });
+  it('validates text byte limits and avatar retention, removal, signature and size', () => {
+    const profile = { receiverId, displayName: 'Alice', about: 'First\nsecond' };
+    expect(() => validate('profile.publish', profile)).not.toThrow();
+    expect(() =>
+      validate('profile.publish', { ...profile, avatarBase64: '', avatarMime: '' }),
+    ).not.toThrow();
+    expect(() =>
+      validate('profile.publish', { ...profile, displayName: '🌍'.repeat(21) }),
+    ).toThrow('displayName');
+    expect(() =>
+      validate('profile.publish', { ...profile, avatarMime: 'image/png' }),
+    ).toThrow('Both');
+    expect(() =>
+      validate('profile.publish', {
+        ...profile,
+        avatarBase64: 'c2VjcmV0',
+        avatarMime: 'image/png',
+      }),
+    ).toThrow('content');
+    expect(() =>
+      validate('profile.publish', {
+        ...profile,
+        avatarBase64: 'A'.repeat(349532),
+        avatarMime: 'image/jpeg',
+      }),
+    ).toThrow('256');
+    expect(() =>
+      validate('profile.publish', {
+        ...profile,
+        avatarBase64: 'abc=',
+        avatarMime: 'image/svg+xml',
+      }),
+    ).toThrow('PNG');
+  });
+});

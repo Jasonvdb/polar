@@ -41,6 +41,30 @@ async fn run() -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&value)?);
             Ok(())
         }
+        Some("inspect-private-list") => {
+            anyhow::ensure!(args.len() == 4, "receiver, peer and path required");
+            let value = receiver::inspect_private_list(
+                Config::from_env()?,
+                args[1].parse()?,
+                &args[2],
+                &args[3],
+            )
+            .await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        Some("inspect-avatar") => {
+            anyhow::ensure!(args.len() == 4, "owner, path and blob name required");
+            let value = receiver::inspect_avatar(&args[1], &args[2], &args[3]).await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
+        Some("inspect-contact") => {
+            anyhow::ensure!(args.len() == 5, "owner, path, peer and peer path required");
+            let value = receiver::inspect_contact(&args[1], &args[2], &args[3], &args[4]).await?;
+            println!("{}", serde_json::to_string_pretty(&value)?);
+            Ok(())
+        }
         Some("receiver") => {
             receiver::run(
                 Config::from_env()?,

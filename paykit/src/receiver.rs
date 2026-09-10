@@ -34,11 +34,13 @@ pub fn vault(config: &Config, id: Uuid) -> anyhow::Result<Vault> {
 
 pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
     let credentials = Arc::new(vault(&config, id)?);
-    let storage = ReceiverStorage::open(vault(&config, id)?)?;
+    let storage = Arc::new(ReceiverStorage::open(vault(&config, id)?)?);
     let mut secrets: ReceiverSecrets = credentials
         .load("session.cbor")?
         .ok_or_else(|| anyhow::anyhow!("receiver not provisioned"))?;
-    let sdk_config = PaykitSdkConfig::new(PaykitReceiverPath::new(secrets.path.clone())?);
+    let mut sdk_config = PaykitSdkConfig::new(PaykitReceiverPath::new(secrets.path.clone())?);
+    sdk_config.public_contact_sharing =
+        paykit_sdk::PublicContactSharingPolicy::ConfiguredPublicNamespace;
     let receiver_path = sdk_config.receiver_path.clone();
     let noise_public_key = ReceiverNoiseSecretKey::new(secrets.noise).public_key();
     let bootstrap = PubkySessionBootstrap::with_pubky(pubky::Pubky::testnet()?, CLIENT_ID)?
@@ -69,17 +71,22 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
     secrets.session = Some(session.export_session_secret().await?.into_inner());
     credentials.save("session.cbor", &secrets)?;
     let provider = SessionProvider {
-        access: Mutex::new(Some(session.access)),
-        secrets: Mutex::new(secrets),
-        vault: credentials,
+        access: Arc::new(Mutex::new(Some(session.access))),
+        secrets: Arc::new(Mutex::new(secrets)),
+        vault: credentials.clone(),
     };
-    let sdk = PaykitSdk::new(storage, provider, UnsupportedPayments, sdk_config)?;
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        provider.clone(),
+        UnsupportedPayments,
+        sdk_config,
+    )?;
     anyhow::ensure!(
         sdk.initialize().await?.identity.live_session_available,
         "receiver has no session"
     );
     sdk.publish_paykit_receiver_marker(PaykitReceiverCapabilities {
-        private_payments: false,
+        private_payments: true,
         payment_requests: false,
         receipts: false,
         outgoing_payments: false,
@@ -93,10 +100,18 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
         marker.noise_public_key == noise_public_key,
         "public receiver marker mismatch"
     );
+    let mut runtime = crate::workspace::Runtime::new(
+        sdk,
+        storage,
+        credentials,
+        id,
+        owner.public_key(),
+        provider,
+    )?;
+    runtime.refresh().await?;
     println!("{}", serde_json::json!({"ready":true,"receiverId":id}));
     std::io::stdout().flush()?;
-    shutdown().await?;
-    Ok(())
+    tokio::select! {result=crate::receiver_ipc::run(runtime)=>result, result=shutdown()=>result}
 }
 pub async fn shutdown() -> anyhow::Result<()> {
     #[cfg(unix)]
@@ -108,9 +123,10 @@ pub async fn shutdown() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
     Ok(())
 }
-struct SessionProvider {
-    access: Mutex<Option<PubkySessionAccess>>,
-    secrets: Mutex<ReceiverSecrets>,
+#[derive(Clone)]
+pub(crate) struct SessionProvider {
+    access: Arc<Mutex<Option<PubkySessionAccess>>>,
+    secrets: Arc<Mutex<ReceiverSecrets>>,
     vault: Arc<Vault>,
 }
 #[async_trait]
@@ -155,7 +171,7 @@ fn session_error() -> paykit_sdk::PaykitSdkError {
         source: None,
     }
 }
-struct UnsupportedPayments;
+pub(crate) struct UnsupportedPayments;
 #[async_trait]
 impl PaymentAdapter for UnsupportedPayments {}
 
@@ -232,5 +248,96 @@ pub async fn diagnose_session(config: Config, id: Uuid) -> anyhow::Result<serde_
     );
     Ok(
         serde_json::json!({"receiverId":id,"validGrant":true,"wrongClientRejected":true,"wrongOwnerRejected":true,"wrongReceiverRejected":true}),
+    )
+}
+
+/// Read-only evidence from a stopped receiver's actual decrypted SDK list store.
+/// The exclusive runtime lock prevents a competing writer; payloads are never printed.
+pub async fn inspect_private_list(
+    config: Config,
+    id: Uuid,
+    owner: &str,
+    path: &str,
+) -> anyhow::Result<serde_json::Value> {
+    use paykit_sdk::storage::StorageAdapter;
+    let storage = ReceiverStorage::open(vault(&config, id)?)?;
+    let owner = paykit_sdk::PubkyPublicKey::new(owner)?;
+    let path = PaykitReceiverPath::new(path)?;
+    storage.transaction(|tx| {
+        let mut items=tx.private_stream_items(&owner,&path);
+        items.sort_by_key(|i|i.stream_item_id);
+        let valid=items.into_iter().filter_map(|item|paykit_lib::parse_private_payment_list_json(&item.raw_json).ok().map(|list|(item.stream_item_id,list))).collect::<Vec<_>>();
+        Ok(serde_json::json!({"receiverId":id,"validListCount":valid.len(),"latestStreamItemId":valid.last().map(|(id,_)|id.to_string()),"endpointCount":valid.last().map(|(_,list)|list.payment_endpoints.len())}))
+    }).await.map_err(Into::into)
+}
+/// Independently read the explicit receiver-scoped public contact marker.
+pub async fn inspect_contact(
+    owner: &str,
+    path: &str,
+    peer: &str,
+    peer_path: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let owner = paykit_sdk::PubkyPublicKey::new(owner)?;
+    let config = PaykitSdkConfig::new(PaykitReceiverPath::new(path)?);
+    let peer = paykit_sdk::PubkyPublicKey::new(peer)?;
+    let peer_path = PaykitReceiverPath::new(peer_path)?;
+    let path = config.public_contact_path(&peer, &peer_path);
+    let storage = pubky::Pubky::testnet()?.public_storage();
+    let resource = format!("pubky://{owner}{path}");
+    if !storage.exists(resource.as_str()).await? {
+        return Ok(serde_json::json!({"exists":false}));
+    }
+    let body: serde_json::Value = storage.get(resource.as_str()).await?.json().await?;
+    Ok(
+        serde_json::json!({"exists":true,"version":body["version"],"kind":body["kind"],"publicKey":body["public_key"],"receiverPath":body["receiver_path"],"hasLocalLabel":body.get("label").is_some()}),
+    )
+}
+
+#[cfg(test)]
+impl SessionProvider {
+    pub(crate) fn without_access(vault: Arc<Vault>) -> Self {
+        Self {
+            access: Arc::new(Mutex::new(None)),
+            secrets: Arc::new(Mutex::new(ReceiverSecrets {
+                owner: [3; 32],
+                noise: [4; 32],
+                path: "test/wallet".into(),
+                session: None,
+            })),
+            vault,
+        }
+    }
+}
+
+/// Validate and read one original avatar in an explicit public receiver namespace.
+pub async fn inspect_avatar(
+    owner: &str,
+    path: &str,
+    blob_name: &str,
+) -> anyhow::Result<serde_json::Value> {
+    use base64::Engine;
+    let owner = paykit_sdk::PubkyPublicKey::new(owner)?;
+    let path = PaykitReceiverPath::new(path)?;
+    anyhow::ensure!(
+        !blob_name.is_empty()
+            && blob_name.len() <= 128
+            && blob_name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'.')
+            && !blob_name.contains(".."),
+        "invalid blob name"
+    );
+    let uri = format!("pubky://{owner}/pub/paykit/v0/{path}/blobs/{blob_name}");
+    let storage = pubky::Pubky::testnet()?.public_storage();
+    if !storage.exists(uri.as_str()).await? {
+        return Ok(serde_json::json!({"exists":false}));
+    }
+    let bytes = crate::workspace::fetch_avatar(&uri)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("avatar missing"))?;
+    let mime =
+        crate::commands::avatar_mime(&bytes).ok_or_else(|| anyhow::anyhow!("invalid avatar"))?;
+    Ok(
+        serde_json::json!({"exists":true,"mime":mime,"size":bytes.len(),"base64":base64::engine::general_purpose::STANDARD.encode(bytes)}),
     )
 }

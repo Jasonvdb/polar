@@ -11,6 +11,8 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.22"
+chrono = "0.4"
 async-trait = "0.1"
 async-stream = "0.3"
 axum = "0.8"
@@ -18,6 +20,7 @@ chacha20poly1305 = "0.10"
 ciborium = "0.2"
 fs2 = "0.4"
 hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 libc = "0.2"
 paykit-sdk = { git = "https://github.com/pubky/paykit-rs", rev = "5ef8caf8d9a812f571a954fd3b7afe5ef22fd10f" }
 paykit-lib = { git = "https://github.com/pubky/paykit-rs", rev = "5ef8caf8d9a812f571a954fd3b7afe5ef22fd10f" }

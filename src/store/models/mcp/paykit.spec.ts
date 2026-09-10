@@ -1,5 +1,6 @@
 import { createStore } from 'easy-peasy';
-import { newPaykitId } from 'shared/paykitApi';
+import { paykitDefinition } from './paykit';
+import { newPaykitId, paykitCommands, paykitCommandFields } from 'shared/paykitApi';
 import { paykitService } from 'lib/paykit/paykitService';
 import { createMockRootModel, getNetwork, injections } from 'utils/tests';
 
@@ -29,4 +30,27 @@ describe('Paykit MCP parity', () => {
       store.getActions().mcp.paykit({ networkId: 2, action: 'state' }),
     ).rejects.toThrow();
   });
+});
+
+it('documents every command and forwards receiver path arrays without changing them', async () => {
+  const definition = JSON.stringify(paykitDefinition);
+  for (const command of paykitCommands) {
+    expect(definition).toContain(command);
+    for (const field of paykitCommandFields[command]) expect(definition).toContain(field);
+  }
+  const store = createStore(createMockRootModel(), { injections });
+  store.getActions().network.setNetworks([getNetwork(1, 'test')]);
+  const request = {
+    commandId: newPaykitId(),
+    command: 'contact.save' as const,
+    input: {
+      receiverId: newPaykitId(),
+      peerPublicKey: 'y'.repeat(52),
+      label: 'Bob',
+      receiverPaths: ['bob/wallet', 'bob/server'],
+    },
+  };
+  service.command.mockResolvedValue({ operationId: request.commandId });
+  await store.getActions().mcp.paykit({ networkId: 1, action: 'command', request });
+  expect(service.command).toHaveBeenCalledWith(1, request);
 });

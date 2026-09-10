@@ -17,11 +17,14 @@ import {
   PaykitCommand,
   PaykitCommandRequest,
   PaykitState,
+  PaykitInput,
 } from 'shared/paykitApi';
 import { Status } from 'shared/types';
 import { useStoreActions } from 'store';
 import { Network } from 'types';
 import { paykitService } from 'lib/paykit/paykitService';
+import PaykitLinks from './PaykitLinks';
+import PaykitProfilesContacts from './PaykitProfilesContacts';
 
 const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const { enablePaykit, stop } = useStoreActions(s => s.network);
@@ -86,7 +89,7 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
       throw e;
     }
   };
-  const command = (name: PaykitCommand, input: Record<string, string>) =>
+  const command = (name: PaykitCommand, input: PaykitInput) =>
     perform(() => submit({ commandId: newPaykitId(), command: name, input }));
   const participant = state?.participants.find(p => p.id === participantId);
   const receivers = state?.receivers.filter(r => r.participantId === participantId) || [];
@@ -185,6 +188,7 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
             onChange={id => {
               selectParticipant(id);
               selectReceiver(undefined);
+              setReceiverName('');
               setParticipantName(state?.participants.find(p => p.id === id)?.name || '');
             }}
           >
@@ -212,8 +216,9 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
           <Button
             disabled={disabled || !participant || !participantName.trim()}
             onClick={() =>
+              participant &&
               command('participant.rename', {
-                participantId: participant!.id,
+                participantId: participant.id,
                 name: participantName.trim(),
               })
             }
@@ -265,8 +270,9 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
           <Button
             disabled={disabled || !participant || !receiverName.trim()}
             onClick={() =>
+              participant &&
               command('receiver.create', {
-                participantId: participant!.id,
+                participantId: participant.id,
                 name: receiverName.trim(),
                 kind,
               })
@@ -277,8 +283,9 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
           <Button
             disabled={disabled || !receiver || !receiverName.trim()}
             onClick={() =>
+              receiver &&
               command('receiver.rename', {
-                receiverId: receiver!.id,
+                receiverId: receiver.id,
                 name: receiverName.trim(),
               })
             }
@@ -315,6 +322,34 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
           </>
         )}
       </Card>
+      {receiver && state && (
+        <div key={`${network.id}:${receiver.id}`}>
+          <Typography.Paragraph style={{ marginTop: 12 }}>
+            Receiver workspace:{' '}
+            <strong>
+              {participant?.name} / {receiver.name}
+            </strong>{' '}
+            — {receiver.path}
+          </Typography.Paragraph>
+          <PaykitLinks
+            receiverId={receiver.id}
+            workspace={state.receiverWorkspaces?.find(
+              item => item.receiverId === receiver.id,
+            )}
+            state={state}
+            disabled={disabled || receiver.status !== 'running'}
+            command={command}
+          />
+          <PaykitProfilesContacts
+            receiverId={receiver.id}
+            workspace={state.receiverWorkspaces?.find(
+              item => item.receiverId === receiver.id,
+            )}
+            disabled={disabled || receiver.status !== 'running'}
+            command={command}
+          />
+        </div>
+      )}
       <Card title="Operations" style={{ marginTop: 12 }}>
         {operationId && (
           <Typography.Paragraph>
@@ -341,6 +376,14 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
                 {operation.command}
                 <br />
                 <Typography.Text type="secondary">{operation.id}</Typography.Text>
+                {operation.result !== undefined && (
+                  <pre
+                    aria-label="Public operation result"
+                    style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}
+                  >
+                    {JSON.stringify(operation.result, null, 2)}
+                  </pre>
+                )}
                 {operation.error && (
                   <Alert
                     type="error"

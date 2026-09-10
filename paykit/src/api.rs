@@ -74,10 +74,8 @@ async fn health(State(state): State<ApiState>) -> impl IntoResponse {
     )
 }
 async fn snapshot(State(state): State<ApiState>) -> Response {
-    match state.repository.snapshot() {
-        Ok(value) => {
-            Json(value.public(state.repository.ready.load(Ordering::SeqCst))).into_response()
-        }
+    match state.repository.public_state() {
+        Ok(value) => Json(value).into_response(),
         Err(_) => unavailable(),
     }
 }
@@ -136,17 +134,12 @@ async fn events(
             PublicError::new("invalid_input", "Expected a nonnegative event sequence."),
         );
     };
-    let Ok(snapshot) = state.repository.snapshot() else {
-        return unavailable();
-    };
-    if query.after > snapshot.events.last().map_or(0, |v| v.sequence) {
-        return failure(
-            StatusCode::CONFLICT,
-            PublicError::new(
-                "event_cursor_reset",
-                "The cursor is ahead of this environment. Reload state and reconnect.",
-            ),
-        );
+    if let Err(error) = state.repository.events_after(query.after) {
+        return if error.code == "event_cursor_reset" {
+            failure(StatusCode::CONFLICT, error)
+        } else {
+            unavailable()
+        };
     }
     let stream = async_stream::stream! {
         let mut cursor = query.after;
@@ -154,8 +147,18 @@ async fn events(
         'events: loop {
             if *shutdown.borrow() { break; }
             let notified = state.repository.notify.notified();
-            let Ok(snapshot) = state.repository.snapshot() else { break; };
-            for event in snapshot.events.into_iter().filter(|event| event.sequence > cursor).collect::<Vec<_>>() {
+            let events = match state.repository.events_after(cursor) {
+                Ok(events) => events,
+                Err(error) => {
+                    if error.code == "event_cursor_reset" {
+                        yield Ok::<_, Infallible>(Event::default()
+                            .event("event_cursor_reset")
+                            .data(json!({"error":error}).to_string()));
+                    }
+                    break;
+                }
+            };
+            for event in events {
                 if *shutdown.borrow() { break 'events; }
                 cursor = event.sequence;
                 yield Ok::<_, Infallible>(Event::default()
@@ -378,5 +381,119 @@ mod tests {
                 .expect("already-signaled shutdown must terminate the stream")
                 .unwrap();
         assert!(body.is_empty());
+    }
+    async fn event_response(app: Router, after: u64) -> Response {
+        app.oneshot(
+            Request::get(format!("/v1/events?after={after}"))
+                .header("authorization", format!("Bearer {}", "a".repeat(64)))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn next_event(body: &mut Body) -> String {
+        let frame = tokio::time::timeout(
+            Duration::from_secs(3),
+            std::future::poll_fn(|cx| std::pin::Pin::new(&mut *body).poll_frame(cx)),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        String::from_utf8(frame.into_data().unwrap().to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn expired_cursor_requires_reload_but_exact_retained_boundary_replays() {
+        let (_dir, app, repo, _shutdown) = fixture();
+        repo.update(|state| {
+            for _ in 0..crate::model::EVENT_RETENTION + 8 {
+                state.event("receiver.workspace", json!({"receiverId":Uuid::nil()}));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let response = event_response(app.clone(), 7).await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let error: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(error["error"]["code"], "event_cursor_reset");
+        let mut body = event_response(app.clone(), 8).await.into_body();
+        let first = next_event(&mut body).await;
+        assert!(first.contains("id: 9\n"));
+        assert!(first.contains("receiver.workspace"));
+        let state = repo.public_state().unwrap();
+        let response = event_response(app.clone(), state.last_event_sequence).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        repo.update(|state| {
+            state.event("environment.ready", json!({}));
+            Ok(())
+        })
+        .unwrap();
+        assert!(next_event(&mut body).await.contains("id: 265\n"));
+        assert_eq!(
+            event_response(app, 266).await.status(),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn connected_consumer_that_loses_history_gets_reset_and_closed_stream() {
+        let (_dir, app, repo, _shutdown) = fixture();
+        repo.update(|state| {
+            state.event("environment.ready", json!({}));
+            Ok(())
+        })
+        .unwrap();
+        let response = event_response(app, 0).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut body = response.into_body();
+        assert!(next_event(&mut body).await.contains("id: 1\n"));
+        repo.update(|state| {
+            for _ in 0..crate::model::EVENT_RETENTION + 1 {
+                state.event("receiver.workspace", json!({"receiverId":Uuid::nil()}));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let reset = next_event(&mut body).await;
+        assert!(reset.contains("event: event_cursor_reset\n"));
+        assert!(reset.contains("lastEventSequence"));
+        assert!(
+            !reset.contains("id:"),
+            "reset must not acknowledge skipped events"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), to_bytes(body, 4096))
+                .await
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn history_expiring_between_headers_and_first_frame_resets_stream() {
+        let (_dir, app, repo, _shutdown) = fixture();
+        let response = event_response(app, 0).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        repo.update(|state| {
+            for _ in 0..crate::model::EVENT_RETENTION + 1 {
+                state.event("receiver.workspace", json!({"receiverId":Uuid::nil()}));
+            }
+            Ok(())
+        })
+        .unwrap();
+        let bytes =
+            tokio::time::timeout(Duration::from_secs(1), to_bytes(response.into_body(), 4096))
+                .await
+                .unwrap()
+                .unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("event: event_cursor_reset\n"));
+        assert!(!text.contains("id:"));
     }
 }
