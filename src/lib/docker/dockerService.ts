@@ -244,7 +244,16 @@ class DockerService implements DockerLibrary {
   async stop(network: Network) {
     info(`Stopping docker containers for ${network.name}`);
     info(` - path: ${network.path}`);
-    const result = await this.execute(compose.down, this.getArgs(network));
+    const args: compose.IDockerComposeOptions = this.getArgs(network);
+    if (network.paykit) {
+      // Drain SDK work before dependencies stop; Compose's finite grace period
+      // could otherwise kill Paykit while it still owns an encrypted-link lease.
+      await this.execute(compose.stopOne, 'paykit', {
+        ...args,
+        commandOptions: [...(args.commandOptions || []), '--timeout', '-1'],
+      });
+    }
+    const result = await this.execute(compose.down, args);
     info(`Network stopped:\n ${result.out || result.err}`);
   }
 

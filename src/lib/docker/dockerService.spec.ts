@@ -703,6 +703,14 @@ describe('DockerService', () => {
   });
 
   describe('executing commands', () => {
+    const enablePaykit = () => {
+      network.paykit = {
+        apiVersion: 1,
+        environmentId: '11111111-1111-4111-8111-111111111111',
+        servicePort: 30091,
+      };
+      mockOS.userInfo.mockReturnValue({ uid: 501, gid: 20 } as any);
+    };
     it('should call compose.upAll when a network is started', async () => {
       composeMock.upAll.mockResolvedValue(mockResult);
       await dockerService.start(network);
@@ -739,13 +747,95 @@ describe('DockerService', () => {
       expect(fsMock.ensureDir).toHaveBeenCalledTimes(9);
     });
 
-    it('should call compose.down when a network is stopped', async () => {
+    it('should call compose.down directly when a non-Paykit network is stopped', async () => {
       composeMock.down.mockResolvedValue(mockResult);
       await dockerService.stop(network);
+      expect(composeMock.stopOne).not.toHaveBeenCalled();
       expect(composeMock.down).toHaveBeenCalledWith(
         expect.objectContaining({ cwd: network.path }),
         undefined,
       );
+    });
+
+    it('waits for Paykit to drain before bringing its dependencies down', async () => {
+      enablePaykit();
+      let drained!: (result: typeof mockResult) => void;
+      composeMock.stopOne.mockReturnValue(
+        new Promise(resolve => {
+          drained = resolve;
+        }),
+      );
+      composeMock.down.mockResolvedValue(mockResult);
+      const stopping = dockerService.stop(network);
+      expect(composeMock.stopOne).toHaveBeenCalledTimes(1);
+      expect(composeMock.stopOne).toHaveBeenCalledWith(
+        'paykit',
+        expect.objectContaining({
+          cwd: network.path,
+          env: expect.objectContaining({ PAYKIT_UID: '501', PAYKIT_GID: '20' }),
+          commandOptions: ['--timeout', '-1'],
+        }),
+      );
+      await Promise.resolve();
+      expect(composeMock.down).not.toHaveBeenCalled();
+      drained(mockResult);
+      await stopping;
+      expect(composeMock.down).toHaveBeenCalledTimes(1);
+      expect(composeMock.down.mock.calls[0][0]).toEqual(
+        expect.objectContaining({ cwd: network.path }),
+      );
+      expect(composeMock.down.mock.calls[0][0]).not.toHaveProperty('commandOptions');
+    });
+
+    it('preserves dependencies when Paykit graceful stop fails', async () => {
+      enablePaykit();
+      composeMock.stopOne.mockRejectedValue({
+        err: 'Paykit graceful stop failed',
+        out: '',
+        exitCode: 1,
+      });
+      await expect(dockerService.stop(network)).rejects.toThrow(
+        'Paykit graceful stop failed',
+      );
+      expect(composeMock.down).not.toHaveBeenCalled();
+      expect(composeMock.stopOne).toHaveBeenCalledTimes(1);
+    });
+
+    it('preserves existing Compose options without adding the stop timeout to down', async () => {
+      enablePaykit();
+      const args = {
+        cwd: network.path,
+        env: { DOCKER_HOST: 'unix:///owned/docker.sock' },
+        commandOptions: ['--remove-orphans'],
+      };
+      const getArgs = jest.spyOn(dockerService as any, 'getArgs').mockReturnValue(args);
+      composeMock.stopOne.mockResolvedValue(mockResult);
+      composeMock.down.mockResolvedValue(mockResult);
+      try {
+        await dockerService.stop(network);
+        expect(composeMock.stopOne).toHaveBeenCalledWith('paykit', {
+          ...args,
+          commandOptions: ['--remove-orphans', '--timeout', '-1'],
+        });
+        expect(composeMock.down).toHaveBeenCalledWith(args, undefined);
+        expect(args.commandOptions).toEqual(['--remove-orphans']);
+      } finally {
+        getArgs.mockRestore();
+      }
+    });
+
+    it('keeps individual node stop behavior unchanged within a Paykit network', async () => {
+      enablePaykit();
+      const node = network.nodes.lightning[0];
+      composeMock.stopOne.mockResolvedValue(mockResult);
+      await dockerService.stopNode(network, node);
+      expect(composeMock.stopOne).toHaveBeenCalledTimes(1);
+      expect(composeMock.stopOne).toHaveBeenCalledWith(
+        node.name,
+        expect.objectContaining({ cwd: network.path }),
+      );
+      expect(composeMock.stopOne.mock.calls[0][1]).not.toHaveProperty('commandOptions');
+      expect(composeMock.down).not.toHaveBeenCalled();
     });
 
     it('should call compose.upOne when a node is started', async () => {

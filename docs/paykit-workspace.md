@@ -126,3 +126,61 @@ to retain an image, sends both as empty strings to remove it, or sends
 `avatarBase64` with `avatarMime` for a replacement. Query state or the accepted
 operation ID for results. Public results are projected recursively by Electron;
 SDK sessions, private keys and storage snapshots are never forwarded.
+
+## Payment methods, lists and reservations
+
+Add a Bitcoin Core node to use on-chain receiving. Add an LND node connected to
+that Core backend to use BOLT11 receiving. Restart the network after changing
+nodes. Select a running receiver, then open **Payment methods and reservations**.
+The wallet catalog contains Core-only and LND/Core bindings. IDs follow node IDs,
+so renaming or reordering nodes does not select a different wallet. Both receivers
+under one participant use the same participant-specific Core wallet while keeping
+separate reservation state. Polar's existing Bitcoin controls continue to use its
+unnamed default wallet.
+
+Choose a receiving wallet, enable supported methods and optionally choose methods
+in preference order. **Save receiving configuration** stores this selection.
+**Save method preference** updates the preference independently. Catalog status
+`configured` means a trusted binding exists; it does not assert the wallet is
+online. Wallet failures remain visible in the accepted operation and reservation.
+
+Enter a positive whole-satoshi amount, up to `2100000000000000`, and an endpoint
+expiry between 1 and 604800 seconds. **Publish public payment list** creates real
+regtest addresses and/or BOLT11 invoices for every enabled method, then publishes
+the complete list through Pubky. **Withdraw public payment list** explicitly
+withdraws it. For private receiving, choose the intended peer's public key and
+receiver path, establish an encrypted link, then **Create private reservation**.
+**Rotate private reservation** supersedes the previous list with fresh endpoints.
+
+History separates reservation lifecycle, eligibility, delivery and wallet cleanup.
+A queued withdrawal is not confirmed delivery. Failed cleanup remains visible;
+**Reconcile reservation** retries safe recovery using the original durable issuance
+identity. **Cancel reservation** makes the reservation ineligible before cleanup.
+Expired, cancelled and superseded Bitcoin addresses remain permanently assigned;
+a previously revealed address cannot be revoked or reused for another reservation.
+
+To discover a peer's receiving endpoint, choose **Public** or **Private encrypted
+list** explicitly. Select a method override or use a saved nonempty preference.
+**Resolve selected payment list** never changes source or silently substitutes an
+unsupported override. Inspect the status, endpoint, exact private-list version and
+expiry. **Consume private list without payment** records consumption durably and
+prevents reuse of that private version. It does not execute a wallet payment.
+Payment execution and proofs follow in the next increment.
+
+MCP and CLI expose `method.configure`, `method.prefer`, `paymentList.publish`,
+`paymentList.unpublish`, `reservation.create`, `reservation.rotate`,
+`reservation.cancel`, `reservation.reconcile`, `paymentList.resolve` and
+`paymentList.consume`. Use the standard command wrapper and poll its operation ID.
+`enabledMethods` and `preference` are arrays of `btc-onchain` and/or
+`btc-lightning-bolt11`; `amountSats` is a decimal string and `expirySeconds` is a
+JSON integer. Resolution accepts `source: "public"` or `"private"` and an optional
+`method`. Cancellation and reconciliation use `reservationId`; consumption uses
+`resolutionId`. All commands include the selected `receiverId`.
+
+Electron main atomically writes a versioned wallet configuration from validated
+network nodes. It derives internal Docker service addresses, copies only LND's
+TLS certificate and `invoices.macaroon` into its private credential directory,
+and exposes that directory read-only to the service. Missing startup credentials
+are retried during workspace queries; they do not prevent Pubky readiness.
+LND connections verify the certificate and hostname. The UI and MCP accept wallet
+catalog IDs, never credential paths, authentication values or arbitrary RPC URLs.

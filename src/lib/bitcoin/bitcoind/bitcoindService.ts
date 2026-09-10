@@ -13,21 +13,29 @@ import {
 
 class BitcoindService implements BitcoinService {
   createClient(node: BitcoinNode): BitcoinCoreClient {
-    return new BitcoinCore({
+    const client = new BitcoinCore({
       host: `http://127.0.0.1:${node.ports.rpc}`,
       username: bitcoinCredentials.user,
       password: bitcoinCredentials.pass,
       logger: this.log(),
       // use a long timeout due to the time it takes to mine a lot of blocks
       timeout: 5 * 60 * 1000,
-    }) as unknown as BitcoinCoreClient;
+    }) as unknown as BitcoinCoreClient & { allowDefaultWallet: boolean };
+    // Explicitly address the unnamed wallet when Paykit participant wallets are loaded.
+    client.allowDefaultWallet = true;
+    return client;
   }
 
   async createDefaultWallet(node: BitcoinNode) {
     const client = this.createClient(node);
     const wallets = await client.listWallets();
-    if (wallets.length === 0) {
-      await client.createWallet('');
+    if (!wallets.includes('')) {
+      try {
+        await client.loadWallet('');
+      } catch (error: any) {
+        if (error.code !== -18) throw error;
+        await client.createWallet('');
+      }
     }
   }
 

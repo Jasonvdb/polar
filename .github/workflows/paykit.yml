@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: 20
       - name: Harness failure guards
-        run: node --test scripts/paykit-harness.test.js
+        run: node --test scripts/paykit-*.test.js
       - name: Build local service
         run: docker build -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
       - name: Real Pubky and PostgreSQL scenarios

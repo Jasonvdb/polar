@@ -4,9 +4,11 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { execFileSync } = require('child_process');
-const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
+const { sleep, serviceBase, requestJson, runCli, operationFailure } = require('./paykit-harness');
 
-async function run({ base, tokenFile, serviceContainer, postgresContainer, signal, progress = stage => console.log(stage) }) {
+async function run({ base, tokenFile, serviceContainer, postgresContainer, walletFixture, scope = 'full', signal, progress = stage => console.log(stage) }) {
+  assert(['full', 'pubky-only'].includes(scope), 'Unknown scenario scope');
+  assert(scope === 'pubky-only' || walletFixture, 'Full scenarios require the real wallet fixture. Run node scripts/paykit-ci.js, or explicitly choose --pubky-only for the earlier 23 Pubky checks.');
   const stages = [];
   const stage = name => { signal?.throwIfAborted(); progress(name); stages.push(name); };
   const token = fs.readFileSync(tokenFile, 'utf8').trim();
@@ -48,7 +50,12 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, signa
     while (Date.now() < deadline) {
       const operation = await request(`/v1/operations/${id}`);
       if (['succeeded', 'failed'].includes(operation.data.status)) {
-        assert.equal(operation.data.status, expected, `Unexpected ${name} outcome`);
+        if (operation.data.status !== expected) {
+          let receiver;
+          try { receiver = (await state()).receivers.find(item => item.id === input.receiverId); }
+          catch (_) { /* The known operation error is retained if state is unavailable. */ }
+          assert.fail(operationFailure(name, operation.data, receiver));
+        }
         return { body, operation: operation.data };
       }
       if (Date.now() - lastProgress >= 15000) { progress(`operation.waiting:${name}:${operation.data.status}`); lastProgress = Date.now(); }
@@ -133,12 +140,13 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, signa
     inspectMarker(wallet);
   }
   await require('./paykit-workspace-scenarios').run({ initial, state, command, request, stage, docker, serviceContainer, signal });
+  if (scope === 'full') await require('./paykit-payment-scenarios').run({ initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture });
   stage('complete');
-  return { stages, environmentId: initial.environmentId, participantKeys: initial.participants.map(p => p.publicKey), receiverNoiseKeys: initial.receivers.map(r => r.noisePublicKey), passed: true };
+  return { scope, stages, environmentId: initial.environmentId, participantKeys: initial.participants.map(p => p.publicKey), receiverNoiseKeys: initial.receivers.map(r => r.noisePublicKey), passed: true };
 }
 module.exports = { run };
 if (require.main === module) {
-  runCli(signal => run({ base: process.env.PAYKIT_API_URL, tokenFile: process.env.PAYKIT_TOKEN_FILE, serviceContainer: process.env.PAYKIT_TEST_SERVICE_CONTAINER, postgresContainer: process.env.PAYKIT_TEST_POSTGRES_CONTAINER, signal }), {
+  runCli(signal => run({ base: process.env.PAYKIT_API_URL, tokenFile: process.env.PAYKIT_TOKEN_FILE, serviceContainer: process.env.PAYKIT_TEST_SERVICE_CONTAINER, postgresContainer: process.env.PAYKIT_TEST_POSTGRES_CONTAINER, scope: process.argv.includes('--pubky-only') ? 'pubky-only' : 'full', signal }), {
     complete: report => console.log(JSON.stringify(report, null, 2)),
   });
 }

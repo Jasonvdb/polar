@@ -5,6 +5,14 @@ use uuid::Uuid;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workspace {
     pub receiver_id: Uuid,
+    #[serde(default)]
+    pub payment_methods: crate::payment_model::MethodsView,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_payment_list: Option<crate::payment_model::ListView>,
+    #[serde(default)]
+    pub reservations: Vec<crate::payment_model::ReservationView>,
+    #[serde(default)]
+    pub resolutions: Vec<crate::payment_model::ResolutionView>,
     pub delivery_paused: bool,
     pub links: Vec<LinkView>,
     #[serde(skip_serializing_if = "Option::is_none")]

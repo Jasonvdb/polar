@@ -5,6 +5,22 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const helper = require.resolve('./paykit-harness');
+function walletEvidence(environment) {
+  const completed = (channel, id) => ({ event: 'upstream.completed', channel, id, nonce: `nonce-${id}`, successfulIssuance: true });
+  const dropped = (channel, id) => ({ event: 'response.dropped', channel, id, nonce: `nonce-${id}` });
+  return {
+    coreContainer: `${environment}-core`, lndContainers: [0, 1, 2].map(i => `${environment}-lnd-${i}`), gateContainer: `${environment}-gate`,
+    readiness: [0, 1, 2].map(i => ({ syncedToChain: true, publicKey: `${environment}-wallet-${i}`, version: '0.20.0' })),
+    gateCounts: { core: { issuanceSuccess: 2 }, lnd: { issuanceSuccess: 1 } },
+    gateEvents: [completed('core', 1), dropped('core', 1), completed('lnd', 2), dropped('lnd', 2), completed('core', 3), { event: 'hold.finished', channel: 'core', id: 3, nonce: 'nonce-3', action: 'relay', reason: 'control' }],
+    storageFaults: [
+      { receiverId: 'receiver', faultId: 'fault', phase: 'host', active: true },
+      { receiverId: 'receiver', faultId: 'fault', phase: 'guest', active: true, observed: 'directory' },
+      { receiverId: 'receiver', faultId: 'fault', phase: 'host', active: false },
+      { receiverId: 'receiver', faultId: 'fault', phase: 'guest', active: false, observed: 'originalFile' },
+    ],
+  };
+}
 const { validateReport, requiredStages } = require('./paykit-ci');
 
 function child(code) {
@@ -67,12 +83,35 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-report-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const cleanup = { completed: true, remainingContainers: [], remainingNetworks: [], errors: [] };
-  const ledger = { runId: 'current', cleanup, environments: [{ environmentId: 'a' }, { environmentId: 'b' }] };
+  const ledger = { runId: 'current', cleanup, environments: ['a', 'b'].map(environmentId => ({ environmentId, wallets: walletEvidence(environmentId) })) };
   fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(ledger));
   assert.throws(() => validateReport(root));
-  const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
+  const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
   const write = value => fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(value));
   write(report); assert.equal(validateReport(root).passed, true);
+  assert.equal(requiredStages.length, 35);
+  write({ ...report, survivingWalletEnvironmentVerified: false }); assert.throws(() => validateReport(root));
+  for (const missing of ['issuance-reconciliation', 'storage-commit-safety']) {
+    write({ ...report, environments: report.environments.map(environment => ({ ...environment, stages: environment.stages.filter(stage => stage !== missing) })) });
+    assert.throws(() => validateReport(root));
+  }
+  write(report);
+  for (const change of [
+    wallets => { wallets.gateEvents = []; },
+    wallets => { wallets.gateEvents.find(event => event.event === 'upstream.completed').nonce = 'unrelated'; },
+    wallets => { wallets.storageFaults.pop(); },
+    wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.phase !== 'guest'); },
+    wallets => { wallets.storageFaults[1].observed = 'file'; },
+    wallets => { wallets.storageFaults[3].faultId = 'different'; },
+    wallets => { wallets.storageFaults.reverse(); },
+    wallets => { wallets.lndContainers.pop(); },
+    wallets => { wallets.readiness[0].syncedToChain = false; },
+  ]) {
+    const broken = JSON.parse(JSON.stringify(ledger)); change(broken.environments[0].wallets);
+    fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(broken));
+    assert.throws(() => validateReport(root));
+  }
+  fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(ledger));
   write({ ...report, runId: 'stale' }); assert.throws(() => validateReport(root));
   write({ ...report, environments: [{ ...report.environments[0], stages: ['readiness'] }, report.environments[1]] }); assert.throws(() => validateReport(root));
   write({ ...report, cleanup: { ...cleanup, completed: false, remainingContainers: ['owned'] } }); assert.throws(() => validateReport(root));
@@ -87,4 +126,14 @@ test('requests resolve the current Docker mapping after restart rather than the 
     runCli(async()=>{await requestJson(serviceBase('owned-service',docker)+'/health');port=32770;await requestJson(serviceBase('owned-service',docker)+'/health');await requestJson(serviceBase('owned-service',docker)+'/v1/state');return calls}, {complete: calls=>console.log(JSON.stringify(calls))});`);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), ['http://127.0.0.1:32769/health', 'http://127.0.0.1:32770/health', 'http://127.0.0.1:32770/v1/state']);
+});
+
+
+test('unexpected operation diagnostics retain public failure and receiver state only', () => {
+  const { operationFailure } = require('./paykit-harness');
+  const message = operationFailure('receiver.restart', { id: 'operation-id', status: 'failed', error: { code: 'operation_failed', message: 'Receiver unavailable', privateDetail: 'secret-error' }, result: { privateState: 'secret-result' } }, { id: 'receiver-id', status: 'crashed', generation: 4, lastError: 'Restart required', session: 'secret-session' });
+  assert(message.includes('operation_failed') && message.includes('Receiver unavailable'));
+  assert(message.includes('receiver-id') && message.includes('crashed') && message.includes('Restart required'));
+  assert(!message.includes('secret-'));
+  assert(operationFailure('receiver.restart', { id: 'id', status: 'failed' }).includes('id'));
 });

@@ -23,6 +23,7 @@ import { Status } from 'shared/types';
 import { useStoreActions } from 'store';
 import { Network } from 'types';
 import { paykitService } from 'lib/paykit/paykitService';
+import PaykitPaymentMethods from './PaykitPaymentMethods';
 import PaykitLinks from './PaykitLinks';
 import PaykitProfilesContacts from './PaykitProfilesContacts';
 
@@ -332,6 +333,15 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
             — {receiver.path}
           </Typography.Paragraph>
           <PaykitLinks
+            receiverId={receiver.id}
+            workspace={state.receiverWorkspaces?.find(
+              item => item.receiverId === receiver.id,
+            )}
+            state={state}
+            disabled={disabled || receiver.status !== 'running'}
+            command={command}
+          />
+          <PaykitPaymentMethods
             receiverId={receiver.id}
             workspace={state.receiverWorkspaces?.find(
               item => item.receiverId === receiver.id,

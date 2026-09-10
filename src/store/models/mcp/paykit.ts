@@ -42,7 +42,7 @@ export const paykitDefinition: McpToolDefinition = {
                     `${command}: ${fields.join(', ') || 'empty object'}`,
                 )
                 .join('; ') +
-              '. receiverPaths is a string array; other fields are strings. profile.publish avatar fields are optional together: absent retains, both empty removes; otherwise PNG/JPEG base64 up to 256 KiB. Peer paths must be explicit. link.sendEmptyList queues an encrypted list without payment endpoints. delivery.sync respects pause. Public contact sharing is explicit via contact.publish; unpublish before removing a shared contact or path. Unblock requires explicit relinking.',
+              '. receiverPaths, enabledMethods and preference are string arrays; expirySeconds is an integer from 1 to 604800; other fields are strings. amountSats is a canonical positive decimal string up to 2100000000000000. Methods are btc-onchain and btc-lightning-bolt11. paymentList.resolve requires explicit public/private source and optional method override, otherwise a saved nonempty preference. Private never falls back to public. paymentList.consume consumes a private version without paying. Wallet IDs come from the safe state catalog; wallet URLs and credentials are never accepted. profile.publish avatar fields are optional together: absent retains, both empty removes; otherwise PNG/JPEG base64 up to 256 KiB. Peer paths must be explicit. link.sendEmptyList queues an encrypted list without payment endpoints. delivery.sync respects pause. Public contact sharing is explicit via contact.publish; unpublish before removing a shared contact or path. Unblock requires explicit relinking.',
           },
         },
       },
