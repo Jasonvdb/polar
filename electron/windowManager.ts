@@ -1,20 +1,38 @@
 import { app, BrowserWindow, ipcMain, Menu } from 'electron';
-import { warn } from 'electron-log';
+import { error, warn } from 'electron-log';
 import windowState from 'electron-window-state';
 import { join } from 'path';
 import { initAppIpcListener } from './appIpcListener';
 import { appMenuTemplate } from './appMenu';
 import { APP_ROOT, BASE_URL, IS_DEV } from './constants';
-import { clearProxyCache, initLndProxy } from './lnd/lndProxyServer';
+import { initLitdProxy } from './litd/litdProxyServer';
+import {
+  clearLndProxyCache,
+  initLndProxy,
+  initLndSubscriptions,
+  initLndWalletUnlockerProxy,
+} from './lnd/lndProxyServer';
+import { startMcpBridge } from './mcpBridge';
+import { initTapdProxy } from './tapd/tapdProxyServer';
+import TrayManager from './trayManager';
 
 class WindowManager {
   mainWindow: BrowserWindow | null = null;
+  trayManager: TrayManager | null = null;
 
   start() {
     app.on('ready', async () => {
       await this.createMainWindow();
       initLndProxy(ipcMain);
+      initTapdProxy(ipcMain);
+      initLitdProxy(ipcMain);
       initAppIpcListener(ipcMain);
+      initLndSubscriptions(this.sendMessageToRenderer);
+      initLndWalletUnlockerProxy(ipcMain);
+      // Start MCP bridge after main window is created
+      if (this.mainWindow) {
+        startMcpBridge(this.mainWindow);
+      }
     });
     app.on('window-all-closed', this.onAllClosed);
     app.on('activate', this.onActivate);
@@ -39,21 +57,34 @@ class WindowManager {
       icon: join(APP_ROOT, 'assets', 'icon.png'),
       webPreferences: {
         nodeIntegration: true,
+        contextIsolation: false,
+        enableRemoteModule: true,
       },
     });
+
+    // create App system tray icon with context menus
+    if (!this.trayManager) {
+      this.trayManager = new TrayManager(this.mainWindow);
+    }
+
     this.mainWindow.setMenuBarVisibility(false);
 
     if (IS_DEV) {
       await this.setupDevEnv();
     }
-
+    this.mainWindow.on('close', e => {
+      e.preventDefault();
+      this.onMainWindowClose();
+    });
     this.mainWindow.on('closed', this.onMainClosed);
+
+    ipcMain.on('docker-shut-down', this.onDockerContainerShutdown);
 
     // use dev server for hot reload or file in production
     this.mainWindow.loadURL(BASE_URL);
 
     // clear the proxy cached data if the window is reloaded
-    this.mainWindow.webContents.on('did-finish-load', clearProxyCache);
+    this.mainWindow.webContents.on('did-finish-load', clearLndProxyCache);
 
     mainState.manage(this.mainWindow);
   }
@@ -75,12 +106,23 @@ class WindowManager {
 
   onMainClosed() {
     this.mainWindow = null;
+    this.trayManager?.destroy();
+    app.quit();
   }
 
   onAllClosed() {
-    if (process.platform !== 'darwin') {
-      app.quit();
+    this.trayManager?.destroy();
+    app.quit();
+  }
+
+  onMainWindowClose() {
+    if (this.mainWindow) {
+      this.mainWindow.webContents.send('app-closing');
     }
+  }
+  onDockerContainerShutdown() {
+    this.mainWindow = null;
+    app.exit(0);
   }
 
   onActivate() {
@@ -88,6 +130,14 @@ class WindowManager {
       this.createMainWindow();
     }
   }
+
+  sendMessageToRenderer = (responseChan: string, message: any) => {
+    if (this.mainWindow && this.mainWindow.webContents) {
+      this.mainWindow.webContents.send(responseChan, message);
+    } else {
+      error(`unable to send message ${message} to renderer on channel ${responseChan}`);
+    }
+  };
 }
 
 export default WindowManager;

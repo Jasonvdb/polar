@@ -1,11 +1,10 @@
 import React from 'react';
 import { GlobalOutlined } from '@ant-design/icons';
 import styled from '@emotion/styled';
-import { Button, Dropdown, Menu } from 'antd';
+import { Button, Dropdown } from 'antd';
 import { MenuProps } from 'antd/lib/menu';
-import { useStoreState } from 'easy-peasy';
 import { languages } from 'i18n';
-import { useStoreActions } from 'store';
+import { useStoreActions, useStoreState } from 'store';
 
 const Styled = {
   Button: styled(Button)`
@@ -20,19 +19,17 @@ const LocaleSwitch: React.FC = () => {
     updateSettings({ lang: e.key.toString() });
   };
 
-  const menu = (
-    <Menu onClick={changeLanguage} selectedKeys={[settings.lang]}>
-      {Object.entries(languages).map(([key, lang]) => (
-        <Menu.Item key={key}>
-          {lang} ({key})
-        </Menu.Item>
-      ))}
-    </Menu>
-  );
+  const items: MenuProps['items'] = Object.entries(languages).map(([key, lang]) => ({
+    key,
+    label: `${lang} (${key})`,
+  }));
 
   return (
     <>
-      <Dropdown overlay={menu} placement="topRight">
+      <Dropdown
+        menu={{ onClick: changeLanguage, selectedKeys: [settings.lang], items }}
+        placement="topRight"
+      >
         <Styled.Button type="link">
           <GlobalOutlined />
           {languages[settings.lang]}

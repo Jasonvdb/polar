@@ -26,7 +26,7 @@ const CustomImageModal: React.FC<Props> = ({ image, onClose }) => {
   const fetchImagesAsync = useAsync(async () => {
     try {
       await getDockerImages();
-    } catch (error) {
+    } catch (error: any) {
       notify({ message: l('loadImagesError'), error });
     }
   }, [image]);
@@ -35,7 +35,7 @@ const CustomImageModal: React.FC<Props> = ({ image, onClose }) => {
     try {
       await saveCustomImage(imageToSave);
       onClose();
-    } catch (error) {
+    } catch (error: any) {
       notify({ message: l('saveError'), error });
     }
   });
@@ -50,16 +50,17 @@ const CustomImageModal: React.FC<Props> = ({ image, onClose }) => {
   };
 
   const platform = getPolarPlatform();
-  const lnImpls: NodeImplementation[] = ['LND', 'c-lightning', 'eclair'];
+  const lnImpls: NodeImplementation[] = ['LND', 'c-lightning', 'eclair', 'litd'];
   const implGroups: Record<string, NodeImplementation[]> = {
     Lightning: lnImpls.filter(i => dockerConfigs[i].platforms.includes(platform)),
     Bitcoin: ['bitcoind'],
+    'Taproot Assets': ['tapd'],
   };
 
   return (
     <Modal
       title={l('title', image)}
-      visible
+      open
       width={600}
       destroyOnClose
       maskClosable={false}

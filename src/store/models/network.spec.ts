@@ -1,43 +1,61 @@
+import * as electron from 'electron';
 import * as log from 'electron-log';
 import { waitFor } from '@testing-library/react';
 import detectPort from 'detect-port';
 import { createStore } from 'easy-peasy';
-import { NodeImplementation, Status } from 'shared/types';
-import { CustomImage, Network } from 'types';
+import { CLightningNode, NodeImplementation, Status, TapdNode } from 'shared/types';
+import { AutoMineMode, CustomImage, Network } from 'types';
+import * as asyncUtil from 'utils/async';
 import { initChartFromNetwork } from 'utils/chart';
 import { defaultRepoState } from 'utils/constants';
 import * as files from 'utils/files';
 import {
+  bitcoinServiceMock,
   getNetwork,
   injections,
   lightningServiceMock,
+  litdServiceMock,
+  tapServiceMock,
   testCustomImages,
+  testRepoState,
 } from 'utils/tests';
 import appModel from './app';
-import bitcoindModel from './bitcoind';
+import bitcoinModel from './bitcoin';
 import designerModel from './designer';
 import lightningModel from './lightning';
+import litModel from './lit';
 import networkModel from './network';
+import tapModel from './tap';
 
 jest.mock('utils/files', () => ({
   waitForFile: jest.fn(),
   rm: jest.fn(),
 }));
+jest.mock('utils/async');
+jest.mock('utils/network', () => ({
+  ...jest.requireActual('utils/network'),
+  zipNetwork: jest.fn().mockResolvedValue(undefined),
+}));
 
+const asyncUtilMock = asyncUtil as jest.Mocked<typeof asyncUtil>;
 const filesMock = files as jest.Mocked<typeof files>;
 const logMock = log as jest.Mocked<typeof log>;
 const detectPortMock = detectPort as jest.Mock;
-const bitcoindServiceMock = injections.bitcoindService as jest.Mocked<
-  typeof injections.bitcoindService
+const electronMock = electron as jest.Mocked<typeof electron>;
+const dockerServiceMock = injections.dockerService as jest.Mocked<
+  typeof injections.dockerService
 >;
+const dialogMock = electron.remote.dialog as jest.Mocked<typeof electron.remote.dialog>;
 
 describe('Network model', () => {
   const rootModel = {
     app: appModel,
     network: networkModel,
     lightning: lightningModel,
-    bitcoind: bitcoindModel,
+    bitcoin: bitcoinModel,
     designer: designerModel,
+    tap: tapModel,
+    lit: litModel,
   };
   // initialize store for type inference
   let store = createStore(rootModel, { injections });
@@ -47,11 +65,15 @@ describe('Network model', () => {
   // reusable args for adding a new network
   const addNetworkArgs = {
     name: 'test',
+    description: 'test description',
     lndNodes: 2,
     clightningNodes: 1,
     eclairNodes: 1,
     bitcoindNodes: 1,
+    tapdNodes: 0,
+    litdNodes: 1,
     customNodes: {},
+    manualMineCount: 6,
   };
 
   beforeEach(() => {
@@ -60,7 +82,8 @@ describe('Network model', () => {
     // always return true immediately
     filesMock.waitForFile.mockResolvedValue();
     lightningServiceMock.waitUntilOnline.mockResolvedValue();
-    bitcoindServiceMock.waitUntilOnline.mockResolvedValue();
+    bitcoinServiceMock.waitUntilOnline.mockResolvedValue();
+    litdServiceMock.waitUntilOnline.mockResolvedValue();
   });
 
   it('should have a valid initial state', () => {
@@ -85,11 +108,12 @@ describe('Network model', () => {
       expect(network).not.toBeNull();
       expect(network.id).toBe(1);
       expect(network.name).toBe('test');
+      expect(network.description).toBe('test description');
     });
 
     it('should fail to fetch a node with invalid id', () => {
       store.getActions().network.addNetwork(addNetworkArgs);
-      [99, '99', 'asdf', undefined, (null as unknown) as string].forEach(v => {
+      [99, '99', 'asdf', undefined, null as unknown as string].forEach(v => {
         expect(() => store.getState().network.networkById(v)).toThrow();
       });
     });
@@ -101,18 +125,19 @@ describe('Network model', () => {
       const { networks } = store.getState().network;
       expect(networks.length).toBe(1);
       expect(networks[0].name).toBe('test');
+      expect(networks[0].description).toBe('test description');
     });
 
     it('should call the docker service when adding a new network', async () => {
       await store.getActions().network.addNetwork(addNetworkArgs);
       expect(store.getState().network.networks.length).toBe(1);
-      expect(injections.dockerService.saveComposeFile).toBeCalledTimes(1);
+      expect(injections.dockerService.saveComposeFile).toHaveBeenCalledTimes(1);
     });
 
     it('should add a network with the correct lightning nodes', async () => {
       await store.getActions().network.addNetwork(addNetworkArgs);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning.length).toBe(4);
+      expect(lightning.length).toBe(5);
       lightning.forEach(node => {
         expect(node.type).toBe('lightning');
       });
@@ -144,17 +169,20 @@ describe('Network model', () => {
       await store.getActions().network.addNetwork({
         ...addNetworkArgs,
         name: 'test2',
+        description: 'test2 description',
       });
       const { networks } = store.getState().network;
       expect(networks.length).toBe(2);
       expect(networks[0].name).toBe('test');
+      expect(networks[0].description).toBe('test description');
       expect(networks[1].name).toBe('test2');
+      expect(networks[1].description).toBe('test2 description');
     });
 
     it('should save the networks to disk', async () => {
       await store.getActions().network.addNetwork(addNetworkArgs);
-      expect(injections.dockerService.saveComposeFile).toBeCalledTimes(1);
-      expect(injections.dockerService.saveNetworks).toBeCalledTimes(1);
+      expect(injections.dockerService.saveComposeFile).toHaveBeenCalledTimes(1);
+      expect(injections.dockerService.saveNetworks).toHaveBeenCalledTimes(1);
     });
 
     it('should add a network with custom nodes', async () => {
@@ -205,7 +233,7 @@ describe('Network model', () => {
       const payload = { id: firstNetwork().id, type: 'LND', version: lndLatest };
       store.getActions().network.addNode(payload);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning).toHaveLength(5);
+      expect(lightning).toHaveLength(6);
       expect(lightning[0].name).toBe('alice');
       expect(lightning[0].implementation).toBe('LND');
     });
@@ -218,7 +246,7 @@ describe('Network model', () => {
       };
       store.getActions().network.addNode(payload);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning).toHaveLength(5);
+      expect(lightning).toHaveLength(6);
       expect(lightning[1].name).toBe('bob');
       expect(lightning[1].implementation).toBe('c-lightning');
     });
@@ -227,7 +255,7 @@ describe('Network model', () => {
       const payload = { id: firstNetwork().id, type: 'eclair', version: eclairLatest };
       store.getActions().network.addNode(payload);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning).toHaveLength(5);
+      expect(lightning).toHaveLength(6);
       expect(lightning[2].name).toBe('carol');
       expect(lightning[2].implementation).toBe('eclair');
     });
@@ -264,8 +292,8 @@ describe('Network model', () => {
       };
       store.getActions().network.addNode(payload);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning[4].docker.image).toBe(testCustomImages[0].dockerImage);
-      expect(lightning[4].docker.command).toBe(testCustomImages[0].command);
+      expect(lightning[5].docker.image).toBe(testCustomImages[0].dockerImage);
+      expect(lightning[5].docker.command).toBe(testCustomImages[0].command);
     });
 
     it('should add a c-lightning custom node', async () => {
@@ -284,8 +312,8 @@ describe('Network model', () => {
       };
       store.getActions().network.addNode(payload);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning[4].docker.image).toBe(testCustomImages[1].dockerImage);
-      expect(lightning[4].docker.command).toBe(testCustomImages[1].command);
+      expect(lightning[5].docker.image).toBe(testCustomImages[1].dockerImage);
+      expect(lightning[5].docker.command).toBe(testCustomImages[1].command);
     });
 
     it('should add a bitcoind custom node', async () => {
@@ -353,7 +381,7 @@ describe('Network model', () => {
       const payload = { id: firstNetwork().id, type: 'LND', version: lndLatest };
       store.getActions().network.addNode(payload);
       const { lightning } = firstNetwork().nodes;
-      expect(lightning[4].docker.command).toBe('test-command');
+      expect(lightning[5].docker.command).toBe('test-command');
     });
   });
 
@@ -370,14 +398,20 @@ describe('Network model', () => {
       const node = firstNetwork().nodes.lightning[0];
       await store.getActions().network.removeLightningNode({ node });
       const { lightning } = firstNetwork().nodes;
-      expect(lightning).toHaveLength(3);
+      expect(lightning).toHaveLength(4);
       expect(lightning[0].name).toBe('bob');
     });
 
     it('should remove a c-lightning node from an existing network', async () => {
       const node = firstNetwork().nodes.lightning[1];
       await store.getActions().network.removeLightningNode({ node });
-      expect(firstNetwork().nodes.lightning).toHaveLength(3);
+      expect(firstNetwork().nodes.lightning).toHaveLength(4);
+    });
+
+    it('should remove a litd node from an existing network', async () => {
+      const node = firstNetwork().nodes.lightning[3];
+      await store.getActions().network.removeLightningNode({ node });
+      expect(firstNetwork().nodes.lightning).toHaveLength(4);
     });
 
     it('should throw an error if the lightning node network id is invalid', async () => {
@@ -414,6 +448,7 @@ describe('Network model', () => {
     });
 
     it('should throw an error if a LN node depends on the bitcoin node being removed', async () => {
+      store.getActions().app.setRepoState(testRepoState);
       const { removeBitcoinNode, addNode } = store.getActions().network;
       const { id } = firstNetwork();
       // add old bitcoin and LN nodes
@@ -422,8 +457,40 @@ describe('Network model', () => {
       // try to remove the old bitcoind version
       const node = firstNetwork().nodes.bitcoin[2];
       await expect(removeBitcoinNode({ node })).rejects.toThrow(
-        'There are no other compatible backends for erin to connect to. You must remove the erin node first',
+        'There are no other compatible backends for frank to connect to. You must remove the frank node first',
       );
+    });
+
+    it('should throw if the simulation is connected to a node', async () => {
+      const { addSimulation, removeLightningNode } = store.getActions().network;
+      const network = firstNetwork();
+      const config = {
+        networkId: network.id,
+        simulation: {
+          activity: [
+            {
+              id: 0,
+              source: network.nodes.lightning[0].name,
+              destination: network.nodes.lightning[1].name,
+              intervalSecs: 10,
+              amountMsat: 1000000,
+            },
+          ],
+          status: Status.Started,
+        },
+      };
+      await addSimulation(config);
+      await expect(
+        removeLightningNode({ node: network.nodes.lightning[0] }),
+      ).rejects.toThrow('Cannot remove alice because it is connected to a simulation.');
+
+      await expect(
+        removeLightningNode({ node: network.nodes.lightning[1] }),
+      ).rejects.toThrow('Cannot remove bob because it is connected to a simulation.');
+
+      await removeLightningNode({ node: network.nodes.lightning[2] });
+
+      expect(network.nodes.lightning).toHaveLength(4);
     });
 
     it('should update peers of surrounding bitcoin nodes', async () => {
@@ -533,13 +600,14 @@ describe('Network model', () => {
       const { start } = store.getActions().network;
       const network = firstNetwork();
       await start(network.id);
-      expect(injections.dockerService.start).toBeCalledWith(
+      expect(injections.dockerService.start).toHaveBeenCalledWith(
         expect.objectContaining({ id: network.id }),
       );
     });
 
     it('should set lightning node status to error if the node startup fails', async () => {
       lightningServiceMock.waitUntilOnline.mockRejectedValue(new Error('test-error'));
+      litdServiceMock.waitUntilOnline.mockRejectedValue(new Error('test-error'));
       const { start } = store.getActions().network;
       await start(firstNetwork().id);
       const { lightning } = firstNetwork().nodes;
@@ -548,7 +616,7 @@ describe('Network model', () => {
     });
 
     it('should set bitcoind node status to error if the node startup fails', async () => {
-      bitcoindServiceMock.waitUntilOnline.mockRejectedValue(new Error('test-error'));
+      bitcoinServiceMock.waitUntilOnline.mockRejectedValue(new Error('test-error'));
       const { start } = store.getActions().network;
       await start(firstNetwork().id);
       const { bitcoin } = firstNetwork().nodes;
@@ -557,7 +625,7 @@ describe('Network model', () => {
     });
 
     it('should mine a block on startup', async () => {
-      bitcoindServiceMock.getBlockchainInfo.mockResolvedValue({ blocks: 0 } as any);
+      bitcoinServiceMock.getBlockchainInfo.mockResolvedValue({ blocks: 0 } as any);
       const { start } = store.getActions().network;
       const network = firstNetwork();
       await start(network.id);
@@ -565,11 +633,11 @@ describe('Network model', () => {
         ...firstNetwork().nodes.bitcoin[0],
         status: Status.Starting,
       };
-      expect(bitcoindServiceMock.mine).toBeCalledWith(1, btcNode);
+      expect(bitcoinServiceMock.mine).toHaveBeenCalledWith(1, btcNode);
     });
 
     it('should not throw when mining a block on startup fails', async () => {
-      bitcoindServiceMock.mine.mockRejectedValue(new Error('test-error'));
+      bitcoinServiceMock.mine.mockRejectedValue(new Error('test-error'));
       const { start } = store.getActions().network;
       const network = firstNetwork();
       await expect(start(network.id)).resolves.not.toThrow();
@@ -577,7 +645,7 @@ describe('Network model', () => {
         ...firstNetwork().nodes.bitcoin[0],
         status: Status.Starting,
       };
-      expect(bitcoindServiceMock.mine).toBeCalledWith(1, btcNode);
+      expect(bitcoinServiceMock.mine).toHaveBeenCalledWith(1, btcNode);
     });
 
     it('should not save compose file and networks if all ports are available', async () => {
@@ -589,9 +657,9 @@ describe('Network model', () => {
       await start(network.id);
       const { lightning } = firstNetwork().nodes;
       expect(lightning[0].ports.grpc).toBe(10001);
-      expect(lightning[3].ports.grpc).toBe(10004);
-      expect(injections.dockerService.saveComposeFile).toBeCalledTimes(0);
-      expect(injections.dockerService.saveNetworks).toBeCalledTimes(0);
+      expect(lightning[4].ports.grpc).toBe(10005);
+      expect(injections.dockerService.saveComposeFile).toHaveBeenCalledTimes(0);
+      expect(injections.dockerService.saveNetworks).toHaveBeenCalledTimes(0);
     });
 
     it('should save compose file and networks when a port is in use', async () => {
@@ -604,6 +672,7 @@ describe('Network model', () => {
       await store.getActions().network.addNetwork({
         ...addNetworkArgs,
         name: 'test2',
+        description: 'test2 description',
       });
       (injections.dockerService.saveComposeFile as jest.Mock).mockReset();
       (injections.dockerService.saveNetworks as jest.Mock).mockReset();
@@ -612,9 +681,9 @@ describe('Network model', () => {
       await start(network.id);
       const { lightning } = firstNetwork().nodes;
       expect(lightning[0].ports.grpc).toBe(10002);
-      expect(lightning[3].ports.grpc).toBe(10004);
-      expect(injections.dockerService.saveComposeFile).toBeCalledTimes(1);
-      expect(injections.dockerService.saveNetworks).toBeCalledTimes(1);
+      expect(lightning[4].ports.grpc).toBe(10005);
+      expect(injections.dockerService.saveComposeFile).toHaveBeenCalledTimes(1);
+      expect(injections.dockerService.saveNetworks).toHaveBeenCalledTimes(1);
     });
 
     it('should catch exception if it cannot connect all peers', async () => {
@@ -627,9 +696,9 @@ describe('Network model', () => {
       const network = firstNetwork();
       await start(network.id);
       await waitFor(() => {
-        expect(lightningServiceMock.connectPeers).toBeCalledTimes(3);
+        expect(lightningServiceMock.connectPeers).toHaveBeenCalledTimes(3);
       });
-      expect(logMock.info).toBeCalledWith('Failed to connect all LN peers', err);
+      expect(logMock.info).toHaveBeenCalledWith('Failed to connect all LN peers', err);
     });
 
     it('should throw an error if a custom node image is missing', async () => {
@@ -640,6 +709,15 @@ describe('Network model', () => {
       const errMsg =
         'Cannot start the network because it contains custom node images that are not available on this machine: custom-image:latest';
       await expect(start(firstNetwork().id)).rejects.toThrow(errMsg);
+    });
+
+    it('should wait for lightning nodes to be online then add listeners', async () => {
+      const { monitorStartup } = store.getActions().network;
+      await monitorStartup(firstNetwork().nodes.lightning);
+      await waitFor(() => {
+        expect(lightningServiceMock.waitUntilOnline).toHaveBeenCalled();
+        expect(lightningServiceMock.addListenerToNode).toHaveBeenCalled();
+      });
     });
   });
 
@@ -686,7 +764,79 @@ describe('Network model', () => {
     it('should call the dockerService when stopping a network', async () => {
       const { stop } = store.getActions().network;
       await stop(firstNetwork().id);
-      expect(injections.dockerService.stop).toBeCalledWith(firstNetwork());
+      expect(injections.dockerService.stop).toHaveBeenCalledWith(firstNetwork());
+    });
+
+    it('should call removeListener for lightning nodes when stopping a network', async () => {
+      const { stop } = store.getActions().network;
+      await stop(firstNetwork().id);
+      expect(lightningServiceMock.removeListener).toHaveBeenCalled();
+    });
+
+    it('should remove the simulation when stopping a network', async () => {
+      const { stop } = store.getActions().network;
+      const network = firstNetwork();
+      network.simulation = {
+        activity: [
+          {
+            id: 0,
+            source: network.nodes.lightning[0].name,
+            destination: network.nodes.lightning[1].name,
+            intervalSecs: 10,
+            amountMsat: 1000000,
+          },
+        ],
+        status: Status.Stopped,
+      };
+      await stop(firstNetwork().id);
+      expect(injections.dockerService.removeSimulation).toHaveBeenCalled();
+    });
+  });
+
+  describe('Stop all', () => {
+    beforeEach(() => {
+      const { addNetwork } = store.getActions().network;
+      addNetwork(addNetworkArgs);
+    });
+
+    it('should shutdown immediately for stopped networks', async () => {
+      const { stopAll } = store.getActions().network;
+      await stopAll();
+      expect(electronMock.ipcRenderer.send).toHaveBeenCalledWith('docker-shut-down');
+    });
+
+    it('should stop the started networks', async () => {
+      const { stopAll, setStatus } = store.getActions().network;
+      setStatus({ id: firstNetwork().id, status: Status.Started });
+      await stopAll();
+      const { networks } = store.getState().network;
+      expect(networks.filter(n => n.status !== Status.Stopped)).toHaveLength(0);
+      expect(firstNetwork().status).toBe(Status.Stopped);
+    });
+
+    it('should handle a delay when stopping the networks', async () => {
+      jest.useFakeTimers();
+      asyncUtilMock.delay.mockResolvedValue(0);
+      const { stopAll, setStatus } = store.getActions().network;
+
+      setStatus({ id: firstNetwork().id, status: Status.Started });
+      await stopAll();
+      expect(setInterval).toHaveBeenCalledTimes(1);
+
+      // simulate the interval being called with Stopping nodes
+      setStatus({ id: firstNetwork().id, status: Status.Stopping });
+      jest.advanceTimersByTime(2000);
+      expect(electronMock.ipcRenderer.send).not.toHaveBeenCalled();
+
+      // simulate the interval being called with Stopped nodes
+      setStatus({ id: firstNetwork().id, status: Status.Stopped });
+      jest.advanceTimersByTime(2000);
+
+      // confirm the IPC message is sent
+      await waitFor(() => {
+        expect(electronMock.ipcRenderer.send).toHaveBeenCalledWith('docker-shut-down');
+      });
+      jest.useRealTimers();
     });
   });
 
@@ -744,6 +894,7 @@ describe('Network model', () => {
     const firstNode = () => firstNetwork().nodes.lightning[0];
 
     beforeEach(() => {
+      detectPortMock.mockImplementation(port => Promise.resolve(port));
       const { addNetwork } = store.getActions().network;
       addNetwork(addNetworkArgs);
     });
@@ -788,6 +939,151 @@ describe('Network model', () => {
       node.networkId = 10;
       await expect(toggleNode(node)).rejects.toThrow();
     });
+
+    it('should update node ports when starting', async () => {
+      const portsInUse = [8084];
+      detectPortMock.mockImplementation(port =>
+        Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
+      );
+      const { toggleNode } = store.getActions().network;
+      let node = firstNetwork().nodes.lightning[4];
+      await toggleNode(node);
+      // get a reference to the updated nodes
+      node = firstNetwork().nodes.lightning[4];
+      expect(node.ports.rest).toBe(8085);
+    });
+
+    it('should start the node with its updated ports, not the stale ones', async () => {
+      const staleNode = firstNetwork().nodes.lightning[1] as CLightningNode;
+      const staleRestPort = staleNode.ports.rest;
+      const portsInUse = [staleRestPort];
+      detectPortMock.mockImplementation(port =>
+        Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
+      );
+      const { toggleNode } = store.getActions().network;
+      await toggleNode(staleNode);
+      expect(injections.dockerService.startNode).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({
+          ports: expect.objectContaining({ rest: staleRestPort + 1 }),
+        }),
+      );
+    });
+
+    it('should fall back to the passed-in node if it is renamed elsewhere while ports are being checked', async () => {
+      const targetNode = firstNetwork().nodes.lightning[1] as CLightningNode;
+      const originalName = targetNode.name;
+      const conflictPort = targetNode.ports.rest;
+
+      detectPortMock.mockImplementation(async (port: number) => {
+        if (port === conflictPort) {
+          const { setNetworks } = store.getActions().network;
+          const network = firstNetwork();
+          setNetworks([
+            {
+              ...network,
+              nodes: {
+                ...network.nodes,
+                lightning: network.nodes.lightning.map(n =>
+                  n.name === originalName ? { ...n, name: 'renamed-elsewhere' } : n,
+                ),
+              },
+            },
+          ]);
+          return port + 1;
+        }
+        return port;
+      });
+
+      const { toggleNode } = store.getActions().network;
+      await toggleNode(targetNode);
+      expect(injections.dockerService.startNode).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ name: originalName }),
+      );
+    });
+  });
+
+  describe('TAP network', () => {
+    beforeEach(() => {
+      (() => {
+        const network = getNetwork(1, 'test network', Status.Stopped, 2);
+        store.getActions().network.setNetworks([network]);
+        const chart = initChartFromNetwork(network);
+        store.getActions().designer.setChart({ id: network.id, chart });
+        store.getActions().designer.setActiveId(network.id);
+        return network;
+      })();
+    });
+
+    it('should remove a tap network', async () => {
+      await store.getActions().network.remove(firstNetwork().id);
+      expect(firstNetwork()).toBeUndefined();
+    });
+
+    it('should throw when removing a node with an invalid network id', async () => {
+      const node = {
+        ...firstNetwork().nodes.tap[0],
+        networkId: 999,
+      };
+      const { removeTapNode } = store.getActions().network;
+      await expect(removeTapNode({ node })).rejects.toThrow(
+        "Network with the id '999' was not found.",
+      );
+    });
+
+    it('should set tap node status to error if the node startup fails', async () => {
+      tapServiceMock.waitUntilOnline.mockRejectedValue(new Error('test-error'));
+      const { start } = store.getActions().network;
+      await start(firstNetwork().id);
+      const { tap } = firstNetwork().nodes;
+      tap.forEach(node => expect(node.status).toBe(Status.Error));
+      tap.forEach(node => expect(node.errorMsg).toBe('test-error'));
+    });
+    it('should update the backend LND node', async () => {
+      const { updateTapBackendNode } = store.getActions().network;
+      const { id, nodes } = firstNetwork();
+      const tapdNode = nodes.tap[0] as TapdNode;
+      expect(tapdNode.lndName).toBe('alice');
+      await updateTapBackendNode({ id, lndName: 'bob', tapName: 'alice-tap' });
+      expect(tapdNode.lndName).toBe('bob');
+    });
+
+    it('should throw an error if the network id is not valid', async () => {
+      const { updateTapBackendNode } = store.getActions().network;
+      const args = { id: 999, tapName: 'alice-tap', lndName: 'alice' };
+      await expect(updateTapBackendNode(args)).rejects.toThrow(
+        "Network with the id '999' was not found.",
+      );
+    });
+
+    it('should throw an error if the tap node name is not valid', async () => {
+      const { updateTapBackendNode } = store.getActions().network;
+      const args = { id: firstNetwork().id, tapName: 'xxx', lndName: 'alice' };
+      await expect(updateTapBackendNode(args)).rejects.toThrow(
+        "The node 'xxx' was not found.",
+      );
+    });
+
+    it('should throw an error if the LND node name is not valid', async () => {
+      const { updateTapBackendNode } = store.getActions().network;
+      const args = { id: firstNetwork().id, tapName: 'alice', lndName: 'xxx' };
+      await expect(updateTapBackendNode(args)).rejects.toThrow(
+        "The node 'xxx' was not found.",
+      );
+    });
+
+    it('should throw an error if the LND node name is already set on the tap node', async () => {
+      const { updateTapBackendNode } = store.getActions().network;
+      const args = {
+        id: firstNetwork().id,
+        tapName: 'alice-tap',
+        lndName: 'alice',
+      };
+      await expect(updateTapBackendNode(args)).rejects.toThrow(
+        "The node 'alice-tap' is already connected to 'alice'",
+      );
+    });
   });
 
   describe('Monitor Status', () => {
@@ -799,8 +1095,8 @@ describe('Network model', () => {
     it('should do nothing if no nodes are provided', async () => {
       const { monitorStartup } = store.getActions().network;
       await monitorStartup([]);
-      expect(lightningServiceMock.waitUntilOnline).not.toBeCalled();
-      expect(bitcoindServiceMock.waitUntilOnline).not.toBeCalled();
+      expect(lightningServiceMock.waitUntilOnline).not.toHaveBeenCalled();
+      expect(bitcoinServiceMock.waitUntilOnline).not.toHaveBeenCalled();
     });
 
     it('should fail with an invalid network id', async () => {
@@ -814,8 +1110,8 @@ describe('Network model', () => {
       const { monitorStartup } = store.getActions().network;
       await monitorStartup(firstNetwork().nodes.lightning);
       await waitFor(() => {
-        expect(lightningServiceMock.waitUntilOnline).toBeCalled();
-        expect(lightningServiceMock.connectPeers).toBeCalled();
+        expect(lightningServiceMock.waitUntilOnline).toHaveBeenCalled();
+        expect(lightningServiceMock.connectPeers).toHaveBeenCalled();
       });
     });
 
@@ -823,8 +1119,8 @@ describe('Network model', () => {
       const { monitorStartup } = store.getActions().network;
       await monitorStartup(firstNetwork().nodes.bitcoin);
       await waitFor(() => {
-        expect(bitcoindServiceMock.waitUntilOnline).toBeCalled();
-        expect(bitcoindServiceMock.connectPeers).toBeCalled();
+        expect(bitcoinServiceMock.waitUntilOnline).toHaveBeenCalled();
+        expect(bitcoinServiceMock.connectPeers).toHaveBeenCalled();
       });
     });
 
@@ -833,11 +1129,250 @@ describe('Network model', () => {
       const { bitcoin } = firstNetwork().nodes;
       bitcoin[0].type = 'asdf' as any;
       await monitorStartup(bitcoin);
-      expect(bitcoindServiceMock.waitUntilOnline).not.toBeCalled();
+      expect(bitcoinServiceMock.waitUntilOnline).not.toHaveBeenCalled();
+    });
+
+    it('should set lightning node status to Locked when waitUntilOnline aborts', async () => {
+      lightningServiceMock.waitUntilOnline.mockRejectedValue(
+        new asyncUtil.AbortWaitError('wallet-locked'),
+      );
+      const { monitorStartup } = store.getActions().network;
+      await monitorStartup(firstNetwork().nodes.lightning);
+      await waitFor(() => {
+        const { lightning } = firstNetwork().nodes;
+        lightning
+          .filter(n => n.implementation === 'LND')
+          .forEach(n => expect(n.status).toBe(Status.Locked));
+      });
+    });
+  });
+
+  describe('ManualMineCount', () => {
+    beforeEach(async () => {
+      await store.getActions().network.addNetwork(addNetworkArgs);
+    });
+
+    it('should set manual mine count for a network', () => {
+      const { setManualMineCount } = store.getActions().network;
+      const networkId = firstNetwork().id;
+
+      expect(firstNetwork().manualMineCount).toBe(6);
+      setManualMineCount({ id: networkId, count: 10 });
+      expect(firstNetwork().manualMineCount).toBe(10);
+    });
+
+    it('should fail to set manual mine count with invalid network id', () => {
+      const { setManualMineCount } = store.getActions().network;
+      expect(() => setManualMineCount({ id: 999, count: 10 })).toThrow(
+        "Network with the id '999' was not found.",
+      );
+    });
+
+    it('should update manual mine count and persist changes', async () => {
+      const { updateManualMineCount } = store.getActions().network;
+      const networkId = firstNetwork().id;
+      await updateManualMineCount({ id: networkId, count: 15 });
+      expect(firstNetwork().manualMineCount).toBe(15);
+    });
+
+    it('should fail to update manual mine count with invalid network id', () => {
+      const { updateManualMineCount } = store.getActions().network;
+      expect(() => updateManualMineCount({ id: 999, count: 10 })).rejects.toThrow(
+        "Network with the id '999' was not found.",
+      );
+    });
+  });
+
+  describe('Simulation', () => {
+    beforeEach(() => {
+      const { addNetwork } = store.getActions().network;
+      addNetwork(addNetworkArgs);
+    });
+
+    it('should add simulation', async () => {
+      const { addSimulation } = store.getActions().network;
+      const network = firstNetwork();
+      const config = {
+        networkId: 10, // Set to a non-existent network id
+        simulation: {
+          activity: [
+            {
+              id: 0,
+              source: network.nodes.lightning[0].name,
+              destination: network.nodes.lightning[1].name,
+              intervalSecs: 10,
+              amountMsat: 1000000,
+            },
+          ],
+          status: Status.Stopped,
+        },
+      };
+      await expect(addSimulation(config)).rejects.toThrow();
+
+      config.networkId = network.id; // Set to the correct network id
+      await addSimulation(config);
+      expect(network.simulation).toEqual(config.simulation);
+      expect(injections.dockerService.saveComposeFile).toHaveBeenCalled();
+    });
+
+    it('should remove simulation', async () => {
+      const { removeSimulation, addSimulation } = store.getActions().network;
+      const network = firstNetwork();
+      const config = {
+        networkId: network.id,
+        simulation: {
+          activity: [
+            {
+              id: 0,
+              source: network.nodes.lightning[0].name,
+              destination: network.nodes.lightning[1].name,
+              intervalSecs: 10,
+              amountMsat: 1000000,
+            },
+          ],
+          status: Status.Started,
+        },
+      };
+      await addSimulation(config);
+      expect(network.simulation).toEqual(config.simulation);
+      config.networkId = 10; // Set to a non-existent network id
+      await expect(
+        removeSimulation({ id: 0, networkId: config.networkId }),
+      ).rejects.toThrow();
+      config.networkId = network.id; // Set to the correct network id
+      await removeSimulation({ id: 0, networkId: config.networkId });
+      expect(network.simulation?.activity.length).toBe(0);
+      expect(injections.dockerService.saveComposeFile).toHaveBeenCalled();
+    });
+
+    it('should remove simulation when the network is stopped', async () => {
+      const { addSimulation, stop } = store.getActions().network;
+      const network = firstNetwork();
+      const config = {
+        networkId: network.id,
+        simulation: {
+          activity: [
+            {
+              id: 0,
+              source: network.nodes.lightning[0].name,
+              destination: network.nodes.lightning[1].name,
+              intervalSecs: 10,
+              amountMsat: 1000000,
+            },
+          ],
+          status: Status.Started,
+        },
+      };
+      await addSimulation(config);
+      expect(network.simulation).toEqual(config.simulation);
+
+      // Stop the network
+      await stop(network.id);
+      expect(network.status).toBe(Status.Stopped);
+    });
+
+    it('should error if the simulation is not found', async () => {
+      const { removeSimulation } = store.getActions().network;
+      const network = firstNetwork();
+      await expect(removeSimulation({ id: 0, networkId: network.id })).rejects.toThrow();
+    });
+
+    it('should start and stop simulation', async () => {
+      const { startSimulation, stopSimulation, addSimulation, start, setStatus } =
+        store.getActions().network;
+      const network = firstNetwork();
+      const config = {
+        networkId: network.id,
+        simulation: {
+          activity: [
+            {
+              id: 0,
+              source: network.nodes.lightning[0].name,
+              destination: network.nodes.lightning[1].name,
+              intervalSecs: 10,
+              amountMsat: 1000000,
+            },
+          ],
+          status: Status.Stopped,
+        },
+      };
+      await expect(startSimulation({ id: network.id + 10 })).rejects.toThrow(); // Throws if the network id is not valid
+      // Throws if the simulation is not added to the network yet.
+      await expect(startSimulation({ id: network.id })).rejects.toThrow();
+
+      await addSimulation(config);
+      expect(network.simulation).toEqual(config.simulation);
+
+      // Start the network.
+      await start(network.id);
+
+      // Set the destination node to stopped. This throws if one of the nodes is not started.
+      setStatus({
+        id: network.id,
+        status: Status.Stopped,
+        only: network.nodes.lightning[1].name,
+      });
+      await expect(startSimulation({ id: network.id })).rejects.toThrow();
+
+      // Set the destination node to started.
+      setStatus({ id: network.id, status: Status.Started });
+      await startSimulation({ id: network.id });
+      expect(injections.dockerService.startSimulation).toHaveBeenCalled();
+
+      // Throws if the network id is not valid.
+      await expect(stopSimulation({ id: network.id + 10 })).rejects.toThrow();
+
+      // Stop the simulation.
+      await stopSimulation({ id: network.id });
+      expect(injections.dockerService.stopSimulation).toHaveBeenCalled();
+    });
+
+    it('should fail for non-existent nodes', async () => {
+      const { startSimulation, addSimulation, start } = store.getActions().network;
+      const network = firstNetwork();
+      const config = {
+        networkId: network.id,
+        simulation: {
+          activity: [
+            {
+              id: 0,
+              source: network.nodes.lightning[0].name,
+              destination: network.nodes.lightning[1].name,
+              intervalSecs: 10,
+              amountMsat: 1000000,
+            },
+          ],
+          status: Status.Stopped,
+        },
+      };
+
+      const nonExistentNode = {
+        ...network.nodes.lightning[0],
+        name: 'non-existent', // Set to a non-existent node name
+      };
+
+      config.simulation.activity[0].source = nonExistentNode.name;
+      await addSimulation(config);
+      await start(network.id);
+      await expect(startSimulation({ id: network.id })).rejects.toThrow();
+
+      config.simulation.activity[0].source = network.nodes.lightning[0].name;
+      config.simulation.activity[0].destination = nonExistentNode.name;
+      await addSimulation(config);
+      await expect(startSimulation({ id: network.id })).rejects.toThrow();
     });
   });
 
   describe('Other actions', () => {
+    it('should remove a network', async () => {
+      expect(store.getState().network.networks).toHaveLength(0);
+      await store.getActions().network.addNetwork(addNetworkArgs);
+      expect(store.getState().network.networks).toHaveLength(1);
+      const networkId = firstNetwork().id;
+      await store.getActions().network.remove(networkId);
+      expect(store.getState().network.networks).toHaveLength(0);
+    });
+
     it('should fail to set the status with an invalid id', () => {
       const { setStatus: setNetworkStatus } = store.getActions().network;
       expect(() => setNetworkStatus({ id: 10, status: Status.Starting })).toThrow();
@@ -845,7 +1380,9 @@ describe('Network model', () => {
 
     it('should fail to rename with an invalid id', async () => {
       const { rename } = store.getActions().network;
-      await expect(rename({ id: 10, name: 'asdf' })).rejects.toThrow();
+      await expect(
+        rename({ id: 10, name: 'asdf', description: 'qwerty' }),
+      ).rejects.toThrow();
     });
 
     it('should fail to remove with an invalid id', async () => {
@@ -876,6 +1413,87 @@ describe('Network model', () => {
     it('should fail to export with an invalid id', async () => {
       const { exportNetwork } = store.getActions().network;
       await expect(exportNetwork({ id: 10 })).rejects.toThrow();
+    });
+
+    it('should copy CLN volume data to host before exporting', async () => {
+      dialogMock.showSaveDialog.mockResolvedValue({
+        filePath: 'test.polar.zip',
+      } as any);
+      const { addNetwork, exportNetwork, setStatus } = store.getActions().network;
+      await addNetwork(addNetworkArgs);
+      const network = firstNetwork();
+      setStatus({ id: network.id, status: Status.Stopped });
+
+      await exportNetwork({ id: network.id });
+
+      const clnNode = network.nodes.lightning.find(
+        n => n.implementation === 'c-lightning',
+      );
+      expect(dockerServiceMock.copyVolumeToHost).toHaveBeenCalledWith(clnNode);
+    });
+
+    it('should not copy CLN volume data if the user aborts the export dialog', async () => {
+      dialogMock.showSaveDialog.mockResolvedValue({} as any);
+      const { addNetwork, exportNetwork, setStatus } = store.getActions().network;
+      await addNetwork(addNetworkArgs);
+      const network = firstNetwork();
+      setStatus({ id: network.id, status: Status.Stopped });
+
+      await exportNetwork({ id: network.id });
+
+      expect(dockerServiceMock.copyVolumeToHost).not.toHaveBeenCalled();
+    });
+
+    it('should autoMine blocks when autoMine enabled', async () => {
+      jest.useFakeTimers();
+
+      const { addNetwork } = store.getActions().network;
+      await addNetwork(addNetworkArgs);
+      const { networks } = store.getState().network;
+
+      await store
+        .getActions()
+        .network.autoMine({ id: networks[0].id, mode: AutoMineMode.Auto30s });
+
+      jest.advanceTimersByTime(65000);
+      expect(bitcoinServiceMock.mine).toHaveBeenCalledTimes(2);
+
+      await store
+        .getActions()
+        .network.autoMine({ id: networks[0].id, mode: AutoMineMode.AutoOff });
+
+      jest.advanceTimersByTime(65000);
+      // the call count is not incremented
+      expect(bitcoinServiceMock.mine).toHaveBeenCalledTimes(2);
+
+      jest.useRealTimers();
+    });
+
+    it('should fail to setAutoMineMode with an invalid id', async () => {
+      const { setAutoMineMode } = store.getActions().network;
+      expect(() => setAutoMineMode({ id: 10, mode: AutoMineMode.Auto30s })).toThrow();
+    });
+
+    it('should fail to autoMine blocks with an invalid id', async () => {
+      const { autoMine } = store.getActions().network;
+      await expect(autoMine({ id: 10, mode: AutoMineMode.Auto30s })).rejects.toThrow();
+    });
+
+    it('should fail to mineBlock blocks with an invalid id', async () => {
+      const { mineBlock } = store.getActions().network;
+      await expect(mineBlock({ id: 10 })).rejects.toThrow();
+    });
+
+    it('should fail to rename node with an invalid id', async () => {
+      const { addNetwork, renameNode } = store.getActions().network;
+      addNetwork(addNetworkArgs);
+      const node = {
+        ...firstNetwork().nodes.lightning[0],
+        networkId: 999,
+      };
+      await expect(renameNode({ node, newName: 'asdf' })).rejects.toThrow(
+        "Network with the id '999' was not found.",
+      );
     });
   });
 });

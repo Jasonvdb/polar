@@ -66,17 +66,20 @@ describe('CustomImagesTable Component', () => {
     expect(queryByText('Custom Nodes')).not.toBeInTheDocument();
   });
 
-  it('should not display incompatible custom images', () => {
-    mockOS.platform.mockReturnValueOnce('win32');
+  it('should not display custom images on unsupported platforms', () => {
+    mockOS.platform.mockReturnValueOnce('aix' as any);
     const { queryByText, nodeImages } = renderComponent();
-    expect(queryByText(nodeImages.custom[1].name)).not.toBeInTheDocument();
+    nodeImages.custom.forEach(i => {
+      expect(queryByText(i.name)).not.toBeInTheDocument();
+    });
   });
 
   it('should show the Custom Node Details modal', async () => {
-    const { getAllByText, findByText } = renderComponent();
+    const { getAllByText, getByLabelText, findByText } = renderComponent();
     // click on the first Edit link
     fireEvent.click(getAllByText('Edit')[0]);
     expect(await findByText('Custom Node Details')).toBeInTheDocument();
+    fireEvent.click(getByLabelText('close'));
   });
 
   it('should hide the Custom Node Details modal', async () => {
@@ -89,13 +92,8 @@ describe('CustomImagesTable Component', () => {
   });
 
   it('should remove a custom node', async () => {
-    const {
-      getByText,
-      getAllByLabelText,
-      findByText,
-      nodeImages,
-      store,
-    } = renderComponent();
+    const { getByText, getAllByLabelText, findByText, nodeImages, store } =
+      renderComponent();
     const { name } = nodeImages.custom[0];
     expect(getByText(name)).toBeInTheDocument();
     // click on the first Delete icon

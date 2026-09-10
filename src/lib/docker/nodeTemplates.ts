@@ -17,11 +17,8 @@ export const bitcoind = (
 ): ComposeService => ({
   image,
   container_name: container,
-  environment: {
-    USERID: '${USERID:-1000}',
-    GROUPID: '${GROUPID:-1000}',
-  },
   hostname: name,
+  stop_grace_period: '5m',
   command: trimInside(command),
   volumes: [
     `./volumes/${dockerConfigs.bitcoind.volumeDirName}/${name}:/home/bitcoin/.bitcoin`,
@@ -51,10 +48,6 @@ export const lnd = (
 ): ComposeService => ({
   image,
   container_name: container,
-  environment: {
-    USERID: '${USERID:-1000}',
-    GROUPID: '${GROUPID:-1000}',
-  },
   hostname: name,
   command: trimInside(command),
   restart: 'always',
@@ -76,30 +69,33 @@ export const clightning = (
   container: string,
   image: string,
   restPort: number,
+  grpcPort: number,
   p2pPort: number,
   command: string,
+  namedVolumeName?: string,
 ): ComposeService => ({
   image,
   container_name: container,
-  environment: {
-    USERID: '${USERID:-1000}',
-    GROUPID: '${GROUPID:-1000}',
-  },
   hostname: name,
   command: trimInside(command),
   restart: 'always',
   volumes: [
-    `./volumes/${dockerConfigs['c-lightning'].volumeDirName}/${name}/${dockerConfigs['c-lightning'].dataDir}:/home/clightning/.lightning`,
+    // on windows, use a named volume so the CLN data stays on docker VM ext4 filesystem
+    namedVolumeName
+      ? `${namedVolumeName}:/home/clightning/.lightning`
+      : `./volumes/${dockerConfigs['c-lightning'].volumeDirName}/${name}/${dockerConfigs['c-lightning'].dataDir}:/home/clightning/.lightning`,
     `./volumes/${dockerConfigs['c-lightning'].volumeDirName}/${name}/${dockerConfigs['c-lightning'].apiDir}:/opt/c-lightning-rest/certs`,
   ],
   expose: [
     '8080', // REST
+    grpcPort ? '11001' : '', // GRPC
     '9735', // p2p
-  ],
+  ].filter(p => !!p), // filter out empty strings
   ports: [
     `${restPort}:8080`, // REST
+    grpcPort ? `${grpcPort}:11001` : '', // REST
     `${p2pPort}:9735`, // p2p
-  ],
+  ].filter(p => !!p), // filer out empty strings
 });
 
 export const eclair = (
@@ -112,10 +108,6 @@ export const eclair = (
 ): ComposeService => ({
   image,
   container_name: container,
-  environment: {
-    USERID: '${USERID:-1000}',
-    GROUPID: '${GROUPID:-1000}',
-  },
   hostname: name,
   command: trimInside(command),
   restart: 'always',
@@ -130,4 +122,89 @@ export const eclair = (
     `${restPort}:8080`, // REST
     `${p2pPort}:9735`, // p2p
   ],
+});
+
+export const tapd = (
+  name: string,
+  container: string,
+  image: string,
+  restPort: number,
+  grpcPort: number,
+  lndName: string,
+  command: string,
+): ComposeService => ({
+  image,
+  container_name: container,
+  hostname: name,
+  command: trimInside(command),
+  restart: 'always',
+  volumes: [
+    `./volumes/${dockerConfigs.LND.volumeDirName}/${lndName}:/home/tap/.lnd`,
+    `./volumes/${dockerConfigs.tapd.volumeDirName}/${name}:/home/tap/.tapd`,
+  ],
+  expose: [
+    '8089', // REST
+    '10029', // gRPC
+  ],
+  ports: [
+    `${restPort}:8089`, // REST
+    `${grpcPort}:10029`, // gRPC
+  ],
+});
+
+export const litd = (
+  name: string,
+  container: string,
+  image: string,
+  restPort: number,
+  grpcPort: number,
+  p2pPort: number,
+  webPort: number,
+  command: string,
+): ComposeService => ({
+  image,
+  container_name: container,
+  hostname: name,
+  command: trimInside(command),
+  restart: 'always',
+  volumes: [
+    `./volumes/${dockerConfigs.litd.volumeDirName}/${name}/lit:/home/litd/.lit`,
+    `./volumes/${dockerConfigs.litd.volumeDirName}/${name}/lnd:/home/litd/.lnd`,
+    `./volumes/${dockerConfigs.litd.volumeDirName}/${name}/tapd:/home/litd/.tapd`,
+  ],
+  expose: [
+    '8080', // REST
+    '10009', // gRPC
+    '9735', // p2p
+    '8443', // web
+  ],
+  ports: [
+    `${restPort}:8080`, // REST
+    `${grpcPort}:10009`, // gRPC
+    `${p2pPort}:9735`, // p2p
+    `${webPort}:8443`, // web
+  ],
+});
+
+export const simln = (
+  name: string,
+  container: string,
+  image: string,
+  command: string,
+  environment: Record<string, string>,
+): ComposeService => ({
+  image,
+  container_name: container,
+  hostname: name,
+  command: trimInside(command),
+  environment,
+  restart: 'always',
+  volumes: [
+    `./volumes/${name}:/home/simln/.simln`,
+    `./volumes/${dockerConfigs.LND.volumeDirName}:/home/simln/.lnd`,
+    `./volumes/${dockerConfigs['c-lightning'].volumeDirName}:/home/simln/.c-lightning`,
+    `./volumes/${dockerConfigs.litd.volumeDirName}:/home/simln/.litd`,
+  ],
+  expose: [],
+  ports: [],
 });

@@ -1,9 +1,11 @@
-import { NodeImplementation } from 'shared/types';
+import { NodeImplementation, NodeImplementationWithSimln } from 'shared/types';
 import { DockerConfig, DockerRepoState } from 'types';
 import bitcoindLogo from 'resources/bitcoin.svg';
 import clightningLogo from 'resources/clightning.png';
 import eclairLogo from 'resources/eclair.png';
+import litdLogo from 'resources/litd.svg';
 import lndLogo from 'resources/lnd.png';
+import tapLogo from 'resources/tap.svg';
 import packageJson from '../../package.json';
 
 // App
@@ -18,6 +20,9 @@ export const BLOCKS_TIL_CONFIRMED = 6;
 export const COINBASE_MATURITY_DELAY = 100;
 // https://github.com/bitcoin/bitcoin/blob/v0.19.0.1/src/chainparams.cpp#L258
 export const HALVING_INTERVAL = 150;
+
+// litd
+export const LNC_MAILBOX_SERVER = 'mailbox.terminal.lightning.today:443';
 
 // designer chart
 export const LOADING_NODE_ID = 'loading_id';
@@ -58,12 +63,23 @@ export const BasePorts: Record<NodeImplementation, Record<string, number>> = {
   'c-lightning': {
     rest: 8181,
     p2p: 9835,
+    grpc: 11001,
   },
   eclair: {
     rest: 8281,
     p2p: 9935,
   },
   btcd: {},
+  tapd: {
+    grpc: 12029,
+    rest: 8289,
+  },
+  litd: {
+    rest: 8381,
+    grpc: 13001,
+    p2p: 9635,
+    web: 8443,
+  },
 };
 
 export const bitcoinCredentials = {
@@ -77,7 +93,11 @@ export const eclairCredentials = {
   pass: 'eclairpw',
 };
 
-export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
+export const litdCredentials = {
+  pass: 'polarpass',
+};
+
+export const dockerConfigs: Record<NodeImplementationWithSimln, DockerConfig> = {
   LND: {
     name: 'LND',
     imageName: 'polarlightning/lnd',
@@ -87,11 +107,13 @@ export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
     command: [
       'lnd',
       '--noseedbackup',
+      '--debuglevel=debug',
       '--trickledelay=5000',
       '--alias={{name}}',
       '--externalip={{name}}',
       '--tlsextradomain={{name}}',
       '--tlsextradomain={{containerName}}',
+      '--tlsextradomain=host.docker.internal',
       '--listen=0.0.0.0:9735',
       '--rpclisten=0.0.0.0:10009',
       '--restlisten=0.0.0.0:8080',
@@ -103,20 +125,23 @@ export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
       '--bitcoind.rpcpass={{rpcPass}}',
       '--bitcoind.zmqpubrawblock=tcp://{{backendName}}:28334',
       '--bitcoind.zmqpubrawtx=tcp://{{backendName}}:28335',
+      '--accept-keysend',
+      '--accept-amp',
     ].join('\n  '),
     // if vars are modified, also update composeFile.ts & the i18n strings for cmps.nodes.CommandVariables
     variables: ['name', 'containerName', 'backendName', 'rpcUser', 'rpcPass'],
   },
   'c-lightning': {
-    name: 'c-lightning',
+    name: 'Core Lightning',
     imageName: 'polarlightning/clightning',
     logo: clightningLogo,
-    platforms: ['mac', 'linux'],
+    platforms: ['mac', 'linux', 'windows'],
     volumeDirName: 'c-lightning',
     command: [
       'lightningd',
       '--alias={{name}}',
       '--addr={{name}}',
+      '--addr=0.0.0.0:9735',
       '--network=regtest',
       '--bitcoin-rpcuser={{rpcUser}}',
       '--bitcoin-rpcpassword={{rpcPass}}',
@@ -125,9 +150,15 @@ export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
       '--log-level=debug',
       '--dev-bitcoind-poll=2',
       '--dev-fast-gossip',
-      '--plugin=/opt/c-lightning-rest/plugin.js',
-      '--rest-port=8080',
-      '--rest-protocol=http',
+      '--grpc-host=0.0.0.0',
+      '--grpc-port=11001',
+      '--log-file=-', // log to stdout
+      '--log-file=/home/clightning/.lightning/debug.log',
+      '--clnrest-port=8080',
+      '--clnrest-protocol=http',
+      '--clnrest-host=0.0.0.0',
+      '--clnrest-cors-origins=*',
+      '--developer',
     ].join('\n  '),
     // if vars are modified, also update composeFile.ts & the i18n strings for cmps.nodes.CommandVariables
     variables: ['name', 'backendName', 'rpcUser', 'rpcPass'],
@@ -154,11 +185,17 @@ export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
       '--bitcoind.rpcport=18443',
       '--bitcoind.rpcuser={{rpcUser}}',
       '--bitcoind.rpcpassword={{rpcPass}}',
-      '--bitcoind.zmqblock=tcp://{{backendName}}:28334',
+      '--bitcoind.zmqblock=tcp://{{backendName}}:28336',
       '--bitcoind.zmqtx=tcp://{{backendName}}:28335',
       '--datadir=/home/eclair/.eclair',
       '--printToConsole=true',
-      '--on-chain-fees.max-feerate-mismatch=100000',
+      '--on-chain-fees.feerate-tolerance.ratio-low=0.00001',
+      '--on-chain-fees.feerate-tolerance.ratio-high=10000.0',
+      '--channel.max-htlc-value-in-flight-percent=100',
+      '--channel.max-htlc-value-in-flight-msat=5000000000000', // 50 BTC in msats
+      '--features.keysend=optional',
+      '--channel.min-final-expiry-delta-blocks=22', // Default is 30 for eclair, however it is 22 for CLN (the lowest).
+      '--channel.fulfill-safety-before-timeout-blocks=20', // When `channel.min-final-expiry-delta-blocks` is set, this is required and most be less than it. Default is 24.
     ].join('\n  '),
     // if vars are modified, also update composeFile.ts & the i18n strings for cmps.nodes.CommandVariables
     variables: ['name', 'eclairPass', 'backendName', 'rpcUser', 'rpcPass'],
@@ -177,15 +214,18 @@ export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
       '-debug=1',
       '-zmqpubrawblock=tcp://0.0.0.0:28334',
       '-zmqpubrawtx=tcp://0.0.0.0:28335',
+      '-zmqpubhashblock=tcp://0.0.0.0:28336',
       '-txindex=1',
       '-dnsseed=0',
-      '-upnp=0',
       '-rpcbind=0.0.0.0',
       '-rpcallowip=0.0.0.0/0',
       '-rpcport=18443',
+      '-rest',
       '-listen=1',
       '-listenonion=0',
       '-fallbackfee=0.0002',
+      '-blockfilterindex=1',
+      '-peerblockfilters=1',
     ].join('\n  '),
     // if vars are modified, also update composeFile.ts & the i18n strings for cmps.nodes.CommandVariables
     variables: ['rpcUser', 'rpcAuth'],
@@ -196,6 +236,114 @@ export const dockerConfigs: Record<NodeImplementation, DockerConfig> = {
     logo: '',
     platforms: ['mac', 'linux', 'windows'],
     volumeDirName: 'btcd',
+    command: '',
+    variables: [],
+  },
+  tapd: {
+    name: 'Taproot Assets',
+    imageName: 'polarlightning/tapd',
+    logo: tapLogo,
+    platforms: ['mac', 'linux', 'windows'],
+    volumeDirName: 'tapd',
+    command: [
+      'tapd',
+      '--network=regtest',
+      '--debuglevel=debug',
+      '--tlsextradomain={{name}}',
+      '--tlsextradomain={{containerName}}',
+      '--rpclisten=0.0.0.0:10029',
+      '--restlisten=0.0.0.0:8089',
+      '--lnd.host={{lndName}}:10009',
+      '--lnd.macaroonpath=/home/tap/.lnd/data/chain/bitcoin/regtest/admin.macaroon',
+      '--lnd.tlspath=/home/tap/.lnd/tls.cert',
+      '--allow-public-uni-proof-courier',
+      '--allow-public-stats',
+      '--universe.public-access=rw',
+      '--universe.sync-all-assets',
+    ].join('\n  '),
+    // if vars are modified, also update composeFile.ts & the i18n strings for cmps.nodes.CommandVariables
+    variables: ['name', 'containerName', 'lndName'],
+  },
+  litd: {
+    name: 'Terminal',
+    imageName: 'polarlightning/litd',
+    logo: litdLogo,
+    platforms: ['mac', 'linux', 'windows'],
+    volumeDirName: 'litd',
+    command: [
+      'litd',
+      '--httpslisten=0.0.0.0:8443',
+      '--enablerest',
+      '--uipassword={{litdPass}}',
+      '--network=regtest',
+      '--lnd-mode=integrated',
+      '--pool-mode=disable',
+      '--loop-mode=disable',
+      '--autopilot.disable',
+      '--lnd.noseedbackup',
+      '--lnd.debuglevel=debug',
+      '--lnd.alias={{name}}',
+      '--lnd.externalip={{name}}',
+      '--lnd.tlsextradomain={{name}}',
+      '--lnd.tlsextradomain={{containerName}}',
+      '--lnd.tlsextradomain=host.docker.internal',
+      '--lnd.listen=0.0.0.0:9735',
+      '--lnd.rpclisten=0.0.0.0:10009',
+      '--lnd.restlisten=0.0.0.0:8080',
+      '--lnd.bitcoin.active',
+      '--lnd.bitcoin.regtest',
+      '--lnd.bitcoin.node=bitcoind',
+      '--lnd.bitcoind.rpchost={{backendName}}',
+      '--lnd.bitcoind.rpcuser={{rpcUser}}',
+      '--lnd.bitcoind.rpcpass={{rpcPass}}',
+      '--lnd.bitcoind.zmqpubrawblock=tcp://{{backendName}}:28334',
+      '--lnd.bitcoind.zmqpubrawtx=tcp://{{backendName}}:28335',
+      '--taproot-assets.allow-public-uni-proof-courier',
+      '--taproot-assets.universe.public-access=rw',
+      '--taproot-assets.universe.sync-all-assets',
+      '--taproot-assets.allow-public-stats',
+      '--taproot-assets.proofcourieraddr=universerpc://{{proofCourier}}:8443',
+      '--taproot-assets.universerpccourier.skipinitdelay',
+      '--taproot-assets.universerpccourier.backoffresetwait=1s',
+      '--taproot-assets.universerpccourier.numtries=5',
+      '--taproot-assets.universerpccourier.initialbackoff=300ms',
+      '--taproot-assets.universerpccourier.maxbackoff=600ms',
+      '--taproot-assets.experimental.rfq.priceoracleaddress=use_mock_price_oracle_service_promise_to_not_use_on_mainnet',
+      '--taproot-assets.experimental.rfq.mockoracleassetsperbtc=100000000',
+      '--lnd.trickledelay=50',
+      '--lnd.gossip.sub-batch-delay=5ms',
+      '--lnd.caches.rpc-graph-cache-duration=100ms',
+      '--lnd.default-remote-max-htlcs=483',
+      '--lnd.dust-threshold=5000000',
+      '--lnd.protocol.option-scid-alias',
+      '--lnd.protocol.zero-conf',
+      '--lnd.protocol.simple-taproot-chans',
+      '--lnd.protocol.simple-taproot-overlay-chans',
+      '--lnd.protocol.wumbo-channels ',
+      '--lnd.accept-keysend',
+      '--lnd.protocol.custom-message=17',
+    ].join('\n  '),
+    // if vars are modified, also update composeFile.ts & the i18n strings for cmps.nodes.CommandVariables
+    variables: [
+      'name',
+      'containerName',
+      'backendName',
+      'rpcUser',
+      'rpcPass',
+      'proofCourier',
+    ],
+  },
+  simln: {
+    name: 'simln',
+    imageName: 'polarlightning/simln:0.2.5',
+    logo: '',
+    platforms: ['mac', 'linux', 'windows'],
+    volumeDirName: 'simln',
+    env: {
+      SIMFILE_PATH: '/home/simln/.simln/sim.json',
+      DATA_DIR: '/home/simln/.simln',
+      LOG_LEVEL: 'info',
+    },
     command: '',
     variables: [],
   },
@@ -214,52 +362,100 @@ export const REPO_STATE_URL =
  * are pushed to Docker Hub, this list should be updated along with the /docker/nodes.json file.
  */
 export const defaultRepoState: DockerRepoState = {
-  version: 15,
+  version: 77,
   images: {
     LND: {
-      latest: '0.11.0-beta',
+      latest: '0.20.0-beta',
       versions: [
-        '0.11.0-beta',
-        '0.10.3-beta',
-        '0.10.2-beta',
-        '0.10.1-beta',
-        '0.10.0-beta',
-        '0.9.1-beta',
-        '0.9.0-beta',
-        '0.8.2-beta',
-        '0.8.0-beta',
-        '0.7.1-beta',
+        '0.20.0-beta',
+        '0.19.3-beta',
+        '0.19.2-beta',
+        '0.19.1-beta',
+        '0.19.0-beta',
+        '0.18.5-beta',
+        '0.18.4-beta',
+        '0.18.3-beta',
+        '0.18.2-beta',
+        '0.18.1-beta',
+        '0.18.0-beta',
+        '0.17.5-beta',
+        '0.16.4-beta',
       ],
       // not all LND versions are compatible with all bitcoind versions.
       // this mapping specifies the highest compatible bitcoind for each LND version
       compatibility: {
-        '0.11.0-beta': '0.20.1',
-        '0.10.3-beta': '0.20.1',
-        '0.10.2-beta': '0.20.1',
-        '0.10.1-beta': '0.19.1',
-        '0.10.0-beta': '0.19.1',
-        '0.9.1-beta': '0.19.1',
-        '0.9.0-beta': '0.19.1',
-        '0.8.2-beta': '0.19.1',
-        '0.8.0-beta': '0.18.1',
-        '0.7.1-beta': '0.18.1',
+        '0.20.0-beta': '30.0',
+        '0.19.3-beta': '30.0',
+        '0.19.2-beta': '30.0',
+        '0.19.1-beta': '30.0',
+        '0.19.0-beta': '30.0',
+        '0.18.5-beta': '30.0',
+        '0.18.4-beta': '30.0',
+        '0.18.3-beta': '27.0',
+        '0.18.2-beta': '27.0',
+        '0.18.1-beta': '27.0',
+        '0.18.0-beta': '27.0',
+        '0.17.5-beta': '27.0',
+        '0.16.4-beta': '27.0',
       },
     },
     'c-lightning': {
-      latest: '0.9.0',
-      versions: ['0.9.0', '0.8.2', '0.8.1', '0.8.0'],
+      latest: '25.12',
+      versions: ['25.12', '25.09.3', '25.05', '25.02.2', '25.02', '24.11.1', '24.08.1'],
     },
     eclair: {
-      latest: '0.3.3',
-      versions: ['0.3.3'],
+      latest: '0.13.1',
+      versions: ['0.13.1', '0.12.0', '0.11.0', '0.10.0', '0.9.0'],
     },
     bitcoind: {
-      latest: '0.20.1',
-      versions: ['0.20.1', '0.20.0', '0.19.1', '0.19.0.1', '0.18.1'],
+      latest: '30.0',
+      versions: ['30.0', '29.0', '28.0', '27.0', '26.0'],
     },
     btcd: {
       latest: '',
       versions: [],
+    },
+    tapd: {
+      latest: '0.7.0-alpha',
+      versions: [
+        '0.7.0-alpha',
+        '0.6.1-alpha',
+        '0.6.0-alpha',
+        '0.5.1-alpha',
+        '0.5.0-alpha',
+        '0.4.1-alpha',
+        '0.3.3-alpha',
+      ],
+      // Not all tapd versions are compatible with all LND versions.
+      // This mapping specifies the minimum compatible LND for each tapd version
+      compatibility: {
+        '0.7.0-alpha': '0.19.0-beta',
+        '0.6.1-alpha': '0.19.0-beta',
+        '0.6.0-alpha': '0.19.0-beta',
+        '0.5.1-alpha': '0.18.5-beta',
+        '0.5.0-alpha': '0.18.4-beta',
+        '0.4.1-alpha': '0.18.0-beta',
+        '0.3.3-alpha': '0.16.0-beta',
+      },
+    },
+    litd: {
+      latest: '0.16.0-alpha',
+      versions: [
+        '0.16.0-alpha',
+        '0.15.3-alpha',
+        '0.15.1-alpha',
+        '0.15.0-alpha',
+        '0.14.1-alpha',
+      ],
+      // not all litd versions are compatible with all bitcoind versions.
+      // this mapping specifies the highest compatible bitcoind for each litd version
+      compatibility: {
+        '0.16.0-alpha': '30.0',
+        '0.15.3-alpha': '30.0',
+        '0.15.1-alpha': '30.0',
+        '0.15.0-alpha': '30.0',
+        '0.14.1-alpha': '30.0',
+      },
     },
   },
 };

@@ -37,6 +37,13 @@ describe('RepoService', () => {
     expect(result).not.toBeDefined();
   });
 
+  it('should not load state from disk if the file is empty', async () => {
+    filesMock.exists.mockResolvedValue(true);
+    filesMock.read.mockResolvedValue('');
+    const result = await repoService.load();
+    expect(result).not.toBeDefined();
+  });
+
   describe('checkForUpdates', () => {
     const localState = defaultRepoState;
     const updatedState: DockerRepoState = {
@@ -76,6 +83,40 @@ describe('RepoService', () => {
       expect(result.state).toEqual(updatedState);
       expect(result.updates).toBeDefined();
       expect(result.updates?.bitcoind).toEqual(['1.0.0']);
+    });
+
+    it('should ignore a new implementation in the remote state', async () => {
+      const newImplState: any = {
+        ...defaultRepoState,
+        version: defaultRepoState.version + 1,
+        images: {
+          ...defaultRepoState.images,
+          newImpl: {
+            latest: '1.0.0',
+            versions: ['1.0.0'],
+          },
+        },
+      };
+
+      utilsMock.httpRequest.mockResolvedValue(JSON.stringify(clone(newImplState)));
+      const result: any = await repoService.checkForUpdates(localState);
+      expect(result.state).toEqual(localState);
+      expect(result.updates).not.toBeDefined();
+      expect(result.updates?.newImpl).not.toBeDefined();
+    });
+
+    it('should handle a removed implementation in the remote state', async () => {
+      const remoteState = {
+        ...clone(localState),
+        version: localState.version + 1,
+        images: {
+          ...localState.images,
+          eclair: undefined,
+        },
+      };
+      utilsMock.httpRequest.mockResolvedValue(JSON.stringify(remoteState));
+      const result: any = await repoService.checkForUpdates(localState);
+      expect(result.state).toEqual(localState);
     });
   });
 });

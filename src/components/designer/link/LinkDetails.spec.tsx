@@ -1,12 +1,14 @@
 import React from 'react';
 import { ILink } from '@mrblenny/react-flow-chart';
+import { Status } from 'shared/types';
+import { LinkProperties } from 'utils/chart';
 import { createBitcoindNetworkNode } from 'utils/network';
 import { getNetwork, renderWithProviders, testNodeDocker } from 'utils/tests';
 import LinkDetails from './LinkDetails';
 
 describe('LinkDetails component', () => {
   const renderComponent = (from: string, to: string, properties: any) => {
-    const network = getNetwork();
+    const network = getNetwork(1, 'test network', Status.Stopped, 2);
     network.nodes.bitcoin.push(
       createBitcoindNetworkNode(network, '0.18.1', testNodeDocker),
     );
@@ -22,13 +24,15 @@ describe('LinkDetails component', () => {
   };
 
   it('should display channel details', () => {
-    const properties = {
+    const properties: LinkProperties = {
       type: 'open-channel',
       capacity: '1000',
       fromBalance: '600',
       toBalance: '400',
       direction: 'ltr',
       status: 'Open',
+      isPrivate: false,
+      channelPoint: 'xxxxxxxxxxxxxxxx:0',
     };
     const { getByText } = renderComponent('alice', 'bob', properties);
     expect(getByText('Channel Details')).toBeInTheDocument();
@@ -67,5 +71,15 @@ describe('LinkDetails component', () => {
     const properties = { type: 'btcpeer' };
     const { getByText } = renderComponent('backend1', 'fake', properties);
     expect(getByText(/select an invalid link/)).toBeInTheDocument();
+  });
+  it('should display message for invalid TAP to lnd connection', () => {
+    const properties = { type: 'lndbackend' };
+    const { getByText } = renderComponent('alice-tap', 'fake', properties);
+    expect(getByText(/select an invalid link/)).toBeInTheDocument();
+  });
+  it('should display message for TAP to Lnd connection', () => {
+    const properties = { type: 'lndbackend' };
+    const { getByText } = renderComponent('alice-tap', 'alice', properties);
+    expect(getByText('TAP Backend Connection')).toBeInTheDocument();
   });
 });

@@ -1,6 +1,6 @@
 import React from 'react';
 import { waitFor } from '@testing-library/react';
-import { LndNode } from 'shared/types';
+import { CLightningNode, LndNode } from 'shared/types';
 import * as files from 'utils/files';
 import { getNetwork, renderWithProviders } from 'utils/tests';
 import { ConnectionInfo } from '../ConnectTab';
@@ -25,7 +25,7 @@ describe('EncodedStrings', () => {
     filesMock.read.mockResolvedValue('file-content');
   });
 
-  it('should display credentials', async () => {
+  it('should display credentials for LND', async () => {
     const lnd = network.nodes.lightning[0] as LndNode;
     const lndCreds: ConnectionInfo['credentials'] = {
       admin: lnd.paths.adminMacaroon,
@@ -37,14 +37,78 @@ describe('EncodedStrings', () => {
     expect(getByText('TLS Cert')).toBeInTheDocument();
     expect(getByText('Admin Macaroon')).toBeInTheDocument();
     expect(getByText('Read-only Macaroon')).toBeInTheDocument();
-    expect(filesMock.read).toBeCalledWith(expect.stringContaining('tls.cert'), 'hex');
-    expect(filesMock.read).toBeCalledWith(
+    expect(filesMock.read).toHaveBeenCalledWith(
+      expect.stringContaining('tls.cert'),
+      'hex',
+    );
+    expect(filesMock.read).toHaveBeenCalledWith(
       expect.stringContaining('admin.macaroon'),
       'hex',
     );
-    expect(filesMock.read).toBeCalledWith(
+    expect(filesMock.read).toHaveBeenCalledWith(
       expect.stringContaining('readonly.macaroon'),
       'hex',
+    );
+  });
+
+  it('should display credentials for Core Lightning', async () => {
+    const cln = network.nodes.lightning[1] as CLightningNode;
+    const clnCreds: ConnectionInfo['credentials'] = {
+      rune: cln.paths.rune,
+      cert: cln.paths.tlsCert,
+      clientCert: cln.paths.tlsClientCert,
+      clientKey: cln.paths.tlsClientKey,
+    };
+    const { getByText } = renderComponent(clnCreds, 'hex');
+    await waitFor(() => getByText('TLS Cert'));
+    expect(getByText('TLS Cert')).toBeInTheDocument();
+    expect(getByText('TLS Client Cert')).toBeInTheDocument();
+    expect(getByText('TLS Client Key')).toBeInTheDocument();
+    expect(getByText('Admin Rune')).toBeInTheDocument();
+    expect(filesMock.read).toHaveBeenCalledWith(expect.stringContaining('ca.pem'), 'hex');
+    expect(filesMock.read).toHaveBeenCalledWith(
+      expect.stringContaining('client.pem'),
+      'hex',
+    );
+    expect(filesMock.read).toHaveBeenCalledWith(
+      expect.stringContaining('client-key.pem'),
+      'hex',
+    );
+    expect(filesMock.read).toHaveBeenCalledWith(
+      expect.stringContaining('admin.rune'),
+      'utf-8',
+    );
+  });
+
+  it('should display base64 credentials for Core Lightning', async () => {
+    const cln = network.nodes.lightning[1] as CLightningNode;
+    const clnCreds: ConnectionInfo['credentials'] = {
+      rune: cln.paths.rune,
+      cert: cln.paths.tlsCert,
+      clientCert: cln.paths.tlsClientCert,
+      clientKey: cln.paths.tlsClientKey,
+    };
+    const { getByText } = renderComponent(clnCreds, 'base64');
+    await waitFor(() => getByText('TLS Cert'));
+    expect(getByText('TLS Cert')).toBeInTheDocument();
+    expect(getByText('TLS Client Cert')).toBeInTheDocument();
+    expect(getByText('TLS Client Key')).toBeInTheDocument();
+    expect(getByText('Admin Rune')).toBeInTheDocument();
+    expect(filesMock.read).toHaveBeenCalledWith(
+      expect.stringContaining('ca.pem'),
+      'base64',
+    );
+    expect(filesMock.read).toHaveBeenCalledWith(
+      expect.stringContaining('client.pem'),
+      'base64',
+    );
+    expect(filesMock.read).toHaveBeenCalledWith(
+      expect.stringContaining('client-key.pem'),
+      'base64',
+    );
+    expect(filesMock.read).toHaveBeenCalledWith(
+      expect.stringContaining('admin.rune'),
+      'utf-8',
     );
   });
 

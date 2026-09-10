@@ -6,8 +6,18 @@ import { ConnectedRouter } from 'connected-react-router';
 import { StoreProvider } from 'easy-peasy';
 import { createMemoryHistory } from 'history';
 import { createReduxStore } from 'store';
-import { LightningService, StoreInjections } from 'types';
+import { BitcoinService, LightningService, StoreInjections, TapService } from 'types';
 
+export const bitcoinServiceMock: jest.Mocked<BitcoinService> = {
+  waitUntilOnline: jest.fn(),
+  createDefaultWallet: jest.fn(),
+  getBlockchainInfo: jest.fn(),
+  getWalletInfo: jest.fn(),
+  getNewAddress: jest.fn(),
+  connectPeers: jest.fn(),
+  sendFunds: jest.fn(),
+  mine: jest.fn(),
+};
 export const lightningServiceMock: jest.Mocked<LightningService> = {
   getInfo: jest.fn(),
   getBalances: jest.fn(),
@@ -19,7 +29,26 @@ export const lightningServiceMock: jest.Mocked<LightningService> = {
   closeChannel: jest.fn(),
   createInvoice: jest.fn(),
   payInvoice: jest.fn(),
+  decodeInvoice: jest.fn(),
   waitUntilOnline: jest.fn(),
+  addListenerToNode: jest.fn(),
+  removeListener: jest.fn(),
+  subscribeChannelEvents: jest.fn(),
+};
+export const tapServiceMock: jest.Mocked<TapService> = {
+  listAssets: jest.fn(),
+  listBalances: jest.fn(),
+  waitUntilOnline: jest.fn(),
+  mintAsset: jest.fn(),
+  finalizeBatch: jest.fn(),
+  newAddress: jest.fn(),
+  sendAsset: jest.fn(),
+  decodeAddress: jest.fn(),
+  assetRoots: jest.fn(),
+  syncUniverse: jest.fn(),
+  fundChannel: jest.fn(),
+  addInvoice: jest.fn(),
+  sendPayment: jest.fn(),
 };
 // injections allow you to mock the dependencies of redux store actions
 export const injections: StoreInjections = {
@@ -39,25 +68,39 @@ export const injections: StoreInjections = {
     removeNode: jest.fn(),
     saveNetworks: jest.fn(),
     loadNetworks: jest.fn(),
+    renameNodeDir: jest.fn(),
+    startSimulation: jest.fn(),
+    stopSimulation: jest.fn(),
+    removeSimulation: jest.fn(),
+    copyVolumeToHost: jest.fn(),
+    removeCLNVolume: jest.fn(),
+    copyHostToVolume: jest.fn(),
   },
   repoService: {
     load: jest.fn(),
     save: jest.fn(),
     checkForUpdates: jest.fn(),
   },
-  bitcoindService: {
-    waitUntilOnline: jest.fn(),
-    getBlockchainInfo: jest.fn(),
-    getWalletInfo: jest.fn(),
-    getNewAddress: jest.fn(),
-    connectPeers: jest.fn(),
-    sendFunds: jest.fn(),
-    mine: jest.fn(),
+  bitcoinFactory: {
+    getService: () => bitcoinServiceMock,
   },
   lightningFactory: {
     getService: () => lightningServiceMock,
   },
+  tapFactory: {
+    getService: () => tapServiceMock,
+  },
+  litdService: {
+    status: jest.fn(),
+    listSessions: jest.fn(),
+    addSession: jest.fn(),
+    revokeSession: jest.fn(),
+    waitUntilOnline: jest.fn(),
+  },
 };
+export const litdServiceMock = injections.litdService as jest.Mocked<
+  typeof injections.litdService
+>;
 
 /**
  * Renders a component inside of the redux provider for state and

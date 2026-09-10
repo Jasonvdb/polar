@@ -2,9 +2,15 @@ import React from 'react';
 import { IChart } from '@mrblenny/react-flow-chart';
 import { fireEvent, waitFor, waitForElementToBeRemoved } from '@testing-library/dom';
 import { act } from '@testing-library/react';
+import { Status } from 'shared/types';
 import { themeColors } from 'theme/colors';
 import { initChartFromNetwork } from 'utils/chart';
-import { getNetwork, renderWithProviders } from 'utils/tests';
+import {
+  getNetwork,
+  renderWithProviders,
+  suppressConsoleErrors,
+  testRepoState,
+} from 'utils/tests';
 import NetworkDesigner from './NetworkDesigner';
 
 describe('NetworkDesigner Component', () => {
@@ -19,7 +25,7 @@ describe('NetworkDesigner Component', () => {
   });
 
   const renderComponent = (charts?: Record<number, IChart>, theme = 'dark') => {
-    const network = getNetwork(1, 'test network');
+    const network = getNetwork(1, 'test network', Status.Stopped, 2);
     const allCharts = charts || {
       1: initChartFromNetwork(network),
     };
@@ -39,6 +45,11 @@ describe('NetworkDesigner Component', () => {
       lightning: {
         nodes: {
           alice: {},
+        },
+      },
+      tap: {
+        nodes: {
+          'alice-tap': {},
         },
       },
     };
@@ -113,52 +124,173 @@ describe('NetworkDesigner Component', () => {
   });
 
   it('should display the OpenChannel modal', async () => {
-    const { findByText, store } = renderComponent();
+    const { getByText, findByText, store } = renderComponent();
     expect(await findByText('backend1')).toBeInTheDocument();
     act(() => {
       store.getActions().modals.showOpenChannel({});
     });
-    expect(await findByText('Capacity (sats)')).toBeInTheDocument();
+    expect(await findByText('Capacity')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
   });
 
   it('should display the CreateInvoice modal', async () => {
-    const { findByText, store } = renderComponent();
+    const { getByText, findByText, store } = renderComponent();
     expect(await findByText('backend1')).toBeInTheDocument();
     act(() => {
       store.getActions().modals.showCreateInvoice({});
     });
-    expect(await findByText('Amount (sats)')).toBeInTheDocument();
+    expect(await findByText('Amount')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
   });
 
   it('should display the PayInvoice modal', async () => {
-    const { findByText, store } = renderComponent();
+    const { getByText, findByText, store } = renderComponent();
     expect(await findByText('backend1')).toBeInTheDocument();
     act(() => {
       store.getActions().modals.showPayInvoice({});
     });
     expect(await findByText('BOLT 11 Invoice')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
+  });
+  it('should display the ChangeTapBackend modal', async () => {
+    const { findAllByText, findByText, getAllByText, store } = renderComponent();
+    expect(await findByText('backend1')).toBeInTheDocument();
+    act(() => {
+      store.getActions().modals.showChangeTapBackend({});
+    });
+    expect(await findAllByText('Change TAP Node Backend')).toHaveLength(1);
+    fireEvent.click(getAllByText('Cancel')[0]);
   });
 
   it('should display the ChangeBackend modal', async () => {
-    const { findByText, store } = renderComponent();
+    const { getByText, findByText, store } = renderComponent();
     expect(await findByText('backend1')).toBeInTheDocument();
     act(() => {
       store.getActions().modals.showChangeBackend({});
     });
     expect(await findByText('Lightning Node')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
+  });
+
+  it('should display the Send Onchain modal', async () => {
+    const { getByText, findByText, store } = renderComponent();
+    expect(await findByText('backend1')).toBeInTheDocument();
+    act(() => {
+      store.getActions().modals.showSendOnChain({});
+    });
+    expect(await findByText('Send To Onchain Address')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
+  });
+
+  it('should display the Mint Asset modal', async () => {
+    const { getByText, findByText, store } = renderComponent();
+    expect(await findByText('backend1')).toBeInTheDocument();
+    act(() => {
+      store.getActions().modals.showMintAsset({ nodeName: 'alice-tap' });
+    });
+    expect(await findByText('Mint an asset for alice-tap')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
+  });
+
+  it('should display the New Address modal', async () => {
+    const { getByText, findByText, store } = renderComponent();
+    expect(await findByText('backend1')).toBeInTheDocument();
+    act(() => {
+      store.getActions().modals.showNewAddress({ nodeName: 'alice-tap' });
+    });
+    expect(
+      await findByText('Generate new TAP address for alice-tap'),
+    ).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
+  });
+
+  it('should display the Send Address modal', async () => {
+    const { getByText, findByText, store } = renderComponent();
+    expect(await findByText('backend1')).toBeInTheDocument();
+    act(() => {
+      store.getActions().modals.showSendAsset({ nodeName: 'alice-tap' });
+    });
+    expect(await findByText('Send Asset from alice-tap')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
   });
 
   it('should display the AdvancedOptions modal', async () => {
-    const { findByText, store } = renderComponent();
+    const { getByText, findByText, store } = renderComponent();
     expect(await findByText('backend1')).toBeInTheDocument();
     act(() => {
       store.getActions().modals.showAdvancedOptions({});
     });
     expect(await findByText('Docker Startup Command')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
+  });
+
+  it('should display the Rename Node modal', async () => {
+    const { getByText, findByText, store } = renderComponent();
+    expect(await findByText('backend1')).toBeInTheDocument();
+    act(() => {
+      store.getActions().modals.showRenameNode({ oldNodeName: 'alice' });
+    });
+    expect(await findByText('Rename Node alice')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
+  });
+
+  it('should display the Balance Channels modal', async () => {
+    const { getByText, findByText, store } = renderComponent();
+    expect(await findByText('backend1')).toBeInTheDocument();
+    act(() => {
+      store.getActions().modals.showBalanceChannels();
+    });
+    expect(await findByText('Balance Channels')).toBeInTheDocument();
+    fireEvent.click(getByText('Close'));
+  });
+
+  it('should display the LncAddSession modal', async () => {
+    const { getByText, findByText, store } = renderComponent();
+    store.getActions().designer.onCanvasDrop({
+      data: { type: 'litd', version: testRepoState.images.litd.latest },
+      position: { x: 584, y: 343 },
+      id: 'test-id',
+    });
+    expect(await findByText('carol')).toBeInTheDocument();
+    act(() => {
+      store.getActions().modals.showAddLncSession({ nodeName: 'carol' });
+    });
+    expect(await findByText('Add new LNC Session')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
+  });
+
+  it('should display the Add Simulation modal', async () => {
+    const { getByText, findByText, store } = renderComponent();
+    act(() => {
+      store.getActions().modals.showAddSimulation({});
+    });
+    expect(await findByText('Add Simulation')).toBeInTheDocument();
+    fireEvent.click(getByText('Cancel'));
   });
 
   it('should remove a node from the network', async () => {
-    const { getByText, findByText, queryByText } = renderComponent();
+    const { getByText, findByText, queryByText, store } = renderComponent();
+    // add a new LN node that doesn't have a tap node connected
+    store.getActions().designer.onCanvasDrop({
+      config: { snapToGrid: true },
+      data: { type: 'LND', version: testRepoState.images.LND.latest },
+      position: { x: 584, y: 343 },
+      id: 'c815fd9d-bbeb-4263-ad96-00bc488d8d60',
+    });
+
+    expect(await findByText('carol')).toBeInTheDocument();
+    act(() => {
+      fireEvent.click(getByText('carol'));
+    });
+    fireEvent.click(await findByText('Actions'));
+    fireEvent.click(await findByText('Remove'));
+    fireEvent.click(await findByText('Yes'));
+    await waitForElementToBeRemoved(() => queryByText('Yes'));
+    expect(queryByText('carol')).toBeNull();
+  });
+
+  it('should not remove an LND node with a connected tapd node', async () => {
+    const { getByText, findByText } = renderComponent();
     expect(await findByText('alice')).toBeInTheDocument();
     act(() => {
       fireEvent.click(getByText('alice'));
@@ -166,14 +298,33 @@ describe('NetworkDesigner Component', () => {
     fireEvent.click(await findByText('Actions'));
     fireEvent.click(await findByText('Remove'));
     fireEvent.click(await findByText('Yes'));
+
+    await suppressConsoleErrors(async () => {
+      expect(
+        await findByText(
+          'Cannot remove a Lightning node that has a Taproot Assets node connected to it.',
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('should remove a TAP node from the network', async () => {
+    const { getByText, findByText, queryByText } = renderComponent();
+    expect(await findByText('alice-tap')).toBeInTheDocument();
+    act(() => {
+      fireEvent.click(getByText('alice-tap'));
+    });
+    fireEvent.click(await findByText('Actions'));
+    fireEvent.click(await findByText('Remove'));
+    fireEvent.click(await findByText('Yes'));
     await waitForElementToBeRemoved(() => queryByText('Yes'));
-    expect(queryByText('alice')).toBeNull();
+    expect(queryByText('alice-tap')).toBeNull();
   });
 
   it('should render the dark links', async () => {
     const { container } = renderComponent(undefined, 'dark');
-    // look for the first lineargradient tag
-    const query = 'lineargradient#lg-alice-backend1';
+    // look for the first linearGradient tag
+    const query = 'linearGradient#lg-alice-backend1';
     const gradientEl = container.querySelector(query) as Element;
     // get the color of the first stop in the gradient
     const color = (gradientEl.firstElementChild as Element).getAttribute('stop-color');
@@ -183,8 +334,8 @@ describe('NetworkDesigner Component', () => {
 
   it('should render the light links', async () => {
     const { container } = renderComponent(undefined, 'light');
-    // look for the first lineargradient tag
-    const query = 'lineargradient#lg-alice-backend1';
+    // look for the first linearGradient tag
+    const query = 'linearGradient#lg-alice-backend1';
     const gradientEl = container.querySelector(query) as Element;
     // get the color of the first stop in the gradient
     const color = (gradientEl.firstElementChild as Element).getAttribute('stop-color');

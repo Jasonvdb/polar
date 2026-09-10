@@ -16,7 +16,8 @@ import {
   ManagedImage,
   StoreInjections,
 } from 'types';
-import { defaultRepoState } from 'utils/constants';
+import { BasePorts, defaultRepoState } from 'utils/constants';
+import { isWindows } from 'utils/system';
 import { changeTheme } from 'utils/theme';
 import { NETWORK_VIEW } from 'components/routing';
 import { RootModel } from './';
@@ -38,22 +39,23 @@ export interface AppModel {
   computedManagedImages: Computed<AppModel, ManagedImage[]>;
   setInitialized: Action<AppModel, boolean>;
   setSettings: Action<AppModel, Partial<AppSettings>>;
-  loadSettings: Thunk<AppModel, any, StoreInjections, RootModel>;
+  loadSettings: Thunk<AppModel, void, StoreInjections, RootModel>;
   updateSettings: Thunk<AppModel, Partial<AppSettings>, StoreInjections, RootModel>;
   updateManagedImage: Thunk<AppModel, ManagedImage, StoreInjections, RootModel>;
   saveCustomImage: Thunk<AppModel, CustomImage, StoreInjections, RootModel>;
   removeCustomImage: Thunk<AppModel, CustomImage, StoreInjections, RootModel>;
-  initialize: Thunk<AppModel, any, StoreInjections, RootModel>;
+  initialize: Thunk<AppModel, void, StoreInjections, RootModel>;
   setDockerVersions: Action<AppModel, DockerVersions>;
   getDockerVersions: Thunk<AppModel, { throwErr?: boolean }, StoreInjections, RootModel>;
   setDockerImages: Action<AppModel, string[]>;
-  getDockerImages: Thunk<AppModel, any, StoreInjections, RootModel>;
+  getDockerImages: Thunk<AppModel, void, StoreInjections, RootModel>;
   setRepoState: Action<AppModel, DockerRepoState>;
-  loadRepoState: Thunk<AppModel, any, StoreInjections, RootModel>;
+  loadRepoState: Thunk<AppModel, void, StoreInjections, RootModel>;
   saveRepoState: Thunk<AppModel, DockerRepoState, StoreInjections, RootModel>;
+  queryRepoUpdates: Thunk<AppModel, void, StoreInjections, RootModel>;
   checkForRepoUpdates: Thunk<
     AppModel,
-    any,
+    void,
     StoreInjections,
     RootModel,
     Promise<DockerRepoUpdates>
@@ -72,10 +74,29 @@ const appModel: AppModel = {
   settings: {
     lang: getI18n().language,
     theme: 'dark',
-    showAllNodeVersions: false,
+    checkForUpdatesOnStartup: false,
     nodeImages: {
       managed: [],
       custom: [],
+    },
+    newNodeCounts: {
+      LND: 1,
+      'c-lightning': 1,
+      eclair: 1,
+      bitcoind: 1,
+      btcd: 0,
+      tapd: 0,
+      litd: 0,
+    },
+    basePorts: {
+      LND: { grpc: BasePorts.LND.grpc, rest: BasePorts.LND.rest },
+      bitcoind: { rest: BasePorts.bitcoind.rest },
+      'c-lightning': {
+        grpc: BasePorts['c-lightning'].grpc,
+        rest: BasePorts['c-lightning'].rest,
+      },
+      eclair: { rest: BasePorts.eclair.rest },
+      tapd: { grpc: BasePorts.tapd.grpc, rest: BasePorts.tapd.rest },
     },
   },
   dockerVersions: { docker: '', compose: '' },
@@ -104,12 +125,15 @@ const appModel: AppModel = {
   setInitialized: action((state, initialized) => {
     state.initialized = initialized;
   }),
-  initialize: thunk(async (actions, _, { getStoreActions }) => {
+  initialize: thunk(async (actions, _, { getStoreActions, getState }) => {
     await actions.loadSettings();
     await actions.loadRepoState();
     await getStoreActions().network.load();
     await actions.getDockerVersions({});
     await actions.getDockerImages();
+    if (getState().settings.checkForUpdatesOnStartup) {
+      await actions.queryRepoUpdates();
+    }
     actions.setInitialized(true);
   }),
   setSettings: action((state, settings) => {
@@ -118,7 +142,18 @@ const appModel: AppModel = {
       ...settings,
     };
   }),
-  loadSettings: thunk(async (actions, _, { injections }) => {
+  loadSettings: thunk(async (actions, _, { injections, getState }) => {
+    // before loading settings, set the default CLN count to 0 on Windows
+    if (isWindows()) {
+      actions.setSettings({
+        newNodeCounts: {
+          ...getState().settings.newNodeCounts,
+          LND: 2,
+          'c-lightning': 0,
+        },
+      });
+    }
+
     const settings = await injections.settingsService.load();
     if (settings) {
       actions.setSettings(settings);
@@ -200,6 +235,17 @@ const appModel: AppModel = {
     await injections.repoService.save(repoState);
     actions.setRepoState(repoState);
   }),
+  queryRepoUpdates: thunk(async (actions, payload, { getStoreActions }) => {
+    try {
+      const res = await actions.checkForRepoUpdates();
+      if (res.updates) {
+        getStoreActions().modals.showImageUpdates();
+      }
+    } catch (error) {
+      // just log errors and don't display them in the UI
+      warn('Failed to check for image updates', error);
+    }
+  }),
   checkForRepoUpdates: thunk(async (actions, payload, { injections, getState }) => {
     const { dockerRepoState } = getState();
     return injections.repoService.checkForUpdates(dockerRepoState);
@@ -216,11 +262,13 @@ const appModel: AppModel = {
         description,
       });
     } else {
+      let desc = description || error.message;
+      if (desc.length > 255) desc = desc.slice(0, 255) + '...';
       notification.error({
         ...options,
         duration: 10,
         message: message,
-        description: description || error.message,
+        description: desc,
       });
       warn(message, error);
     }
@@ -236,7 +284,9 @@ const appModel: AppModel = {
     // reset the lightning nodes state
     getStoreActions().lightning.clearNodes();
     // reset the bitcoin nodes state
-    getStoreActions().bitcoind.clearNodes();
+    getStoreActions().bitcoin.clearNodes();
+    // reset the tap nodes state
+    getStoreActions().tap.clearNodes();
     // change the route
     dispatch(push(NETWORK_VIEW(id)));
   }),

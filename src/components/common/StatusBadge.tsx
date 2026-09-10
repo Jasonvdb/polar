@@ -1,5 +1,6 @@
 import React from 'react';
 import { useTranslation } from 'react-i18next';
+import styled from '@emotion/styled';
 import { Badge, Tooltip } from 'antd';
 import { Status } from 'shared/types';
 
@@ -18,16 +19,24 @@ const badgeStatuses: BadgeStatus = {
   [Status.Stopping]: 'processing',
   [Status.Stopped]: 'default',
   [Status.Error]: 'error',
+  [Status.Locked]: 'warning',
 };
 
-const StatusBadge: React.SFC<StatusBadgeProps> = ({ status, text }) => {
+const Styled = {
+  Text: styled.span`
+    display: inline-block;
+    margin-left: 8px;
+  `,
+};
+
+const StatusBadge: React.FC<StatusBadgeProps> = ({ status, text }) => {
   const { t } = useTranslation();
   return (
     <>
       <Tooltip overlay={t(`enums.status.${Status[status]}`)}>
         <Badge status={badgeStatuses[status]} />
       </Tooltip>
-      {text}
+      <Styled.Text>{text}</Styled.Text>
     </>
   );
 };

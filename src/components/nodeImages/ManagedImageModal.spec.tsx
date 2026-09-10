@@ -6,6 +6,7 @@ import { renderWithProviders, testManagedImages } from 'utils/tests';
 import ManagedImageModal from './ManagedImageModal';
 
 describe('ManagedImageModal Component', () => {
+  let unmount: () => void;
   const onClose = jest.fn();
 
   const renderComponent = () => {
@@ -24,16 +25,19 @@ describe('ManagedImageModal Component', () => {
       },
     };
 
-    const image = nodeImages.managed[4];
+    const image = nodeImages.managed[6];
     const result = renderWithProviders(
       <ManagedImageModal image={image} onClose={onClose} />,
       { initialState },
     );
+    unmount = result.unmount;
     return {
       ...result,
       image,
     };
   };
+
+  afterEach(() => unmount());
 
   it('should display title', () => {
     const { getByText } = renderComponent();
@@ -76,7 +80,7 @@ describe('ManagedImageModal Component', () => {
     fireEvent.change(getByLabelText('Command'), { target: { value: 'a' } });
     fireEvent.click(getByText('Save'));
     await waitFor(() => {
-      expect(store.getState().app.settings.nodeImages.managed[4].command).toBe('a');
+      expect(store.getState().app.settings.nodeImages.managed[6].command).toBe('a');
     });
     expect(onClose).toHaveBeenCalled();
   });
@@ -85,7 +89,7 @@ describe('ManagedImageModal Component', () => {
     const { getByText, store } = renderComponent();
     fireEvent.click(getByText('Reset to Default'));
     await waitFor(() => {
-      expect(store.getState().app.settings.nodeImages.managed[4]).toBeUndefined();
+      expect(store.getState().app.settings.nodeImages.managed[6]).toBeUndefined();
     });
     expect(onClose).toHaveBeenCalled();
   });

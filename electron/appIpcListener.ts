@@ -1,11 +1,13 @@
-import { BrowserWindow, IpcMain } from 'electron';
+import { app, BrowserWindow, IpcMain } from 'electron';
 import { debug } from 'electron-log';
 import windowState from 'electron-window-state';
 import { join } from 'path';
 import { ipcChannels } from '../src/shared';
 import { APP_ROOT, BASE_URL } from './constants';
 import { httpProxy } from './httpProxy';
-import { clearProxyCache } from './lnd/lndProxyServer';
+import { clearLitdProxyCache } from './litd/litdProxyServer';
+import { clearLndProxyCache } from './lnd/lndProxyServer';
+import { clearTapdProxyCache } from './tapd/tapdProxyServer';
 import { unzip, zip } from './utils/zip';
 
 const openWindow = async (args: { url: string }): Promise<boolean> => {
@@ -13,7 +15,8 @@ const openWindow = async (args: { url: string }): Promise<boolean> => {
   const winState = windowState({
     defaultWidth: 800,
     defaultHeight: 600,
-    file: `window-state-terminal.json`,
+    file: `${args.url.replace(/\//g, '_')}.json`,
+    path: join(app.getPath('userData'), 'window-state'),
   });
   let window: BrowserWindow | null = new BrowserWindow({
     x: winState.x,
@@ -25,6 +28,8 @@ const openWindow = async (args: { url: string }): Promise<boolean> => {
     show: false,
     webPreferences: {
       nodeIntegration: true,
+      contextIsolation: false,
+      enableRemoteModule: true,
     },
   });
   window.setMenuBarVisibility(false);
@@ -47,7 +52,9 @@ const openWindow = async (args: { url: string }): Promise<boolean> => {
  * consistent with all the other listeners
  */
 const clearCache = (): Promise<{ success: boolean }> => {
-  clearProxyCache();
+  clearLndProxyCache();
+  clearTapdProxyCache();
+  clearLitdProxyCache();
   return Promise.resolve({ success: true });
 };
 
@@ -92,7 +99,7 @@ export const initAppIpcListener = (ipc: IpcMain) => {
         log(`send response "${uniqueChan}"`, JSON.stringify(result, null, 2));
         // response to the calling process with a reply
         event.reply(uniqueChan, result);
-      } catch (err) {
+      } catch (err: any) {
         // reply with an error message if the execution fails
         log(`send error "${uniqueChan}"`, JSON.stringify(err, null, 2));
         event.reply(uniqueChan, { err: err.message });

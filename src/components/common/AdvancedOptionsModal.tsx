@@ -27,14 +27,14 @@ const AdvancedOptionsModal: React.FC<Props> = ({ network }) => {
       await updateAdvancedOptions({ node, command });
       hideAdvancedOptions();
       notify({ message: l('success', { name: node.name }) });
-    } catch (error) {
+    } catch (error: any) {
       notify({ message: l('error'), error });
     }
   });
 
   const handleSubmit = (values: any) => {
-    const { lightning, bitcoin } = network.nodes;
-    const nodes: CommonNode[] = [...lightning, ...bitcoin];
+    const { lightning, bitcoin, tap } = network.nodes;
+    const nodes: CommonNode[] = [...lightning, ...bitcoin, ...tap];
     const node = nodes.find(n => n.name === nodeName);
     if (!node) return;
     updateAsync.execute(node, values.command);
@@ -43,7 +43,7 @@ const AdvancedOptionsModal: React.FC<Props> = ({ network }) => {
   return (
     <Modal
       title={l('title')}
-      visible={visible}
+      open={visible}
       onCancel={() => hideAdvancedOptions()}
       destroyOnClose
       cancelText={l('cancelBtn')}

@@ -23,7 +23,7 @@ const RestartNode: React.FC<Props> = ({ node, menuType }) => {
   const { toggleNode } = useStoreActions(s => s.network);
 
   const disabled = [Status.Starting, Status.Stopping].includes(node.status);
-  const showStop = node.status === Status.Started;
+  const showStop = node.status === Status.Started || node.status === Status.Locked;
 
   const showConfirmModal = (mode: string) => {
     const { name } = node;
@@ -36,7 +36,7 @@ const RestartNode: React.FC<Props> = ({ node, menuType }) => {
         try {
           await toggleNode(node);
           notify({ message: l(`${mode}Success`, { name }) });
-        } catch (error) {
+        } catch (error: any) {
           notify({ message: l(`${mode}Error`), error });
           throw error;
         }
@@ -48,10 +48,10 @@ const RestartNode: React.FC<Props> = ({ node, menuType }) => {
   if (menuType) {
     const icon = menuType === 'start' ? <PlayCircleOutlined /> : <PoweroffOutlined />;
     return (
-      <span onClick={() => showConfirmModal(menuType)}>
+      <div onClick={() => showConfirmModal(menuType)}>
         {icon}
         <span>{l(`${menuType}Btn`)}</span>
-      </span>
+      </div>
     );
   }
 

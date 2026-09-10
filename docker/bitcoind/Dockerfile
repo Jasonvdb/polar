@@ -8,11 +8,19 @@ RUN apt-get update -y \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-RUN curl -SLO https://bitcoin.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-x86_64-linux-gnu.tar.gz \
+RUN SYS_ARCH="$(uname -m)" \
+  && curl -SLO https://bitcoincore.org/bin/bitcoin-core-${BITCOIN_VERSION}/bitcoin-${BITCOIN_VERSION}-${SYS_ARCH}-linux-gnu.tar.gz \
   && tar -xzf *.tar.gz -C /opt \
   && rm *.tar.gz
 
+RUN curl -SLO https://raw.githubusercontent.com/bitcoin/bitcoin/master/contrib/completions/bash/bitcoin-cli.bash \
+  && mkdir -p /etc/bash_completion.d \
+  && mv bitcoin-cli.bash /etc/bash_completion.d/bitcoin-cli.bash-completion \
+  && curl -SLO https://raw.githubusercontent.com/scop/bash-completion/master/bash_completion \
+  && mv bash_completion /usr/share/bash-completion/
+
 COPY docker-entrypoint.sh /entrypoint.sh
+COPY bashrc /home/bitcoin/.bashrc
 
 RUN chmod a+x /entrypoint.sh
 

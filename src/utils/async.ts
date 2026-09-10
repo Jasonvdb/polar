@@ -22,8 +22,10 @@ export const waitFor = async (
     const result = await conditionFunc();
     // if the condition succeeds, then return immediately
     return Promise.resolve(result);
-  } catch {
+  } catch (error) {
     // do nothing if the condition fails the first time
+    // unless when abortWaitFor is called
+    if (error instanceof AbortWaitError) throw error;
   }
 
   // return a promise that will resolve when the condition is true
@@ -36,10 +38,15 @@ export const waitFor = async (
         const result = await conditionFunc();
         clearInterval(timer);
         return resolve(result);
-      } catch (error) {
+      } catch (error: any) {
         // only reject when the timeout expires, otherwise ignore the error
         // and retry on the next interval
         if (timesToCheck <= 0) {
+          clearInterval(timer);
+          return reject(error);
+        }
+        // reject immediately for user action
+        if (error instanceof AbortWaitError) {
           clearInterval(timer);
           return reject(error);
         }
@@ -49,3 +56,14 @@ export const waitFor = async (
     }, interval);
   });
 };
+
+/**
+ * Thrown inside a conditionFunc to immediately abort waitFor without retrying.
+ * Used for states that need user action
+ */
+export class AbortWaitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AbortWaitError';
+  }
+}

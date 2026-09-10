@@ -52,7 +52,7 @@ const ChangeBackendModal: React.FC<Props> = ({ network }) => {
         description: l('successDesc', { ln, backend }),
       });
       hideChangeBackend();
-    } catch (error) {
+    } catch (error: any) {
       notify({ message: l('submitError'), error });
     }
   });
@@ -67,6 +67,8 @@ const ChangeBackendModal: React.FC<Props> = ({ network }) => {
         const requiredVersion = compatibility[ln.version];
         if (!isVersionCompatible(backend.version, requiredVersion)) {
           setCompatWarning(l('compatWarning', { ln, backend, requiredVersion }));
+        } else {
+          setCompatWarning(undefined);
         }
       }
     }
@@ -85,7 +87,7 @@ const ChangeBackendModal: React.FC<Props> = ({ network }) => {
     <>
       <Modal
         title={l('title')}
-        visible={visible}
+        open={visible}
         onCancel={() => hideChangeBackend()}
         destroyOnClose
         cancelText={l('cancelBtn')}
@@ -112,7 +114,7 @@ const ChangeBackendModal: React.FC<Props> = ({ network }) => {
                 name="lnNode"
                 label={l('lnNodeLabel')}
                 disabled={changeAsync.loading}
-                onChange={v => setSelectedLn(v.toString())}
+                onChange={v => setSelectedLn(v?.toString())}
               />
             </Col>
             <Styled.IconCol span={4}>
@@ -126,7 +128,7 @@ const ChangeBackendModal: React.FC<Props> = ({ network }) => {
               >
                 <Select
                   disabled={changeAsync.loading}
-                  onChange={v => setSelectedBackend(v.toString())}
+                  onChange={v => setSelectedBackend(v?.toString())}
                 >
                   {network.nodes.bitcoin.map(node => (
                     <Select.Option key={node.name} value={node.name}>

@@ -1,7 +1,12 @@
 import React, { useCallback } from 'react';
-import { LinkOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import {
+  DollarOutlined,
+  LinkOutlined,
+  ThunderboltOutlined,
+  InfoCircleOutlined,
+} from '@ant-design/icons';
 import styled from '@emotion/styled';
-import { Card, Col, Row, Statistic } from 'antd';
+import { Card, Col, Row, Statistic, Tooltip } from 'antd';
 import { usePrefixedTranslation } from 'hooks';
 import { useStoreActions } from 'store';
 import { Network } from 'types';
@@ -23,24 +28,40 @@ const NetworkCard: React.FC<{ network: Network }> = ({ network }) => {
 
   return (
     <Styled.Card
-      title={network.name}
+      title={
+        <>
+          {`${network.name} `}
+          {network.description && (
+            <Tooltip title={network.description}>
+              <InfoCircleOutlined />
+            </Tooltip>
+          )}
+        </>
+      }
       hoverable
       extra={<StatusBadge status={network.status} />}
       onClick={handleClick}
     >
       <Row>
-        <Col span={12}>
+        <Col span={8}>
           <Statistic
             title={l('lightningNodes')}
             value={network.nodes.lightning.length}
             suffix={<ThunderboltOutlined />}
           />
         </Col>
-        <Col span={12}>
+        <Col span={8}>
           <Statistic
             title={l('bitcoinNodes')}
             value={network.nodes.bitcoin.length}
             suffix={<LinkOutlined />}
+          />
+        </Col>
+        <Col span={8}>
+          <Statistic
+            title={l('tapNodes')}
+            value={network.nodes.tap.length}
+            suffix={<DollarOutlined />}
           />
         </Col>
       </Row>

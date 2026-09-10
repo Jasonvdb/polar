@@ -7,16 +7,27 @@ import { useDebounce } from 'hooks';
 import { useTheme } from 'hooks/useTheme';
 import { useStoreActions, useStoreState } from 'store';
 import { Network } from 'types';
-import { Loader } from 'components/common';
+import { Loader, RenameNodeModal } from 'components/common';
 import AdvancedOptionsModal from 'components/common/AdvancedOptionsModal';
-import { CanvasOuterDark, Link, NodeInner, Port, Ports } from './custom';
+import BalanceChannelsModal from 'components/common/BalanceChannelsModal';
+import SendOnChainModal from './bitcoin/actions/SendOnChainModal';
+import { Link, NodeInner, Port, Ports } from './custom';
+import { CanvasOuterDark, CanvasOuterLight } from './custom/CanvasOuter';
 import {
   ChangeBackendModal,
   CreateInvoiceModal,
   OpenChannelModal,
   PayInvoiceModal,
 } from './lightning/actions';
+import LncAddSessionModal from './lightning/connect/LncAddSessionModal';
 import Sidebar from './Sidebar';
+import {
+  ChangeTapBackendModal,
+  MintAssetModal,
+  NewAddressModal,
+  SendAssetModal,
+} from './tap/actions';
+import AddSimulationModal from './default/AddSimulationModal';
 
 const Styled = {
   Designer: styled.div`
@@ -45,10 +56,19 @@ const NetworkDesigner: React.FC<Props> = ({ network, updateStateDelay = 3000 }) 
   const { zoomIn, zoomOut, zoomReset, ...callbacks } = useStoreActions(s => s.designer);
   const {
     openChannel,
+    mintAsset,
+    sendAsset,
+    newAddress,
     createInvoice,
     payInvoice,
     changeBackend,
+    sendOnChain,
     advancedOptions,
+    balanceChannels,
+    changeTapBackend,
+    renameNode,
+    addLncSession,
+    addSimulation,
   } = useStoreState(s => s.modals);
 
   const { save } = useStoreActions(s => s.network);
@@ -68,7 +88,7 @@ const NetworkDesigner: React.FC<Props> = ({ network, updateStateDelay = 3000 }) 
         chart={chart}
         config={{ snapToGrid: true }}
         Components={{
-          CanvasOuter: theme.name === 'dark' ? CanvasOuterDark : undefined,
+          CanvasOuter: theme.name === 'dark' ? CanvasOuterDark : CanvasOuterLight,
           NodeInner,
           Link,
           Port,
@@ -90,7 +110,16 @@ const NetworkDesigner: React.FC<Props> = ({ network, updateStateDelay = 3000 }) 
       {createInvoice.visible && <CreateInvoiceModal network={network} />}
       {payInvoice.visible && <PayInvoiceModal network={network} />}
       {changeBackend.visible && <ChangeBackendModal network={network} />}
+      {sendOnChain.visible && <SendOnChainModal network={network} />}
       {advancedOptions.visible && <AdvancedOptionsModal network={network} />}
+      {balanceChannels.visible && <BalanceChannelsModal network={network} />}
+      {mintAsset.visible && <MintAssetModal network={network} />}
+      {newAddress.visible && <NewAddressModal network={network} />}
+      {changeTapBackend.visible && <ChangeTapBackendModal network={network} />}
+      {sendAsset.visible && <SendAssetModal network={network} />}
+      {renameNode.visible && <RenameNodeModal network={network} />}
+      {addLncSession.visible && <LncAddSessionModal network={network} />}
+      {addSimulation.visible && <AddSimulationModal network={network} />}
     </Styled.Designer>
   );
 };

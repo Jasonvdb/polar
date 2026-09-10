@@ -1,16 +1,13 @@
 import React from 'react';
 import { fireEvent, waitFor } from '@testing-library/react';
-import { BitcoindLibrary } from 'types';
 import {
   defaultStateInfo,
   getNetwork,
-  injections,
   lightningServiceMock,
   renderWithProviders,
+  bitcoinServiceMock,
 } from 'utils/tests';
 import { Deposit } from './';
-
-const bitcoindServiceMock = injections.bitcoindService as jest.Mocked<BitcoindLibrary>;
 
 describe('Deposit', () => {
   const renderComponent = () => {
@@ -31,7 +28,7 @@ describe('Deposit', () => {
   };
 
   beforeEach(() => {
-    bitcoindServiceMock.sendFunds.mockResolvedValue('txid');
+    bitcoinServiceMock.sendFunds.mockResolvedValue('txid');
     lightningServiceMock.getNewAddress.mockResolvedValue({ address: 'bc1aaaa' });
     lightningServiceMock.getInfo.mockResolvedValue(
       defaultStateInfo({
@@ -76,7 +73,7 @@ describe('Deposit', () => {
     fireEvent.click(btn);
     await waitFor(() => getByText('Deposited 250,000 sats to alice'));
     expect(lightningServiceMock.getNewAddress).toBeCalledTimes(1);
-    expect(bitcoindServiceMock.sendFunds).toBeCalledWith(
+    expect(bitcoinServiceMock.sendFunds).toBeCalledWith(
       expect.anything(),
       'bc1aaaa',
       0.0025,
@@ -86,18 +83,19 @@ describe('Deposit', () => {
   it('should deposit funds when an invalid value is specified', async () => {
     const { input, btn, getByText } = renderComponent();
     fireEvent.change(input, { target: { value: 'asdf' } });
+    fireEvent.blur(input);
     fireEvent.click(btn);
-    await waitFor(() => getByText('Deposited 100,000 sats to alice'));
+    await waitFor(() => getByText('Deposited 1,000,000 sats to alice'));
     expect(lightningServiceMock.getNewAddress).toBeCalledTimes(1);
-    expect(bitcoindServiceMock.sendFunds).toBeCalledWith(
+    expect(bitcoinServiceMock.sendFunds).toBeCalledWith(
       expect.anything(),
       'bc1aaaa',
-      0.001,
+      0.01,
     );
   });
 
   it('should display an error if mining fails', async () => {
-    bitcoindServiceMock.sendFunds.mockRejectedValue(new Error('connection failed'));
+    bitcoinServiceMock.sendFunds.mockRejectedValue(new Error('connection failed'));
     const { input, btn, findByText } = renderComponent();
     const numBlocks = 5;
     fireEvent.change(input, { target: { value: numBlocks } });

@@ -1,31 +1,55 @@
-import { CLightningNode, LndNode } from 'shared/types';
-import { bitcoinCredentials } from 'utils/constants';
-import { getNetwork } from 'utils/tests';
+import os from 'os';
+import { CLightningNode, LitdNode, LndNode, TapdNode } from 'shared/types';
+import { bitcoinCredentials, defaultRepoState } from 'utils/constants';
+import { createNetwork } from 'utils/network';
+import { testManagedImages } from 'utils/tests';
 import ComposeFile from './composeFile';
 
+jest.mock('os');
+
+const mockOS = os as jest.Mocked<typeof os>;
+
 describe('ComposeFile', () => {
-  let composeFile = new ComposeFile();
-  const network = getNetwork();
+  let composeFile = new ComposeFile(1);
+  const network = createNetwork({
+    id: 1,
+    name: 'test network',
+    description: 'network description',
+    lndNodes: 1,
+    clightningNodes: 1,
+    eclairNodes: 1,
+    bitcoindNodes: 1,
+    tapdNodes: 1,
+    litdNodes: 1,
+    repoState: defaultRepoState,
+    managedImages: testManagedImages,
+    customImages: [],
+    manualMineCount: 6,
+  });
   const btcNode = network.nodes.bitcoin[0];
   const lndNode = network.nodes.lightning[0] as LndNode;
   const clnNode = network.nodes.lightning[1] as CLightningNode;
+  const litdNode = network.nodes.lightning[3] as LitdNode;
+  const tapNode = network.nodes.tap[0] as TapdNode;
 
   beforeEach(() => {
-    composeFile = new ComposeFile();
+    composeFile = new ComposeFile(1);
+    mockOS.platform.mockReturnValue('darwin');
   });
 
   it('should have no services initially', () => {
     expect(composeFile.content.services).toEqual({});
   });
 
-  it('should have a valid docker version', () => {
-    expect(composeFile.content.version).toEqual('3.3');
+  it('should have a name', () => {
+    expect(composeFile.content.name).toEqual('polar-network-1');
   });
 
   it('should add multiple services', () => {
     composeFile.addBitcoind(btcNode);
     composeFile.addLnd(lndNode, btcNode);
-    expect(Object.keys(composeFile.content.services).length).toEqual(2);
+    composeFile.addSimln(1);
+    expect(Object.keys(composeFile.content.services).length).toEqual(3);
   });
 
   it('should add a bitcoind config', () => {
@@ -77,7 +101,8 @@ describe('ComposeFile', () => {
     expect(composeFile.content.services['bob']).not.toBeUndefined();
   });
 
-  it('should create the correct c-lightning docker compose values', () => {
+  it('should create the correct c-lightning docker compose values on non-Windows', () => {
+    mockOS.platform.mockReturnValue('darwin');
     composeFile.addClightning(clnNode, btcNode);
     const service = composeFile.content.services['bob'];
     expect(service.image).toContain('clightning');
@@ -86,11 +111,125 @@ describe('ComposeFile', () => {
     expect(service.volumes[0]).toContain('/bob/lightningd:');
   });
 
+  it('should create the correct c-lightning docker compose values on Windows', () => {
+    mockOS.platform.mockReturnValue('win32');
+    composeFile.addClightning(clnNode, btcNode);
+    const service = composeFile.content.services['bob'];
+    expect(service.image).toContain('clightning');
+    expect(service.container_name).toEqual('polar-n1-bob');
+    expect(service.command).toContain('backend');
+    expect(service.volumes[0]).toContain('polar-n1-bob:');
+    expect(composeFile.content.volumes).toHaveProperty('polar-n1-bob');
+  });
+
+  it('should have the grpc port for c-lightning', () => {
+    composeFile.addClightning(clnNode, btcNode);
+    const service = composeFile.content.services['bob'];
+    expect(service.command).toContain('--grpc-port');
+  });
+
+  it('should not have the grpc port for c-lightning', () => {
+    clnNode.version = '0.10.1';
+    clnNode.ports.grpc = 0;
+    composeFile.addClightning(clnNode, btcNode);
+    const service = composeFile.content.services['bob'];
+    expect(service.command).not.toContain('--grpc-port');
+  });
+
   it('should use the c-lightning nodes docker data', () => {
     clnNode.docker = { image: 'my-image', command: 'my-command' };
     composeFile.addClightning(clnNode, btcNode);
     const service = composeFile.content.services['bob'];
     expect(service.image).toBe('my-image');
     expect(service.command).toBe('my-command');
+  });
+
+  it('should add an tap config', () => {
+    composeFile.addTapd(tapNode, lndNode);
+    expect(composeFile.content.services['alice-tap']).not.toBeUndefined();
+  });
+
+  it('should create the correct tapd docker compose values', () => {
+    composeFile.addTapd(tapNode, lndNode);
+    const service = composeFile.content.services['alice-tap'];
+    expect(service.image).toContain('tapd');
+    expect(service.container_name).toEqual('polar-n1-alice-tap');
+    expect(service.command).toContain('lnd.host=polar-n1-alice');
+    expect(service.volumes[0]).toContain('/alice:');
+    expect(service.volumes[1]).toContain('/alice-tap:');
+  });
+
+  it('should use the tapd nodes custom docker data', () => {
+    const tap = {
+      ...tapNode,
+      docker: { image: 'my-image', command: 'my-command' },
+    };
+    composeFile.addTapd(tap, lndNode);
+    const service = composeFile.content.services['alice-tap'];
+    expect(service.image).toBe('my-image');
+    expect(service.command).toBe('my-command');
+  });
+
+  it('should use the correct command for tapd v3', () => {
+    const tap = { ...tapNode, version: '0.3.3' };
+    composeFile.addTapd(tap, lndNode);
+    const service = composeFile.content.services['alice-tap'];
+    expect(service.command).toContain('--universe.public-access');
+    expect(service.command).not.toContain('--universe.public-access=rw');
+    expect(service.command).not.toContain('--universe.sync-all-assets');
+  });
+
+  it('should use the correct command for tapd v4+', () => {
+    const tap = { ...tapNode, version: '0.4.0' };
+    composeFile.addTapd(tap, lndNode);
+    const service = composeFile.content.services['alice-tap'];
+    expect(service.command).toContain('--universe.public-access=rw');
+    expect(service.command).toContain('--universe.sync-all-assets');
+  });
+
+  it('should add an litd config', () => {
+    composeFile.addLitd(litdNode, btcNode, litdNode);
+    expect(composeFile.content.services['dave']).not.toBeUndefined();
+  });
+
+  it('should create the correct litd docker compose values', () => {
+    composeFile.addLitd(litdNode, btcNode, litdNode);
+    const service = composeFile.content.services['dave'];
+    expect(service.image).toContain('litd');
+    expect(service.container_name).toEqual('polar-n1-dave');
+    expect(service.command).toContain('lnd.bitcoind.rpchost=polar-n1-backend1');
+    expect(service.volumes[0]).toContain('/dave/lit:');
+    expect(service.volumes[1]).toContain('/dave/lnd:');
+    expect(service.volumes[2]).toContain('/dave/tapd:');
+  });
+
+  it('should use the tapd nodes custom docker data', () => {
+    litdNode.docker = { image: 'my-image', command: 'my-command' };
+    composeFile.addLitd(litdNode, btcNode, litdNode);
+    const service = composeFile.content.services['dave'];
+    expect(service.image).toBe('my-image');
+    expect(service.command).toBe('my-command');
+  });
+
+  it('should add a simln config', () => {
+    composeFile.addSimln(1);
+    expect(composeFile.content.services['simln']).not.toBeUndefined();
+  });
+
+  it('should create the correct simln docker compose values', () => {
+    composeFile.addSimln(1);
+    const service = composeFile.content.services['simln'];
+    expect(service.image).toContain('simln');
+    expect(service.container_name).toEqual('polar-n1-simln');
+    expect(service.command).toBe('');
+  });
+
+  it('should not reinitialize volumes when adding multiple c-lightning nodes on Windows', () => {
+    mockOS.platform.mockReturnValue('win32');
+    composeFile.addClightning(clnNode, btcNode);
+    const secondClnNode = { ...clnNode, name: 'carol' };
+    composeFile.addClightning(secondClnNode as CLightningNode, btcNode);
+    expect(composeFile.content.volumes).toHaveProperty('polar-n1-bob');
+    expect(composeFile.content.volumes).toHaveProperty('polar-n1-carol');
   });
 });

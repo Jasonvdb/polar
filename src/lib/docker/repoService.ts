@@ -29,9 +29,13 @@ class RepoService implements RepoServiceInjection {
   async load(): Promise<DockerRepoState | undefined> {
     if (await exists(this.filePath)) {
       const json = await read(this.filePath);
-      const data = JSON.parse(json);
-      debug(`loaded repo state from '${this.filePath}'`, json);
-      return data;
+      try {
+        const data = JSON.parse(json);
+        debug(`loaded repo state from '${this.filePath}'`, json);
+        return data;
+      } catch (error) {
+        debug(`failed to parse repo state from '${this.filePath}'`, error);
+      }
     } else {
       debug(
         `skipped loading repo state because the file '${this.filePath}' doesn't exist`,
@@ -59,13 +63,17 @@ class RepoService implements RepoServiceInjection {
       LND: [],
       'c-lightning': [],
       eclair: [],
+      litd: [],
       bitcoind: [],
       btcd: [],
+      tapd: [],
     };
     // find the different versions between the two states
     let newVersionCount = 0;
     Object.entries(remoteState.images).forEach(([name, remoteImage]) => {
       const impl = name as NodeImplementation;
+      // skip if the local state doesn't have this implementation
+      if (!localState.images[impl]) return;
       const localVersions = localState.images[impl].versions;
       const newVersions = remoteImage.versions.filter(v => !localVersions.includes(v));
       if (newVersions.length) {

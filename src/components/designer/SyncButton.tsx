@@ -1,11 +1,19 @@
 import React from 'react';
 import { useAsyncCallback } from 'react-async-hook';
 import { ReloadOutlined } from '@ant-design/icons';
+import styled from '@emotion/styled';
 import { Button, Tooltip } from 'antd';
 import { usePrefixedTranslation } from 'hooks';
-import { Status } from 'shared/types';
 import { useStoreActions } from 'store';
 import { Network } from 'types';
+
+const Styled = {
+  Button: styled(Button)`
+    margin-left: 8px;
+    font-size: 18px;
+    padding: 2px 0 !important;
+  `,
+};
 
 interface Props {
   network: Network;
@@ -21,7 +29,7 @@ const SyncButton: React.FC<Props> = ({ network }) => {
       notify({
         message: l('syncSuccess'),
       });
-    } catch (error) {
+    } catch (error: any) {
       notify({
         message: l('syncError'),
         error,
@@ -30,9 +38,8 @@ const SyncButton: React.FC<Props> = ({ network }) => {
   });
   return (
     <Tooltip title={l('syncBtnTip')}>
-      <Button
+      <Styled.Button
         icon={<ReloadOutlined />}
-        disabled={network.status !== Status.Started}
         onClick={syncChartAsync.execute}
         loading={syncChartAsync.loading}
       />
