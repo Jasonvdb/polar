@@ -54,3 +54,22 @@ it('documents every command and forwards receiver path arrays without changing t
   await store.getActions().mcp.paykit({ networkId: 1, action: 'command', request });
   expect(service.command).toHaveBeenCalledWith(1, request);
 });
+
+it('forwards editable proof objects unchanged and returns only command acceptance', async () => {
+  const store = createStore(createMockRootModel(), { injections });
+  store.getActions().network.setNetworks([getNetwork(1, 'test')]);
+  const request = {
+    commandId: newPaykitId(),
+    command: 'proof.submit' as const,
+    input: {
+      receiverId: newPaykitId(),
+      requestId: newPaykitId(),
+      proof: { method: 'btc-onchain' as const, txid: 'a'.repeat(64), outputIndex: 0 },
+    },
+  };
+  service.command.mockResolvedValue({ operationId: request.commandId });
+  await expect(
+    store.getActions().mcp.paykit({ networkId: 1, action: 'command', request }),
+  ).resolves.toEqual({ operationId: request.commandId });
+  expect(service.command).toHaveBeenCalledWith(1, request);
+});

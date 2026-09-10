@@ -23,6 +23,8 @@ import { Status } from 'shared/types';
 import { useStoreActions } from 'store';
 import { Network } from 'types';
 import { paykitService } from 'lib/paykit/paykitService';
+import PaykitRequests from './PaykitRequests';
+import PaykitProofs from './PaykitProofs';
 import PaykitPaymentMethods from './PaykitPaymentMethods';
 import PaykitLinks from './PaykitLinks';
 import PaykitProfilesContacts from './PaykitProfilesContacts';
@@ -86,7 +88,11 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
       setRetry(undefined);
     } catch (e: any) {
       // A rejected request was never accepted. Transport errors remain uncertain.
-      if (/HTTP 4[0-9]{2}/.test(e.message)) setRetry(undefined);
+      if (
+        /HTTP 4[0-9]{2}/.test(e.message) ||
+        e.message.startsWith('Paykit command not submitted:')
+      )
+        setRetry(undefined);
       throw e;
     }
   };
@@ -96,6 +102,15 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const receivers = state?.receivers.filter(r => r.participantId === participantId) || [];
   const receiver = receivers.find(r => r.id === receiverId);
   const disabled = busy || !state?.ready || !!retry || !!connectionError;
+  const fundingPending = state?.operations.some(
+    item =>
+      item.command === 'preset.fund' &&
+      (item.status === 'queued' || item.status === 'running'),
+  );
+  const fundingRecovery =
+    state?.funding &&
+    (['uncertain', 'failed'].includes(state.funding.status) ||
+      (state.funding.status === 'running' && !fundingPending));
 
   if (!network.paykit)
     return (
@@ -175,6 +190,39 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
             {state?.lastEventSequence ?? 'Unavailable'}
           </Descriptions.Item>
         </Descriptions>
+        <Button
+          type="primary"
+          disabled={disabled || fundingPending}
+          onClick={() => command('preset.fund', {})}
+        >
+          {fundingRecovery
+            ? 'Recover funded preset'
+            : 'Create funded Alice / Bob / Carol preset'}
+        </Button>
+        {state?.funding && (
+          <div style={{ marginTop: 12 }}>
+            <Typography.Paragraph>
+              Funding: {state.funding.status} · {state.funding.step}
+            </Typography.Paragraph>
+            {state.funding.lastError && (
+              <Alert type="error" message={state.funding.lastError} />
+            )}
+            <List
+              dataSource={state.funding.wallets}
+              renderItem={item => (
+                <List.Item>
+                  {item.participant}: {item.onchainBalanceSats} on-chain sats ·{' '}
+                  {item.lightningBalanceSats} Lightning wallet sats ({item.walletId})
+                </List.Item>
+              )}
+            />
+            <Typography.Paragraph>
+              {state.funding.funded
+                ? 'Funded wallets and channels are ready.'
+                : 'Funding is not yet verified.'}
+            </Typography.Paragraph>
+          </div>
+        )}
         <Button disabled={disabled} onClick={() => command('preset.create', {})}>
           Create Alice / Bob / Carol preset
         </Button>
@@ -347,6 +395,23 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
               item => item.receiverId === receiver.id,
             )}
             state={state}
+            disabled={disabled || receiver.status !== 'running'}
+            command={command}
+          />
+          <PaykitRequests
+            receiverId={receiver.id}
+            workspace={state.receiverWorkspaces?.find(
+              item => item.receiverId === receiver.id,
+            )}
+            state={state}
+            disabled={disabled || receiver.status !== 'running'}
+            command={command}
+          />
+          <PaykitProofs
+            receiverId={receiver.id}
+            workspace={state.receiverWorkspaces?.find(
+              item => item.receiverId === receiver.id,
+            )}
             disabled={disabled || receiver.status !== 'running'}
             command={command}
           />

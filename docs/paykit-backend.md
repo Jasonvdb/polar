@@ -61,7 +61,7 @@ A planned receiver stop drains the current SDK command or synchronization before
 
 Startup also resumes unregistered participant intents with their saved IDs and owner keys before readiness. This recovers a failed manual signup after a service outage; its original failed operation remains terminal and visible.
 
-Interrupted running **PR2 commands only** are requeued with an explicit `operation.requeued` event and execute using their existing IDs and saved intent. They never become successful merely because the service restarted. A receiver generation can advance again during crash recovery; completed duplicate commands do not restart it again. Future wallet/payment commands must use their own settlement reconciliation and must not inherit this replay policy.
+Interrupted running **PR2 commands only** are requeued with an explicit `operation.requeued` event and execute using their existing IDs and saved intent. They never become successful merely because the service restarted. A receiver generation can advance again during crash recovery; completed duplicate commands do not restart it again. Wallet/payment commands use their own settlement reconciliation and do not inherit this replay policy.
 
 ## CLI and diagnostics
 
@@ -104,7 +104,7 @@ Peer keys must be canonical Pubky z-base32 public keys. Receiver paths follow th
 
 Initiation and acceptance are explicit. Background work advances existing linking peers and uses the SDK durable send queue and receive cursor for linked peers. It never automatically initiates a peer, unblocks a peer, or restarts a recovery-required handshake. Pause persists across restarts and prevents both outbound publication and inbound receipt; an empty list may still be queued while paused. `delivery.sync` fails visibly until resumed. Blocking clears the SDK link; unblocking requires explicit new linking.
 
-`link.sendEmptyList` demonstrates the actual encrypted Private Payment List protocol with zero payment endpoints. Its string `outboundMessageId` identifies durable queue acceptance. `lastSentMessageId` is projected only from an SDK record with successful sent status and timestamp; the recipient independently exposes `latestReceivedListId`. These identifiers are strings to preserve full u64 precision. No payment execution or funded wallets ship in this increment.
+`link.sendEmptyList` demonstrates the actual encrypted Private Payment List protocol with zero payment endpoints. Its string `outboundMessageId` identifies durable queue acceptance. `lastSentMessageId` is projected only from an SDK record with successful sent status and timestamp; the recipient independently exposes `latestReceivedListId`. These identifiers are strings to preserve full u64 precision. This command only exchanges endpoint metadata; payment execution and funding use the separate commands below.
 
 Receiver intent is committed before SDK effects and its terminal result before emitting a reply. Identical receiver command IDs return the saved result. If the receiver was interrupted before recording its result, the intent fails visibly and affected private peers require explicit relinking. If the child completed but the supervisor did not record completion, supervisor restart marks the old operation `reconciliation_required`; it does not blindly dispatch it again. Keep the original ID and inspect receiver state. The deterministic unit test covers this exact persisted child-result/lost-supervisor-reply boundary; it does not claim a physical power-loss test.
 
@@ -193,10 +193,10 @@ public Pubky endpoints. `inspect-private-list RECEIVER PEER PATH` additionally
 returns the latest decrypted `paymentEndpoints`; the receiver must be stopped so
 the diagnostic can acquire its existing exclusive SDK lock. These commands expose
 endpoint payloads, never preimages, session grants, Noise keys or wallet credentials.
-Actual payments and settlement/proof processing follow in the next increment.
+Actual payments and settlement/proof processing use the request commands described below.
 
 The full disposable CLI demonstration is `node scripts/paykit-ci.js`: it provisions
-real wallets and the response-loss fixture, requires all 35 stages in both
+real wallets and the response-loss fixture, requires all 48 stages in both
 isolated environments and verifies owned-resource cleanup. Running
 `scripts/paykit-scenarios.js` against a pre-existing Pubky-only environment requires
 explicit `--pubky-only`; its report labels that narrower scope and contains the
@@ -207,3 +207,81 @@ which accepts its self-signed CA certificate as the server certificate while sti
 checking its hostname and validity. This is scoped to the LND client. Independent
 verification must reject a different node's certificate and an unmatched hostname;
 TLS verification is never disabled.
+
+## Requests, actual payments and settlement
+
+The v1 API exposes `request.create/accept/reject/cancel`, `payment.execute/reconcile`,
+`proof.submit/verify`, and `preset.fund`. Commands return an operation ID immediately.
+The receiver workspace separately projects `requests`, `executions`, `proofs`, and
+`settlements`; SDK `proofSubmitted` means an event exists, not that money settled.
+
+Publish or rotate fresh endpoints for the exact requested amount before composing
+`request.create`. Every accepted method needs an unclaimed endpoint. The receiver
+checks its wallet: a Bitcoin address must have received zero funds, and a BOLT11
+invoice must be open and unexpired. Public endpoints and private endpoints intended
+for this exact payer receiver can be selected. The application claims reservations
+in encrypted `requests.cbor` before proposing the SDK request, and copies their
+source, method, endpoint and reservation ID into immutable SDK metadata. Payer
+resolution and payee verification must match those bindings. Old unbound requests
+cannot execute. Claimed endpoints are never assigned to another request.
+
+`payment.execute` takes the payer receiver, request ID, trusted wallet ID, explicit
+public/private source, and explicit method or saved preference. Amount and peer
+come from the accepted SDK request. The application persists the complete execution
+intent before wallet effects. A duplicate ID returns its operation, and a fresh ID
+for the same request returns the existing execution. A private list is consumed
+between durable execution reservation and a durable authorization checkpoint; an
+incomplete checkpoint blocks execution. There is no public fallback.
+
+The encrypted shared `receivers/wallet-execution/executions.cbor` coordinator locks
+spending across receiver processes. The same Core participant wallet remains locked
+across binding aliases; actual LND identities identify shared Lightning wallets.
+Unresolved attempts block another spend on the same wallet. Bitcoin selected inputs
+and outputs are committed before signing, and the exact signed bytes and transaction
+ID before broadcasting. `testmempoolaccept` checks the original transaction. Dust is
+rejected explicitly; below-dust change is omitted and added to the fee without changing
+the requested output. Ambiguous errors stay uncertain. Reconciliation queries the
+original wallet and only rebroadcasts the original bytes. Lightning persists the
+invoice hash before sending; reconciliation queries paginated payment history by
+that hash and distinguishes failed, in-flight and successful payments. It never
+creates a replacement invoice/payment for an uncertain attempt.
+
+`proof.submit` accepts a successful execution ID or an editable strict proof object:
+`{method:"btc-onchain",txid,outputIndex}` or
+`{method:"btc-lightning-bolt11",paymentHash,preimage}`. The pinned SDK owns event IDs,
+queueing, delivery and lifecycle derivation. Payer role, accepted lifecycle, supported
+terms and accepted rail are validated before reserving the proof checkpoint. New
+request responses and proofs also require a live local session, an SDK Linked peer
+with an active snapshot, and no unresolved local link recovery. Failed readiness
+checks leave no request/proof checkpoint; remote availability and paused delivery
+do not prevent queueing.
+Rejected preflight input can be corrected after restart; uncertain SDK writes retain their
+checkpoint until reconciled. Persisted application correlation and
+existing SDK records recover interrupted event submission without regenerating an
+event. `proof.verify` runs at the payee: Core transaction output script and amount
+must match the request's own reservation; Lightning preimage/hash and independently
+settled invoice amount must agree. A durable shared transaction-output/hash claim
+prevents another request using the same payment. On-chain settlement defaults to one
+confirmation; callers may require 1–144. Insufficient confirmations remain pending.
+Verification failure, proof delivery, execution and receipt issuance remain separate;
+receipt issuance is introduced in the following increment.
+
+`preset.create` remains the Pubky-only preset. `preset.fund` additionally selects
+three distinct actual LND identities sharing a trusted Core backend, provisions
+mature regtest funds, funds each participant's Core wallet and LND wallet, and opens
+Alice–Bob and Bob–Carol channels with balances on both sides. Funding transfers use
+the same durable signed-transaction coordinator. Channel-open intent is persisted
+before RPC and interrupted setup reconciles the original open/pending channel;
+unknown outcomes never trigger another channel funding transaction. Root state
+`funding` exposes progress, verified balances and channel points. Repeating funding
+reuses original transfer and channel identities. Startup exposes interrupted funding
+as `uncertain`, enabling explicit recovery without automatically replaying the command.
+Undersized Core groups are skipped before reading setup credentials or making RPCs.
+
+Wallet configuration adds `bitcoinBackendId` and optional Lightning
+`paymentMacaroonPath`, `setupMacaroonPath`, and `peerAddress`. Electron main bakes
+restricted URI grants using its local administrator credential, persists only those
+grants for the service, and never exposes credentials through UI/API. Receiving,
+payment/history/identity, and preset setup grants remain distinct. TLS verification
+is enabled for every LND call. Core amounts use exact decimal text and integer
+satoshis, including JSON/CBOR roundtrip tests.

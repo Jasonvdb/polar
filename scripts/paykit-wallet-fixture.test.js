@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
-const { storageFaults, visibleStorageFaults, readGuestLedger, gateControls, atomicJson, images } = require('./paykit-wallet-fixture');
+const { storageFaults, executionCommitFaults, visibleStorageFaults, readGuestLedger, readGuestExecutionLedger, gateControls, atomicJson, images } = require('./paykit-wallet-fixture');
 
 function temporary(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-wallet-guard-'));
@@ -139,4 +139,119 @@ test('guest probes use bounded exec in service namespace and keep digests out of
   assert.equal(args.at(-1), `/data/receivers/${receiverId}/payments.cbor`);
   assert(!args.some(value => String(value).includes(digest)));
   assert.throws(() => readGuestLedger(docker, 'owned-service', '../escape'));
+});
+
+test('request and workspace commit faults are limited to their exact distinct ledgers', t => {
+  const root = temporary(t); const receiverId = randomUUID();
+  for (const [ledger, id] of [['requests', receiverId], ['workspace', receiverId]]) {
+    const directory = path.join(root, 'receivers', id); fs.mkdirSync(directory, { recursive: true });
+    const target = path.join(directory, `${ledger}.cbor`); fs.writeFileSync(target, `original ${ledger}`);
+    const sdk = path.join(directory, 'sdk.cbor'); fs.writeFileSync(sdk, 'untouched');
+    const fault = storageFaults(root, () => {}, ledger);
+    assert.throws(() => fault.setLedgerWritable(ledger === 'executions' ? receiverId : 'wallet-execution', false), /scope/);
+    fault.setLedgerWritable(id, false);
+    assert(fs.statSync(target).isDirectory());
+    assert.equal(fs.readFileSync(sdk, 'utf8'), 'untouched');
+    fault.restoreFaults();
+    assert.equal(fs.readFileSync(target, 'utf8'), `original ${ledger}`);
+  }
+  assert.throws(() => storageFaults(root, () => {}, '../sdk'));
+});
+test('execution gate controls specify a matching wallet operation and accept proven execution readiness', async t => {
+  const root = temporary(t); const controls = gateControls(root);
+  const nonce = controls.arm('core', 'drop', 'sendrawtransaction');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'core.arm.json'))), { nonce, action: 'drop', operation: 'sendrawtransaction' });
+  assert.throws(() => controls.arm('lnd', 'drop', 'sendrawtransaction'));
+  atomicJson(path.join(root, `core.${nonce}.ready.json`), { nonce, successfulIssuance: false, successfulExecution: true });
+  assert.equal((await controls.waitReady('core', nonce)).successfulExecution, true);
+});
+test('shared execution guest probe uses only the fixed coordinator location', () => {
+  let args;
+  const docker = { withTimeout: (...input) => { args = input; return 'directory'; } };
+  assert.deepEqual(readGuestLedger(docker, 'owned-service', 'wallet-execution', 'executions'), { kind: 'directory' });
+  assert.equal(args.at(-1), '/data/receivers/wallet-execution/executions.cbor');
+  assert.throws(() => readGuestLedger(docker, 'owned-service', '../wallet-execution', 'executions'));
+  assert.throws(() => readGuestLedger(docker, 'owned-service', randomUUID(), 'executions'));
+});
+
+test('optional channel gate control accepts only LND openchannel and proven channel readiness', async t => {
+  const root = temporary(t); const controls = gateControls(root);
+  assert.throws(() => controls.arm('core', 'hold', 'openchannel'));
+  const nonce = controls.arm('lnd', 'hold', 'openchannel');
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'lnd.arm.json'))), { nonce, action: 'hold', operation: 'openchannel' });
+  atomicJson(path.join(root, `lnd.${nonce}.ready.json`), { nonce, successfulIssuance: false, successfulExecution: false, successfulChannel: true, operation: 'openchannel', fundingTxid: 'a'.repeat(64), outputIndex: 0 });
+  const ready = await controls.waitReady('lnd', nonce);
+  assert.equal(ready.successfulChannel, true); assert.equal(ready.outputIndex, 0);
+});
+
+
+test('shared execution commit fault preserves reads and lock across repeated ticks and restores exact permissions', async t => {
+  assert(process.getuid() > 0, 'Permission-fault verification must run as non-root');
+  const root = temporary(t); const directory = path.join(root, 'receivers', 'wallet-execution');
+  fs.mkdirSync(directory, { recursive: true, mode: 0o750 });
+  fs.chmodSync(directory, 0o750);
+  const target = path.join(directory, 'executions.cbor'); const bytes = Buffer.from('original encrypted execution snapshot');
+  fs.writeFileSync(target, bytes, { mode: 0o600 }); fs.writeFileSync(path.join(directory, 'spending.lock'), '');
+  const journal = []; const fault = executionCommitFaults(root, event => journal.push(event));
+  const read = () => {
+    let writable = true; const probe = path.join(directory, '.new-commit-probe');
+    try { fs.writeFileSync(probe, '', { flag: 'wx' }); fs.unlinkSync(probe); }
+    catch (error) { assert.equal(error.code, 'EACCES'); writable = false; }
+    return { kind: 'file', digest: createHash('sha256').update(fs.readFileSync(target)).digest('hex'), mode: fs.statSync(directory).mode & 0o7777, writable, uid: process.getuid() };
+  };
+  const visible = visibleStorageFaults(fault, read, event => journal.push(event), { timeoutMs: 100, pollMs: 5 });
+  const restore = await visible.blockLedgerCommit('wallet-execution');
+  try {
+    assert.throws(() => fault.setLedgerWritable('wallet-execution', false), /already active/);
+    for (let tick = 0; tick < 4; tick++) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await restore.assertActive();
+      assert.deepEqual(fs.readFileSync(target), bytes);
+      const lock = fs.openSync(path.join(directory, 'spending.lock'), 'r+'); fs.closeSync(lock);
+      assert.throws(() => fs.writeFileSync(path.join(directory, '.execution-commit'), 'new snapshot', { flag: 'wx' }), error => error.code === 'EACCES');
+    }
+  } finally { await restore(); }
+  assert.equal(fs.statSync(directory).mode & 0o7777, 0o750);
+  assert.deepEqual(fs.readFileSync(target), bytes);
+  assert.equal(read().writable, true);
+  assert(journal.filter(e => e.phase === 'guest' && e.active).every(e => e.observed === 'readableCommitBlocked' && e.uid > 0 && e.writable === false));
+  assert(journal.some(e => e.phase === 'guest' && !e.active && e.writable === true));
+  assert(!JSON.stringify(journal).includes(createHash('sha256').update(bytes).digest('hex')));
+});
+test('shared execution fault requires existing ledger and lock and cleanup tolerates unused fault', t => {
+  const root = temporary(t); const fault = executionCommitFaults(root); fault.restoreFaults();
+  assert.throws(() => fault.setLedgerWritable('../other', false), /scope/);
+  const directory = path.join(root, 'receivers', 'wallet-execution'); fs.mkdirSync(directory, { recursive: true });
+  fs.writeFileSync(path.join(directory, 'executions.cbor'), 'original');
+  const mode = fs.statSync(directory).mode;
+  assert.throws(() => fault.setLedgerWritable('wallet-execution', false), /ENOENT/);
+  assert.equal(fs.statSync(directory).mode, mode);
+  assert.throws(() => storageFaults(root, () => {}, 'executions'));
+});
+test('shared execution guest barrier requires non-root service UID, readable digest and actual write probe', () => {
+  const digest = 'c'.repeat(64); let args;
+  const docker = { withTimeout: (...input) => { args = input; return `1001 500 ${digest} false`; } };
+  assert.deepEqual(readGuestExecutionLedger(docker, 'owned', 'wallet-execution'), { kind: 'file', digest, uid: 1001, mode: 0o500, writable: false });
+  assert.equal(args[0], 1000); assert.deepEqual(args.slice(1, 5), ['exec', 'owned', 'sh', '-c']);
+  assert(args[5].includes('/proc/1/status')); assert(args[5].includes('mktemp')); assert(args[5].includes('test "$uid" -gt 0'));
+  assert.equal(args.at(-1), '/data/receivers/wallet-execution/executions.cbor'); assert(!args.includes(digest));
+  docker.withTimeout = () => `0 500 ${digest} false`;
+  assert.throws(() => readGuestExecutionLedger(docker, 'owned', 'wallet-execution'), /non-root/);
+  assert.throws(() => readGuestExecutionLedger(docker, 'owned', randomUUID()), /scope/);
+});
+
+
+test('shared commit fault fails closed if guest can still write and restores its original directory mode', async t => {
+  const root = temporary(t); const directory = path.join(root, 'receivers', 'wallet-execution');
+  fs.mkdirSync(directory, { recursive: true }); fs.chmodSync(directory, 0o750);
+  const bytes = Buffer.from('readable ciphertext'); fs.writeFileSync(path.join(directory, 'executions.cbor'), bytes);
+  fs.writeFileSync(path.join(directory, 'spending.lock'), '');
+  const journal = []; const fault = executionCommitFaults(root, event => journal.push(event));
+  const read = () => ({ kind: 'file', uid: 1001, mode: fs.statSync(directory).mode & 0o7777, digest: createHash('sha256').update(bytes).digest('hex'), writable: true });
+  const visible = visibleStorageFaults(fault, read, event => journal.push(event), { timeoutMs: 30, pollMs: 5 });
+  await assert.rejects(visible.blockLedgerCommit('wallet-execution'), /visibility deadline/);
+  assert.equal(fs.statSync(directory).mode & 0o7777, 0o750);
+  assert.deepEqual(fs.readFileSync(path.join(directory, 'executions.cbor')), bytes);
+  assert(!journal.some(event => event.phase === 'guest' && event.active));
+  assert(journal.some(event => event.phase === 'guest' && !event.active && event.writable));
 });

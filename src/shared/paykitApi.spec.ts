@@ -1,5 +1,6 @@
 import {
   isUuid,
+  isPaykitRequestEndpointBinding,
   newPaykitId,
   PaykitCommandRequest,
   validatePaykitCommand,
@@ -44,7 +45,7 @@ describe('Paykit public commands', () => {
     expect(() =>
       validatePaykitCommand({
         commandId: newPaykitId(),
-        command: 'payment.execute' as any,
+        command: 'unsupported.command' as any,
         input: {},
       }),
     ).toThrow();
@@ -208,4 +209,134 @@ describe('Payment method and reservation command validation', () => {
       validate('method.configure', { ...input, macaroonPath: '/secret' }),
     ).toThrow('input');
   });
+});
+
+describe('Request, payment and proof boundary validation', () => {
+  const receiverId = newPaykitId();
+  const requestId = newPaykitId();
+  const validate = (command: PaykitCommandRequest['command'], input: any) =>
+    validatePaykitCommand({ commandId: newPaykitId(), command, input });
+  it('preserves exact satoshi terms, caps text and denies caller changes to accepted terms', () => {
+    const input = {
+      receiverId,
+      peerPublicKey: 'y'.repeat(52),
+      peerReceiverPath: 'alice/wallet',
+      amountSats: '2100000000000000',
+      description: 'Exact request',
+      expirySeconds: 60,
+      acceptedMethods: ['btc-onchain'],
+    };
+    expect(() => validate('request.create', input)).not.toThrow();
+    for (const patch of [
+      { amountSats: '1.5' },
+      { amountSats: 1 },
+      { acceptedMethods: [] },
+      { acceptedMethods: ['btc-onchain', 'btc-onchain'] },
+      { description: 'é'.repeat(251) },
+      { description: 'a\u0000b' },
+      { expirySeconds: 0 },
+    ])
+      expect(() => validate('request.create', { ...input, ...patch })).toThrow();
+    expect(() =>
+      validate('payment.execute', {
+        receiverId,
+        requestId,
+        walletId: 'trusted',
+        source: 'private',
+        method: 'btc-onchain',
+      }),
+    ).not.toThrow();
+    for (const patch of [
+      { amountSats: '1' },
+      { endpoint: 'other' },
+      { source: undefined },
+      { source: 'automatic' },
+    ])
+      expect(() =>
+        validate('payment.execute', {
+          receiverId,
+          requestId,
+          walletId: 'trusted',
+          source: 'private',
+          ...patch,
+        }),
+      ).toThrow();
+  });
+  it('requires exactly one proof source and strict rail-specific public proof material', () => {
+    const proof = { method: 'btc-onchain', txid: 'a'.repeat(64), outputIndex: 0 };
+    expect(() =>
+      validate('proof.submit', { receiverId, requestId, proof }),
+    ).not.toThrow();
+    expect(() =>
+      validate('proof.submit', { receiverId, requestId, executionId: newPaykitId() }),
+    ).not.toThrow();
+    expect(() => validate('proof.submit', { receiverId, requestId })).toThrow(
+      'exactly one',
+    );
+    expect(() =>
+      validate('proof.submit', {
+        receiverId,
+        requestId,
+        proof,
+        executionId: newPaykitId(),
+      }),
+    ).toThrow('exactly one');
+    for (const invalid of [
+      { ...proof, outputIndex: -1 },
+      { ...proof, outputIndex: 4294967296 },
+      { ...proof, outputIndex: 0.5 },
+      { ...proof, sessionSecret: 'hidden' },
+      { method: 'btc-lightning-bolt11', paymentHash: 'a'.repeat(64), preimage: 'bad' },
+      JSON.stringify(proof),
+    ])
+      expect(() =>
+        validate('proof.submit', { receiverId, requestId, proof: invalid }),
+      ).toThrow();
+    expect(() =>
+      validate('proof.submit', {
+        receiverId,
+        requestId,
+        proof: {
+          method: 'btc-lightning-bolt11',
+          paymentHash: 'A'.repeat(64),
+          preimage: 'b'.repeat(64),
+        },
+      }),
+    ).not.toThrow();
+  });
+  it('bounds independent verification confirmations and exposes compatible preset commands', () => {
+    const input = { receiverId, requestId, proofId: newPaykitId() };
+    expect(() => validate('proof.verify', input)).not.toThrow();
+    expect(() =>
+      validate('proof.verify', { ...input, requiredConfirmations: 144 }),
+    ).not.toThrow();
+    for (const value of [0, 145, 1.5, '2'])
+      expect(() =>
+        validate('proof.verify', { ...input, requiredConfirmations: value }),
+      ).toThrow();
+    expect(() => validate('preset.create', {})).not.toThrow();
+    expect(() => validate('preset.fund', {})).not.toThrow();
+    expect(() => validate('preset.fund', { walletUrl: 'caller' })).toThrow();
+  });
+});
+
+it('validates immutable request endpoint metadata without accepting nested or extra fields', () => {
+  const binding = {
+    source: 'private',
+    method: 'btc-onchain',
+    endpoint: 'bcrt1public',
+    reservationId: newPaykitId(),
+  };
+  expect(isPaykitRequestEndpointBinding(binding)).toBe(true);
+  for (const invalid of [
+    null,
+    [],
+    { ...binding, source: 'automatic' },
+    { ...binding, method: 'bolt12' },
+    { ...binding, endpoint: { secret: 'hidden' } },
+    { ...binding, endpoint: 'bad\nendpoint' },
+    { ...binding, reservationId: '../other' },
+    { ...binding, walletAuth: 'hidden' },
+  ])
+    expect(isPaykitRequestEndpointBinding(invalid)).toBe(false);
 });

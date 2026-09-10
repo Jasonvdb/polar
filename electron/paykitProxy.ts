@@ -1,18 +1,26 @@
-import { randomBytes } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { promises as fs } from 'fs';
 import { request as httpRequest } from 'http';
 import { createServer } from 'net';
 import { join, resolve, relative, isAbsolute } from 'path';
 import {
   isUuid,
+  isPaykitRequestEndpointBinding,
   safePaykitAvatar,
   newPaykitId,
   PaykitEnvironment,
   PaykitRequest,
   validatePaykitCommand,
+  validatePaykitProof,
 } from '../src/shared/paykitApi';
 import { bitcoinCredentials } from '../src/shared/bitcoinConfig';
 import { getNamespacedContainerName, paykitConfig } from '../src/shared/paykitConfig';
+
+import {
+  bakePaykitMacaroon,
+  paymentPermissions,
+  setupPermissions,
+} from './paykitWalletAuth';
 
 const credentialsRoot = () => join(paykitConfig.dataPath, 'paykit-credentials');
 const referencePath = (networkId: number) =>
@@ -147,9 +155,17 @@ async function provision(networkId: number): Promise<PaykitEnvironment> {
 
 interface WalletBinding {
   id: string;
+  bitcoinBackendId: string;
   label: string;
   bitcoin: { url: string; username: string; password: string };
-  lightning?: { url: string; tlsCertPath: string; macaroonPath: string };
+  lightning?: {
+    url: string;
+    tlsCertPath: string;
+    macaroonPath: string;
+    paymentMacaroonPath: string;
+    setupMacaroonPath: string;
+    peerAddress: string;
+  };
 }
 /** Derive trusted endpoints from persisted local nodes, never from command input. */
 export function walletBindings(network: any): WalletBinding[] {
@@ -183,6 +199,7 @@ export function walletBindings(network: any): WalletBinding[] {
   });
   const wallets: WalletBinding[] = core.map(node => ({
     id: `core-${node.id}`,
+    bitcoinBackendId: `core-${node.id}`,
     label: `Bitcoin / ${node.name}`,
     bitcoin: coreConfig(node),
   }));
@@ -192,12 +209,16 @@ export function walletBindings(network: any): WalletBinding[] {
     const id = `lnd-${node.id}-core-${backend.id}`;
     wallets.push({
       id,
+      bitcoinBackendId: `core-${backend.id}`,
       label: `Lightning / ${node.name} + Bitcoin / ${backend.name}`,
       bitcoin: coreConfig(backend),
       lightning: {
         url: `https://${getNamespacedContainerName(network.id, node.name)}:8080`,
         tlsCertPath: `/run/paykit/wallets/${id}/tls.cert`,
         macaroonPath: `/run/paykit/wallets/${id}/invoices.macaroon`,
+        paymentMacaroonPath: `/run/paykit/wallets/${id}/payment.macaroon`,
+        setupMacaroonPath: `/run/paykit/wallets/${id}/setup.macaroon`,
+        peerAddress: `${getNamespacedContainerName(network.id, node.name)}:9735`,
       },
     });
   }
@@ -217,11 +238,59 @@ async function replaceCredential(path: string, value: Buffer | string) {
     await fs.rm(temporary, { force: true });
   }
 }
-// Main refreshes only two narrow credential files after LND creates them. No wallet
-// directory is mounted into Paykit; initial absence leaves Pubky usable.
-export async function refreshWalletConfig(network: any, binding: PaykitEnvironment) {
+const authorizedWallets = new Map<string, string>();
+
+async function readWalletCredential(network: any, source: string) {
+  const real = await fs.realpath(source);
+  const networkRoot = await fs.realpath(network.path);
+  const within = relative(networkRoot, real);
+  if (
+    within.startsWith('..') ||
+    isAbsolute(within) ||
+    real !== resolve(networkRoot, relative(network.path, source))
+  )
+    throw new Error('Paykit wallet credential escaped its network');
+  const stat = await fs.stat(real);
+  if (!stat.isFile() || stat.size > 65536)
+    throw new Error('Invalid Paykit wallet credential file');
+  return fs.readFile(real);
+}
+
+// Routine polls refresh receiving credentials. Spending/setup authorizations are baked
+// only for an explicit payment or funded-preset command, never during state polling.
+export function fundingWalletIds(wallets: WalletBinding[]): string[] {
+  const backends = [
+    ...new Set(
+      wallets.filter(wallet => wallet.lightning).map(wallet => wallet.bitcoinBackendId),
+    ),
+  ].sort();
+  for (const backend of backends) {
+    const ids = wallets
+      .filter(wallet => wallet.lightning && wallet.bitcoinBackendId === backend)
+      .map(wallet => wallet.id)
+      .sort();
+    if (ids.length >= 3) return ids.slice(0, 3);
+  }
+  throw new Error(
+    'The funded preset requires three LND nodes sharing a Bitcoin Core backend',
+  );
+}
+
+export async function refreshWalletConfig(
+  network: any,
+  binding: PaykitEnvironment,
+  authorizeWalletId?: string,
+) {
   const wallets = walletBindings(network);
   const root = join(credentialsRoot(), binding.environmentId);
+  const authorize = new Set(
+    authorizeWalletId === '*'
+      ? fundingWalletIds(wallets)
+      : authorizeWalletId
+      ? [authorizeWalletId]
+      : [],
+  );
+  const authorizationJobs: (() => Promise<void>)[] = [];
   for (const wallet of wallets) {
     if (!wallet.lightning) continue;
     const node = network.nodes.lightning.find((item: any) =>
@@ -238,27 +307,56 @@ export async function refreshWalletConfig(network: any, binding: PaykitEnvironme
       ],
     ]) {
       try {
-        const real = await fs.realpath(source);
-        const networkRoot = await fs.realpath(network.path);
-        const within = relative(networkRoot, real);
-        if (
-          within.startsWith('..') ||
-          isAbsolute(within) ||
-          real !== resolve(networkRoot, relative(network.path, source))
-        )
-          throw new Error('Paykit wallet credential escaped its network');
-        const stat = await fs.stat(real);
-        if (!stat.isFile() || stat.size > 65536)
-          throw new Error('Invalid Paykit wallet credential file');
-        await replaceCredential(join(targetRoot, name), await fs.readFile(real));
+        await replaceCredential(
+          join(targetRoot, name),
+          await readWalletCredential(network, source),
+        );
       } catch (error: any) {
         if (error.code !== 'ENOENT') throw error;
         // A removed credential must not leave an old authorization copy in use.
         await fs.rm(join(targetRoot, name), { force: true });
       }
     }
+    if (authorize.has(wallet.id))
+      authorizationJobs.push(async () => {
+        const admin = await readWalletCredential(
+          network,
+          join(sourceRoot, 'data', 'chain', 'bitcoin', 'regtest', 'admin.macaroon'),
+        );
+        const cert = await readWalletCredential(network, join(sourceRoot, 'tls.cert'));
+        const fingerprint = createHash('sha256')
+          .update(admin)
+          .update(cert)
+          .update(JSON.stringify([paymentPermissions, setupPermissions]))
+          .digest('hex');
+        let credentialsExist = false;
+        try {
+          credentialsExist =
+            (await fs.readFile(join(targetRoot, 'payment.macaroon'))).length > 0 &&
+            (await fs.readFile(join(targetRoot, 'setup.macaroon'))).length > 0;
+        } catch (_) {
+          /* Bake missing restricted grants. */
+        }
+        if (authorizedWallets.get(targetRoot) !== fingerprint || !credentialsExist) {
+          const grants = await Promise.allSettled([
+            bakePaykitMacaroon(node.ports?.rest, cert, admin, paymentPermissions),
+            bakePaykitMacaroon(node.ports?.rest, cert, admin, setupPermissions),
+          ]);
+          const payment = grants[0];
+          const setup = grants[1];
+          if (payment.status === 'rejected' || setup.status === 'rejected')
+            throw new Error('Local LND authorization is unavailable');
+          await replaceCredential(join(targetRoot, 'payment.macaroon'), payment.value);
+          await replaceCredential(join(targetRoot, 'setup.macaroon'), setup.value);
+          await syncDirectory(targetRoot);
+          authorizedWallets.set(targetRoot, fingerprint);
+        }
+      });
     await syncDirectory(targetRoot);
   }
+  const authorizations = await Promise.allSettled(authorizationJobs.map(run => run()));
+  const failed = authorizations.find(result => result.status === 'rejected');
+  if (failed?.status === 'rejected') throw failed.reason;
   await replaceCredential(
     join(root, 'wallet-config.json'),
     JSON.stringify({
@@ -270,8 +368,14 @@ export async function refreshWalletConfig(network: any, binding: PaykitEnvironme
   await syncDirectory(root);
 }
 let walletRefresh = Promise.resolve();
-const refreshWallets = (network: any, binding: PaykitEnvironment) => {
-  const pending = walletRefresh.then(() => refreshWalletConfig(network, binding));
+const refreshWallets = (
+  network: any,
+  binding: PaykitEnvironment,
+  authorizeWalletId?: string,
+) => {
+  const pending = walletRefresh.then(() =>
+    refreshWalletConfig(network, binding, authorizeWalletId),
+  );
   walletRefresh = pending.catch(() => undefined);
   return pending;
 };
@@ -402,6 +506,37 @@ const publicReservation = (value: any) =>
     'outboundMessageId',
     'lastError',
   ]);
+const nullableFields = (value: any, names: string[]) => ({
+  ...fields(value, names),
+  ...Object.fromEntries(
+    names.filter(name => value?.[name] === null).map(name => [name, null]),
+  ),
+});
+const publicProof = (value: any) => {
+  try {
+    validatePaykitProof(value.proof);
+    return {
+      ...fields(value, ['id', 'requestId', 'method', 'deliveryStatus', 'recordedAt']),
+      proof: { ...value.proof },
+    };
+  } catch (_) {
+    return {
+      ...fields(value, ['id', 'requestId', 'method', 'deliveryStatus', 'recordedAt']),
+    };
+  }
+};
+const publicFunding = (value: any) => ({
+  ...nullableFields(value, ['status', 'funded', 'step', 'lastError']),
+  wallets: list(value.wallets, item =>
+    fields(item, [
+      'participant',
+      'walletId',
+      'onchainBalanceSats',
+      'lightningBalanceSats',
+    ]),
+  ),
+  channelPoints: strings(value.channelPoints),
+});
 export const publicWorkspace = (value: any) => ({
   ...fields(value, ['receiverId', 'deliveryPaused', 'lastError', 'updatedAt']),
   ...(value.paymentMethods && typeof value.paymentMethods === 'object'
@@ -434,6 +569,59 @@ export const publicWorkspace = (value: any) => ({
         },
       }
     : {}),
+  requests: list(value.requests, item => ({
+    ...nullableFields(item, [
+      'id',
+      'peerPublicKey',
+      'peerReceiverPath',
+      'role',
+      'lifecycle',
+      'amountSats',
+      'description',
+      'paymentReference',
+      'proposalExpiresAt',
+      'deliveryStatus',
+      'createdAt',
+    ]),
+    acceptedMethods: strings(item.acceptedMethods),
+    endpointBindings: Array.isArray(item.endpointBindings)
+      ? item.endpointBindings
+          .filter(isPaykitRequestEndpointBinding)
+          .map((entry: any) =>
+            fields(entry, ['source', 'method', 'endpoint', 'reservationId']),
+          )
+      : [],
+  })),
+  executions: list(value.executions, item =>
+    nullableFields(item, [
+      'id',
+      'requestId',
+      'walletId',
+      'source',
+      'method',
+      'endpoint',
+      'amountSats',
+      'status',
+      'createdAt',
+      'updatedAt',
+      'txid',
+      'outputIndex',
+      'paymentHash',
+      'lastError',
+    ]),
+  ),
+  proofs: list(value.proofs, publicProof),
+  settlements: list(value.settlements, item =>
+    nullableFields(item, [
+      'proofId',
+      'requestId',
+      'status',
+      'requiredConfirmations',
+      'confirmations',
+      'verifiedAt',
+      'lastError',
+    ]),
+  ),
   reservations: list(value.reservations, publicReservation),
   resolutions: list(value.resolutions, publicResolution),
   links: list(value.links, item =>
@@ -489,6 +677,9 @@ export const publicOperation = (value: any) => ({
             'path',
             'imageUri',
           ]),
+          ...(value.result.funding && typeof value.result.funding === 'object'
+            ? { funding: publicFunding(value.result.funding) }
+            : {}),
           ...(value.result.resolution && typeof value.result.resolution === 'object'
             ? { resolution: publicResolution(value.result.resolution) }
             : {}),
@@ -505,6 +696,9 @@ export const publicState = (value: any, environmentId: string) => {
     throw new Error('Paykit service environment mismatch');
   return {
     ...fields(value, ['apiVersion', 'environmentId', 'ready', 'lastEventSequence']),
+    ...(value.funding && typeof value.funding === 'object'
+      ? { funding: publicFunding(value.funding) }
+      : {}),
     participants: value.participants.map((p: any) =>
       fields(p, ['id', 'name', 'publicKey']),
     ),
@@ -541,8 +735,26 @@ export async function paykitProxy(args: PaykitRequest): Promise<any> {
   ) {
     throw new Error('Paykit environment binding does not match this network');
   }
-  if (['checkPort', 'state', 'command'].includes(args.action))
-    await refreshWallets(network, binding);
+  if (args.action === 'command') validatePaykitCommand(args.request);
+  const authorizeWalletId =
+    args.action === 'command'
+      ? args.request.command === 'preset.fund'
+        ? '*'
+        : args.request.command === 'payment.execute'
+        ? (args.request.input.walletId as string)
+        : undefined
+      : undefined;
+  if (['checkPort', 'state', 'command'].includes(args.action)) {
+    try {
+      await refreshWallets(network, binding, authorizeWalletId);
+    } catch (error: any) {
+      if (!authorizeWalletId) throw error;
+      const reason = error.message?.startsWith('The funded preset requires')
+        ? error.message
+        : 'Local wallet authorization is unavailable. Check that the selected LND nodes are running.';
+      throw new Error(`Paykit command not submitted: ${reason}`);
+    }
+  }
   if (args.action === 'checkPort') return checkPort(binding.servicePort);
   if (args.action === 'remove') {
     await fs.rm(join(credentialsRoot(), binding.environmentId), {

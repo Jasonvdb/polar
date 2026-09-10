@@ -17,3 +17,8 @@ pub mod payment_input;
 pub mod payment_model;
 pub mod wallet_adapter;
 pub mod wallet_rpc;
+
+pub mod funding;
+pub mod request_input;
+pub mod request_model;
+pub mod wallet_execution;

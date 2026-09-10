@@ -198,6 +198,10 @@ impl Supervisor {
                 Ok(json!({"receiverId":input.receiver_id}))
             }
             "preset.create" => self.preset().await,
+            "preset.fund" => {
+                self.preset().await?;
+                crate::funding::fund(&self.config, &self.repository).await
+            }
             value if commands::workspace_command(value) => self.receiver_command(command).await,
             _ => anyhow::bail!("unsupported command"),
         }

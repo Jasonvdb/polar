@@ -69,6 +69,7 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     const marker = JSON.parse(docker('exec', serviceContainer, 'polar-paykit', 'inspect-marker', owner.publicKey, receiver.path));
     assert.equal(marker.noise_public_key, receiver.noisePublicKey);
     assert.equal(marker.receiver_path, receiver.path);
+    assert.deepEqual(marker.capabilities, { private_payments: true, payment_requests: true, receipts: false, outgoing_payments: true });
   };
 
   stage('readiness');
@@ -129,6 +130,7 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     assert.equal(restored.path, previous.path);
     assert.equal(restored.status, 'running');
   }
+  if (serviceContainer) initial.receivers.forEach(inspectMarker);
   if (serviceContainer && postgresContainer) {
     stage('database-outage');
     docker('stop', '--timeout', '-1', postgresContainer);
@@ -140,7 +142,11 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     inspectMarker(wallet);
   }
   await require('./paykit-workspace-scenarios').run({ initial, state, command, request, stage, docker, serviceContainer, signal });
-  if (scope === 'full') await require('./paykit-payment-scenarios').run({ initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture });
+  if (scope === 'full') {
+    const context = { initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture };
+    await require('./paykit-payment-scenarios').run(context);
+    await require('./paykit-request-scenarios').run(context);
+  }
   stage('complete');
   return { scope, stages, environmentId: initial.environmentId, participantKeys: initial.participants.map(p => p.publicKey), receiverNoiseKeys: initial.receivers.map(r => r.noisePublicKey), passed: true };
 }

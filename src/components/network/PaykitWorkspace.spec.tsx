@@ -162,3 +162,99 @@ it('resets receiver drafts on selection and preserves uncertain peer-command ide
     peerReceiverPath: 'alice/wallet',
   });
 });
+
+it('starts the funded preset through the same asynchronous backend command', async () => {
+  service.state.mockResolvedValue(state);
+  service.command.mockResolvedValue({ operationId: newPaykitId() });
+  const view = setup();
+  const button = view
+    .getByText('Create funded Alice / Bob / Carol preset')
+    .closest('button')!;
+  await waitFor(() => expect(button).not.toBeDisabled());
+  fireEvent.click(button);
+  await waitFor(() =>
+    expect(service.command).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ command: 'preset.fund', input: {} }),
+    ),
+  );
+});
+
+it('keeps controls usable when credential preflight proves a command was never submitted', async () => {
+  service.state.mockResolvedValue(state);
+  service.command.mockRejectedValueOnce(
+    new Error('Paykit command not submitted: Local wallet authorization is unavailable.'),
+  );
+  const view = setup();
+  const button = view
+    .getByText('Create funded Alice / Bob / Carol preset')
+    .closest('button')!;
+  await waitFor(() => expect(button).not.toBeDisabled());
+  fireEvent.click(button);
+  await view.findByText(
+    'Paykit command not submitted: Local wallet authorization is unavailable.',
+  );
+  expect(view.queryByText('Retry command')).not.toBeInTheDocument();
+  expect(button).not.toBeDisabled();
+});
+
+const interruptedFunding = (status: 'running' | 'uncertain'): PaykitState => ({
+  ...state,
+  funding: {
+    status,
+    funded: false,
+    step: 'channels',
+    wallets: [],
+    channelPoints: ['original:0'],
+    lastError: 'Funding was interrupted. Recover the original setup.',
+  },
+  operations: [
+    {
+      id: environment.environmentId,
+      command: 'preset.fund',
+      status: 'failed',
+      error: {
+        code: 'reconciliation_required',
+        message: 'Inspect the interrupted operation.',
+      },
+    },
+  ],
+});
+it.each(['uncertain', 'running'] as const)(
+  'exposes recovery for interrupted %s funding and preserves uncertain submission identity',
+  async status => {
+    service.state.mockResolvedValue(interruptedFunding(status));
+    service.command
+      .mockRejectedValueOnce(new Error('Paykit service is unavailable'))
+      .mockResolvedValueOnce({ operationId: newPaykitId() });
+    const view = setup();
+    const recover = await view.findByText('Recover funded preset');
+    await waitFor(() => expect(recover.closest('button')).not.toBeDisabled());
+    fireEvent.click(recover);
+    const retry = await view.findByText('Retry command');
+    expect(recover.closest('button')).toBeDisabled();
+    expect(service.command).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ command: 'preset.fund', input: {} }),
+    );
+    expect(service.command.mock.calls[0][1].commandId).not.toBe(
+      environment.environmentId,
+    );
+    fireEvent.click(retry);
+    await waitFor(() => expect(service.command).toHaveBeenCalledTimes(2));
+    expect(service.command.mock.calls[1]).toEqual(service.command.mock.calls[0]);
+  },
+);
+it.each(['queued', 'running'] as const)(
+  'keeps funding recovery disabled while an actual funding operation is %s',
+  async status => {
+    const snapshot = interruptedFunding('uncertain');
+    snapshot.operations.push({ id: newPaykitId(), command: 'preset.fund', status });
+    service.state.mockResolvedValue(snapshot);
+    const view = setup();
+    const recover = await view.findByText('Recover funded preset');
+    expect(recover.closest('button')).toBeDisabled();
+    fireEvent.click(recover);
+    expect(service.command).not.toHaveBeenCalled();
+  },
+);

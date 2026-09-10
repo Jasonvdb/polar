@@ -54,6 +54,15 @@ impl WalletAdapter {
             selection: Arc::new(Mutex::new(vec![])),
         })
     }
+    pub(crate) fn execution_vault(&self) -> anyhow::Result<Vault> {
+        self.vault.shared_wallets(self.environment)
+    }
+    pub(crate) fn configured_wallet(&self, id: &str) -> anyhow::Result<Wallet> {
+        crate::wallet_rpc::configured(self.environment)?
+            .into_iter()
+            .find(|w| w.id == id)
+            .ok_or_else(|| anyhow::anyhow!("trusted wallet missing"))
+    }
     pub(crate) fn snapshot(&self) -> anyhow::Result<Ledger> {
         Ok(self
             .state
@@ -778,6 +787,7 @@ mod issuance_tests {
                     last_error: None,
                 },
                 wallet: Wallet {
+                    bitcoin_backend_id: None,
                     id: "core-0".into(),
                     label: "Core".into(),
                     bitcoin: Core {

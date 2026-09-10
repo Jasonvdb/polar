@@ -5,8 +5,14 @@ import {
   publicOperation,
   publicState,
   walletBindings,
+  fundingWalletIds,
   refreshWalletConfig,
 } from '../../electron/paykitProxy';
+import { bakePaykitMacaroon } from '../../electron/paykitWalletAuth';
+jest.mock('../../electron/paykitWalletAuth', () => ({
+  ...jest.requireActual('../../electron/paykitWalletAuth'),
+  bakePaykitMacaroon: jest.fn(),
+}));
 import { paykitConfig } from './paykitConfig';
 
 jest.mock('fs', () => ({
@@ -345,6 +351,50 @@ describe('Trusted receiving wallet configuration', () => {
     await refreshWalletConfig(walletNetwork(), binding as any);
     expect(fsMock.rename).not.toHaveBeenCalled();
   });
+  it('bakes explicit scoped authorizations without copying admin and reuses unchanged credentials', async () => {
+    const admin = Buffer.from('test-private-admin');
+    const restricted = Buffer.from('restricted-test-grant');
+    (bakePaykitMacaroon as jest.Mock).mockResolvedValue(restricted);
+    fsMock.readFile.mockImplementation(async path => {
+      if (`${path}`.endsWith('admin.macaroon')) return admin;
+      if (`${path}`.endsWith('tls.cert')) return Buffer.from('certificate');
+      if (`${path}`.endsWith('payment.macaroon') || `${path}`.endsWith('setup.macaroon'))
+        return restricted;
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    await refreshWalletConfig(walletNetwork(), binding as any, 'lnd-0-core-0');
+    expect(bakePaykitMacaroon).toHaveBeenCalledTimes(2);
+    const writes = await Promise.all(
+      fsMock.open.mock.results.map(result => result.value),
+    );
+    for (const handle of writes)
+      for (const call of handle.writeFile?.mock.calls || [])
+        expect(Buffer.from(call[0]).equals(admin)).toBe(false);
+    expect(
+      fsMock.rename.mock.calls.some(([, target]) =>
+        `${target}`.endsWith('admin.macaroon'),
+      ),
+    ).toBe(false);
+    await refreshWalletConfig(walletNetwork(), binding as any, 'lnd-0-core-0');
+    expect(bakePaykitMacaroon).toHaveBeenCalledTimes(2);
+  });
+  it('selects exactly three stable IDs in the first eligible Core group', () => {
+    const base = walletBindings(walletNetwork())[2];
+    const wallets = [
+      ...[9, 2, 1, 0].map(id => ({
+        ...base,
+        id: `lnd-${id}-core-3`,
+        bitcoinBackendId: 'core-3',
+      })),
+      { ...base, id: 'lnd-7-core-0', bitcoinBackendId: 'core-0' },
+    ];
+    expect(fundingWalletIds(wallets)).toEqual([
+      'lnd-0-core-3',
+      'lnd-1-core-3',
+      'lnd-2-core-3',
+    ]);
+    expect(() => fundingWalletIds(wallets.slice(0, 2))).toThrow('three LND');
+  });
   it('rejects escaped or oversized credential files before copying', async () => {
     fsMock.realpath.mockImplementation(async path =>
       `${path}`.endsWith('tls.cert') ? '/other/network/tls.cert' : resolve(`${path}`),
@@ -428,4 +478,131 @@ describe('Public payment projections', () => {
       'btc-onchain',
     ]);
   });
+});
+
+it('projects request, execution, proof, settlement and funding separately without signing state', () => {
+  const material = {
+    method: 'btc-lightning-bolt11',
+    paymentHash: 'a'.repeat(64),
+    preimage: 'b'.repeat(64),
+  };
+  const workspace = {
+    requests: [
+      {
+        id: 'request',
+        lifecycle: 'proofSubmitted',
+        amountSats: '2100000000000000',
+        proposalExpiresAt: null,
+        acceptedMethods: ['btc-onchain'],
+        correlationSecret: 'hidden',
+      },
+    ],
+    executions: [
+      {
+        id: 'execution',
+        requestId: 'request',
+        status: 'uncertain',
+        txid: null,
+        signedTransaction: 'hidden',
+        selectedInputs: ['hidden'],
+        preimage: 'hidden',
+      },
+    ],
+    proofs: [
+      { id: 'proof', requestId: 'request', proof: material, session: 'hidden' },
+      { id: 'invalid', proof: { ...material, receiptKey: 'hidden' } },
+    ],
+    settlements: [
+      {
+        proofId: 'proof',
+        requestId: 'request',
+        status: 'pending',
+        confirmations: 0,
+        requiredConfirmations: 2,
+        lastError: null,
+        walletConfig: 'hidden',
+      },
+    ],
+  };
+  const funding = {
+    status: 'ready',
+    funded: true,
+    step: 'verified',
+    wallets: [
+      {
+        participant: 'Alice',
+        walletId: 'wallet',
+        onchainBalanceSats: '123',
+        lightningBalanceSats: '456',
+        macaroon: 'hidden',
+      },
+    ],
+    channelPoints: ['public:0'],
+    lastError: null,
+    signingKey: 'hidden',
+  };
+  const result = publicOperation({ result: { workspace, funding } }).result!;
+  expect(JSON.stringify(result)).not.toContain('hidden');
+  expect(result.workspace?.requests[0].proposalExpiresAt).toBeNull();
+  expect(result.workspace?.executions[0]).toEqual({
+    id: 'execution',
+    requestId: 'request',
+    status: 'uncertain',
+    txid: null,
+  });
+  expect(result.workspace?.proofs[0].proof).toEqual(material);
+  expect(result.workspace?.proofs[1]).not.toHaveProperty('proof');
+  expect(result.workspace?.settlements[0].status).toBe('pending');
+  expect(result.funding?.wallets[0].onchainBalanceSats).toBe('123');
+});
+
+it('reports authorization preflight failure as unsubmitted before reading the service token', async () => {
+  fsMock.readFile.mockImplementation(async path => {
+    if (`${path}`.endsWith(`${sep}networks.json`))
+      return JSON.stringify({ networks: [{ ...network(), paykit: binding }] });
+    if (`${path}`.endsWith(`${sep}network-1.json`)) return JSON.stringify(binding);
+    throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+  });
+  await expect(
+    paykitProxy({
+      networkId: 1,
+      action: 'command',
+      request: { commandId: envId, command: 'preset.fund', input: {} },
+    }),
+  ).rejects.toThrow('Paykit command not submitted: The funded preset requires three LND');
+  expect(
+    fsMock.readFile.mock.calls.some(([path]) => `${path}`.endsWith(`${sep}api-token`)),
+  ).toBe(false);
+});
+
+it('projects immutable endpoint bindings and rejects malformed request metadata', () => {
+  const valid = {
+    source: 'private',
+    method: 'btc-onchain',
+    endpoint: 'bcrt1bound',
+    reservationId: envId,
+  };
+  const result = publicOperation({
+    result: {
+      workspace: {
+        requests: [
+          {
+            id: 'request',
+            acceptedMethods: ['btc-onchain'],
+            endpointBindings: [
+              valid,
+              { ...valid, source: 'fallback' },
+              { ...valid, endpoint: { secret: 'hidden' } },
+              { ...valid, signingKey: 'hidden' },
+              { ...valid, reservationId: 'bad' },
+            ],
+          },
+          { id: 'old', endpointBindings: null },
+        ],
+      },
+    },
+  }).result!;
+  expect(result.workspace?.requests[0].endpointBindings).toEqual([valid]);
+  expect(result.workspace?.requests[1].endpointBindings).toEqual([]);
+  expect(JSON.stringify(result)).not.toContain('hidden');
 });
