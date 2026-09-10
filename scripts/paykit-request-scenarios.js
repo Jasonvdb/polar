@@ -78,7 +78,15 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   for (const amountSats of ['1.5', '-1', '0', 100]) assert.equal((await request('/v1/commands', { commandId: randomUUID(), command: 'request.create', input: { ...peer(bob, alice), amountSats, description: 'invalid', expirySeconds: 60, acceptedMethods: [ONCHAIN] } })).status, 400);
   stage('request-lifecycle');
 
-  await publish(); const chainId = await accepted(); const chain = await execute(chainId); assert.equal(chain.execution.status, 'succeeded');
+  const chainId = await proposal();
+  await command('proof.submit', { receiverId: alice.id, requestId: chainId, proof: { method: ONCHAIN, txid: 'ab'.repeat(32), outputIndex: 0 } }, randomUUID(), 'failed');
+  await command('receiver.restart', { receiverId: alice.id });
+  await command('request.accept', { receiverId: alice.id, requestId: chainId });
+  await wait(s => workspace(s, bob).requests.find(r => r.id === chainId)?.lifecycle === 'accepted');
+  const chain = await execute(chainId); assert.equal(chain.execution.status, 'succeeded');
+  await command('proof.submit', { receiverId: alice.id, requestId: chainId, proof: { method: BOLT11, paymentHash: 'cd'.repeat(32), preimage: 'ef'.repeat(32) } }, randomUUID(), 'failed');
+  await command('receiver.restart', { receiverId: alice.id });
+  assert(!(await view(alice)).proofs.some(p => p.requestId === chainId), 'Rejected premature and wrong-rail proofs must leave the original paid request available for its correct proof');
   let tx = await fixture.core('getrawtransaction', [chain.execution.txid, true]);
   assert.equal(String(tx.vout[chain.execution.outputIndex].value), '0.00005'); assert.equal(tx.vout[chain.execution.outputIndex].scriptPubKey.address, chain.execution.endpoint);
   assert.equal(tx.confirmations || 0, 0); stage('onchain-execution');

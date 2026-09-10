@@ -102,6 +102,15 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const receivers = state?.receivers.filter(r => r.participantId === participantId) || [];
   const receiver = receivers.find(r => r.id === receiverId);
   const disabled = busy || !state?.ready || !!retry || !!connectionError;
+  const fundingPending = state?.operations.some(
+    item =>
+      item.command === 'preset.fund' &&
+      (item.status === 'queued' || item.status === 'running'),
+  );
+  const fundingRecovery =
+    state?.funding &&
+    (['uncertain', 'failed'].includes(state.funding.status) ||
+      (state.funding.status === 'running' && !fundingPending));
 
   if (!network.paykit)
     return (
@@ -183,10 +192,12 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
         </Descriptions>
         <Button
           type="primary"
-          disabled={disabled || state?.funding?.status === 'running'}
+          disabled={disabled || fundingPending}
           onClick={() => command('preset.fund', {})}
         >
-          Create funded Alice / Bob / Carol preset
+          {fundingRecovery
+            ? 'Recover funded preset'
+            : 'Create funded Alice / Bob / Carol preset'}
         </Button>
         {state?.funding && (
           <div style={{ marginTop: 12 }}>

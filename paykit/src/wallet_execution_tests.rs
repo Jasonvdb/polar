@@ -276,3 +276,72 @@ async fn missing_inputs_and_fee_rejections_keep_original_spend_uncertain() {
         assert!(!calls.iter().any(|m| m == "sendrawtransaction"));
     }
 }
+
+#[tokio::test]
+async fn preparation_omits_dust_change_and_keeps_exact_payment_across_reopen() {
+    let threshold = bitcoin::Address::from_str(ADDRESS)
+        .unwrap()
+        .require_network(bitcoin::Network::Regtest)
+        .unwrap()
+        .script_pubkey()
+        .minimal_non_dust()
+        .to_sat();
+    assert_eq!(threshold, 294);
+    for remainder in [0, 1, 150, threshold - 1, threshold, threshold + 1] {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(vault(dir.path()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let handler_observed = observed.clone();
+        let handler_store = store.clone();
+        let needed = 100_000 - 1_250 - remainder;
+        let router = axum::Router::new().fallback(axum::routing::post(
+            move |axum::Json(input): axum::Json<Value>| {
+                let store = handler_store.clone();
+                let observed = handler_observed.clone();
+                async move {
+                    let method = input["method"].as_str().unwrap().to_string();
+                    observed.lock().unwrap().push(method.clone());
+                    let result = match method.as_str() {
+                        "listunspent" => json!([{"txid":"01".repeat(32),"vout":0,"amount":"0.00100000","spendable":true,"safe":true}]),
+                        "getrawchangeaddress" => json!(ADDRESS),
+                        "createrawtransaction" => {
+                            let saved = SpendState::open(&store).unwrap();
+                            let outputs = input["params"][1].as_array().unwrap();
+                            assert_eq!(saved.executions[0].outputs, *outputs);
+                            assert_eq!(amount(&outputs[0][ADDRESS]).unwrap(), needed);
+                            assert_eq!(outputs.len(), if remainder >= threshold { 2 } else { 1 });
+                            if remainder >= threshold {
+                                assert_eq!(amount(&outputs[1][ADDRESS]).unwrap(), remainder);
+                            }
+                            json!("durable-unsigned-fixture")
+                        }
+                        _ => panic!("preparation must not sign or broadcast"),
+                    };
+                    axum::Json(json!({"result": result, "error": null}))
+                }
+            },
+        ));
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut e = entry("owner");
+        e.wallet.bitcoin.url = endpoint;
+        e.view.amount_sats = needed.to_string();
+        let mut state = SpendState::default();
+        state.reserve(&store, e).unwrap();
+        prepare_onchain(&mut state, &store, 0).await.unwrap();
+        let mut reopened = SpendState::open(&store).unwrap();
+        prepare_onchain(&mut reopened, &store, 0).await.unwrap();
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![
+                "listunspent",
+                "getrawchangeaddress",
+                "createrawtransaction",
+                "createrawtransaction"
+            ]
+        );
+        assert_eq!(reopened.executions[0].outputs, state.executions[0].outputs);
+        task.abort();
+    }
+}

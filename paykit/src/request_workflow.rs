@@ -352,14 +352,7 @@ impl Runtime {
             );
             return Ok(());
         }
-        let mut local = self.request_state()?;
-        let transition = format!("proof:{}", record.payment_request_id);
-        anyhow::ensure!(
-            !local.transitions.values().any(|v| v == &transition),
-            "proof enqueue checkpoint unresolved; synchronize existing SDK history"
-        );
-        local.transitions.insert(c.command_id, transition);
-        self.vault.save("requests.cbor", &local)?;
+        checkpoint_proof(&self.vault, c.command_id, &record, &proof)?;
         self.sdk
             .submit_payment_proof(
                 record.counterparty,
@@ -609,6 +602,75 @@ impl Runtime {
         Ok((false, 0, None))
     }
 }
+/// Validate all known pre-enqueue failures before the durable one-shot checkpoint.
+/// Once saved, an SDK error can include an uncertain write and must not release it.
+fn checkpoint_proof(
+    vault: &crate::storage::Vault,
+    command_id: Uuid,
+    record: &PaymentRequestRecord,
+    proof: &Proof,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        record.local_role == Some(PaymentRequestLocalRole::Payer)
+            && record.state == PaymentRequestLifecycleState::Accepted,
+        "only payer can submit a proof for an accepted unpaid request"
+    );
+    let terms = record
+        .terms
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("request terms missing"))?;
+    anyhow::ensure!(
+        terms.recurrence.is_none() && terms.amount.asset == "sat",
+        "unsupported request terms"
+    );
+    payment_model::sats(&terms.amount.value)?;
+    proof.validate()?;
+    let request = paykit_lib::PaymentRequest::new(
+        paykit_lib::EventId::new(
+            record
+                .proposal_event_id
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("proposal event missing"))?,
+        )?,
+        paykit_lib::PaymentRequestId::new(record.payment_request_id.clone())?,
+        paykit_lib::PaymentRequestTerms {
+            amount: paykit_lib::PaymentAmount::new(
+                terms.amount.value.clone(),
+                terms.amount.asset.clone(),
+            )?,
+            payment_reference: paykit_lib::PaymentReference::new(terms.payment_reference.clone())?,
+            proposal_expires_at: terms.proposal_expires_at.clone(),
+            recurrence: None,
+            accepted_payment_endpoint_identifiers: terms
+                .accepted_payment_endpoint_identifiers
+                .iter()
+                .map(paykit_lib::PaymentEndpointIdentifier::new)
+                .collect::<Result<_, _>>()?,
+            metadata: terms.metadata.clone(),
+        },
+    );
+    paykit_lib::PaymentProof::new(
+        paykit_lib::EventId::new_v4(),
+        request.payment_request_id.clone(),
+        request.request.payment_reference.clone(),
+        None,
+        paykit_lib::PaymentEndpointIdentifier::new(proof.method())?,
+        serde_json::to_value(proof)?
+            .as_object()
+            .expect("proof object")
+            .clone(),
+    )
+    .validate_for_request(&request)?;
+    let mut local: RequestState = vault.load("requests.cbor")?.unwrap_or_default();
+    let transition = format!("proof:{}", record.payment_request_id);
+    anyhow::ensure!(
+        !local.transitions.values().any(|v| v == &transition),
+        "proof enqueue checkpoint unresolved; synchronize existing SDK history"
+    );
+    local.transitions.insert(command_id, transition);
+    vault.save("requests.cbor", &local)
+}
+
 fn lifecycle(state: PaymentRequestLifecycleState) -> &'static str {
     match state {
         PaymentRequestLifecycleState::Proposed => "proposed",
@@ -678,6 +740,93 @@ mod binding_tests {
         let amount = paykit_lib::PaymentAmount::new("5000", "sat").unwrap();
         let terms=paykit_lib::PaymentRequestTerms{amount,payment_reference:paykit_lib::PaymentReference::new("fixture-reference").unwrap(),proposal_expires_at:None,recurrence:None,accepted_payment_endpoint_identifiers:vec![paykit_lib::PaymentEndpointIdentifier::new(ONCHAIN).unwrap()],metadata:json!({"polarPaykitEndpoints":[{"source":"public","method":ONCHAIN,"endpoint":"bcrt1q2nfxmhd4n3c8834pj72xagvyr9gl57n5r94fsl","reservationId":Uuid::new_v4()}]}).as_object().unwrap().clone()};
         paykit_sdk::PaymentRequestTermsRecord::from(&terms)
+    }
+    fn payer_record() -> PaymentRequestRecord {
+        serde_json::from_value(json!({
+            "counterparty": PubkyPublicKey::new(pubky::Keypair::from_secret(&[19; 32]).public_key().z32()).unwrap(),
+            "counterparty_receiver_path": PaykitReceiverPath::new("fixture/wallet").unwrap(),
+            "payment_request_id": Uuid::new_v4().to_string(),
+            "local_role": PaymentRequestLocalRole::Payer,
+            "state": PaymentRequestLifecycleState::Accepted,
+            "proposal_event_id": Uuid::new_v4().to_string(),
+            "terms": terms(),
+            "payment_proofs": []
+        })).unwrap()
+    }
+    #[test]
+    fn rejected_proof_preflight_survives_reopen_without_poisoning_corrected_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let open =
+            || crate::storage::Vault::new(dir.path().into(), [23; 32], "receiver".into()).unwrap();
+        let mut record = payer_record();
+        let proof = Proof::Onchain {
+            txid: "ab".repeat(32),
+            output_index: 0,
+        };
+        record.state = PaymentRequestLifecycleState::Proposed;
+        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof).is_err());
+        assert!(open()
+            .load::<RequestState>("requests.cbor")
+            .unwrap()
+            .is_none());
+        record.state = PaymentRequestLifecycleState::Accepted;
+        let wrong_rail = Proof::Lightning {
+            payment_hash: "cd".repeat(32),
+            preimage: "ef".repeat(32),
+        };
+        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &wrong_rail).is_err());
+        assert!(open()
+            .load::<RequestState>("requests.cbor")
+            .unwrap()
+            .is_none());
+        let command = Uuid::new_v4();
+        checkpoint_proof(&open(), command, &record, &proof).unwrap();
+        let saved = open()
+            .load::<RequestState>("requests.cbor")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            saved.transitions.get(&command),
+            Some(&format!("proof:{}", record.payment_request_id))
+        );
+        // A saved checkpoint without an SDK result is an uncertain write, even after restart.
+        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof)
+            .unwrap_err()
+            .to_string()
+            .contains("checkpoint unresolved"));
+        assert_eq!(
+            open()
+                .load::<RequestState>("requests.cbor")
+                .unwrap()
+                .unwrap()
+                .transitions
+                .len(),
+            1
+        );
+    }
+    #[test]
+    fn invalid_immutable_terms_never_reserve_a_proof_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault =
+            crate::storage::Vault::new(dir.path().into(), [23; 32], "receiver".into()).unwrap();
+        let proof = Proof::Onchain {
+            txid: "ab".repeat(32),
+            output_index: 0,
+        };
+        let original = payer_record();
+        let mut unsupported = original.clone();
+        unsupported.terms.as_mut().unwrap().amount.asset = "USD".into();
+        let mut malformed = original.clone();
+        malformed.terms.as_mut().unwrap().proposal_expires_at = Some("invalid".into());
+        let mut missing_proposal = original;
+        missing_proposal.proposal_event_id = None;
+        for record in [unsupported, malformed, missing_proposal] {
+            assert!(checkpoint_proof(&vault, Uuid::new_v4(), &record, &proof).is_err());
+        }
+        assert!(vault
+            .load::<RequestState>("requests.cbor")
+            .unwrap()
+            .is_none());
     }
     #[test]
     fn immutable_bindings_reject_missing_partial_or_unrecognized_fields() {

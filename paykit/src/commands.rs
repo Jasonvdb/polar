@@ -119,6 +119,14 @@ pub fn reconcile_interrupted(state: &mut crate::model::AppState) -> anyhow::Resu
             ));
         }
     }
+    if state.funding.status == "running" {
+        state.funding.status = "uncertain".into();
+        state.funding.last_error = Some("Preset setup was interrupted. Retry funding to reconcile its original transfers and channels.".into());
+        state.event(
+            "funding.updated",
+            serde_json::json!({"status":state.funding.status,"step":state.funding.step}),
+        );
+    }
     for operation in requeued {
         state.event("operation.requeued", serde_json::json!(operation));
     }
@@ -141,6 +149,64 @@ mod tests {
             })
             .is_err());
         }
+    }
+    #[test]
+    fn interrupted_funding_remains_explicitly_recoverable_with_original_progress() {
+        use crate::model::*;
+        let mut state = AppState::new(Uuid::new_v4());
+        let id = Uuid::new_v4();
+        state.funding.status = "running".into();
+        state.funding.step = "channel2".into();
+        state.funding.channel_points = vec![format!("{}:0", "ab".repeat(32))];
+        state
+            .funding
+            .wallets
+            .push(crate::request_model::FundedWallet {
+                participant: "Alice".into(),
+                wallet_id: "lnd-1-core-1".into(),
+                onchain_balance_sats: "1000000".into(),
+                lightning_balance_sats: "500000".into(),
+            });
+        let original = state.funding.clone();
+        state.operations.push(OperationRecord {
+            public: Operation {
+                id,
+                command: "preset.fund".into(),
+                status: OperationStatus::Running,
+                result: None,
+                error: None,
+            },
+            request: Command {
+                command_id: id,
+                command: "preset.fund".into(),
+                input: serde_json::json!({}),
+            },
+        });
+        reconcile_interrupted(&mut state).unwrap();
+        assert_eq!(state.funding.status, "uncertain");
+        assert!(state
+            .funding
+            .last_error
+            .as_ref()
+            .unwrap()
+            .contains("original transfers and channels"));
+        assert_eq!(state.funding.step, original.step);
+        assert_eq!(state.funding.channel_points, original.channel_points);
+        assert!(state.funding.wallets == original.wallets);
+        assert_eq!(state.funding.funded, original.funded);
+        assert_eq!(state.operations[0].public.id, id);
+        assert!(state.operations[0].public.status == OperationStatus::Failed);
+        assert_eq!(
+            state.operations[0].public.error.as_ref().unwrap().code,
+            "reconciliation_required"
+        );
+        assert!(!state
+            .operations
+            .iter()
+            .any(|o| o.public.status == OperationStatus::Queued));
+        let before = serde_json::to_value(&state).unwrap();
+        reconcile_interrupted(&mut state).unwrap();
+        assert_eq!(serde_json::to_value(&state).unwrap(), before);
     }
     #[test]
     fn interrupted_environment_commands_requeue_but_future_payments_do_not() {

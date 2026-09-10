@@ -187,8 +187,7 @@ async fn provision(
     state.view.step = "complete".into();
     publish(state, vault, repo)
 }
-async fn select_bindings(config: &Config, repo: &Repository) -> anyhow::Result<Vec<Binding>> {
-    let wallets = wallet_rpc::configured(config.environment_id)?;
+fn eligible_groups(wallets: Vec<Wallet>) -> Vec<Vec<Wallet>> {
     let mut groups: BTreeMap<String, Vec<Wallet>> = BTreeMap::new();
     for wallet in wallets {
         if wallet.lightning.as_ref().is_some_and(|l| {
@@ -201,10 +200,20 @@ async fn select_bindings(config: &Config, repo: &Repository) -> anyhow::Result<V
             }
         }
     }
+    groups
+        .into_values()
+        .filter(|wallets| wallets.len() >= 3)
+        .map(|mut wallets| {
+            wallets.sort_by(|a, b| a.id.cmp(&b.id));
+            wallets
+        })
+        .collect()
+}
+async fn select_bindings(config: &Config, repo: &Repository) -> anyhow::Result<Vec<Binding>> {
     let participants = repo.snapshot()?.participants;
     let mut chosen = None;
-    for (_, mut wallets) in groups {
-        wallets.sort_by(|a, b| a.id.cmp(&b.id));
+    // Main only bakes setup credentials for eligible Core groups.
+    for wallets in eligible_groups(wallet_rpc::configured(config.environment_id)?) {
         let mut unique = BTreeSet::new();
         let mut selected = vec![];
         for wallet in wallets {
@@ -512,4 +521,52 @@ async fn verify(state: &mut State) -> anyhow::Result<()> {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     anyhow::bail!("channels not yet active and bidirectional")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn undersized_core_group_with_unbaked_credentials_is_excluded_before_setup_rpc() {
+        let dir = tempfile::tempdir().unwrap();
+        let wallet = |id: &str, core: &str| Wallet {
+            bitcoin_backend_id: Some(core.into()),
+            id: id.into(),
+            label: id.into(),
+            bitcoin: wallet_rpc::Core {
+                url: "http://127.0.0.1:1".into(),
+                username: "fixture".into(),
+                password: "fixture".into(),
+            },
+            lightning: Some(wallet_rpc::Lightning {
+                url: "https://127.0.0.1:1".into(),
+                tls_cert_path: dir.path().join("missing-cert"),
+                macaroon_path: dir.path().join("missing-receiving"),
+                setup_macaroon_path: Some(dir.path().join(format!("{id}-unbaked-setup"))),
+                payment_macaroon_path: Some(dir.path().join(format!("{id}-unbaked-payment"))),
+                peer_address: Some(format!("{id}:9735")),
+            }),
+        };
+        let small = wallet("lnd-0-core-0", "core-0");
+        assert!(!small
+            .lightning
+            .as_ref()
+            .unwrap()
+            .setup_macaroon_path
+            .as_ref()
+            .unwrap()
+            .exists());
+        assert!(eligible_groups(vec![small.clone()]).is_empty());
+        let groups = eligible_groups(vec![
+            wallet("lnd-3-core-1", "core-1"),
+            small,
+            wallet("lnd-2-core-1", "core-1"),
+            wallet("lnd-1-core-1", "core-1"),
+        ]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].iter().map(|w| w.id.as_str()).collect::<Vec<_>>(),
+            vec!["lnd-1-core-1", "lnd-2-core-1", "lnd-3-core-1"]
+        );
+    }
 }

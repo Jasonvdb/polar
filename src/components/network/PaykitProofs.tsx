@@ -30,6 +30,23 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
   const [preimage, setPreimage] = useState('');
   const [confirmations, setConfirmations] = useState('1');
   const requests = workspace?.requests || [];
+  const selectedRequest = requests.find(item => item.id === requestId);
+  const eligibleRequest =
+    selectedRequest?.role === 'payer' && selectedRequest.lifecycle === 'accepted';
+  const acceptedMethods = paykitMethods.filter(item =>
+    selectedRequest?.acceptedMethods.includes(item),
+  );
+  const selectedExecution = workspace?.executions?.find(
+    item =>
+      item.id === executionId &&
+      item.requestId === requestId &&
+      item.status === 'succeeded',
+  );
+  const eligibleProof =
+    mode === 'manual'
+      ? acceptedMethods.includes(method)
+      : !!selectedExecution &&
+        acceptedMethods.includes(selectedExecution.method as PaykitMethod);
   const proof: PaykitProofMaterial =
     method === 'btc-onchain'
       ? { method, txid: txid.trim(), outputIndex: Number(outputIndex) }
@@ -39,7 +56,8 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
       <Typography.Paragraph>
         Submit a prepared proof from a successful execution, or enter a proof to validate.
         The payee verifies settlement independently against its wallet and chain. A
-        delivered proof alone does not confirm payment.
+        delivered proof alone does not confirm payment. Submit proofs only for accepted
+        requests, using one of their accepted methods.
       </Typography.Paragraph>
       <Space direction="vertical" style={{ width: '100%' }}>
         <Select
@@ -49,11 +67,16 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
           onChange={id => {
             setRequest(id);
             setExecution('');
+            const request = requests.find(item => item.id === id);
+            setMethod(
+              paykitMethods.find(item => request?.acceptedMethods.includes(item)) ||
+                'btc-onchain',
+            );
           }}
           style={{ minWidth: 320 }}
         >
           {requests
-            .filter(item => item.role === 'payer')
+            .filter(item => item.role === 'payer' && item.lifecycle === 'accepted')
             .map(item => (
               <Select.Option key={item.id} value={item.id}>
                 {item.description} · {item.amountSats} sats
@@ -79,7 +102,10 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
           >
             {workspace?.executions
               ?.filter(
-                item => item.requestId === requestId && item.status === 'succeeded',
+                item =>
+                  item.requestId === requestId &&
+                  item.status === 'succeeded' &&
+                  acceptedMethods.includes(item.method as PaykitMethod),
               )
               .map(item => (
                 <Select.Option key={item.id} value={item.id}>
@@ -95,7 +121,7 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
               onChange={setMethod}
               style={{ minWidth: 320 }}
             >
-              {paykitMethods.map(item => (
+              {acceptedMethods.map(item => (
                 <Select.Option key={item} value={item}>
                   {item}
                 </Select.Option>
@@ -135,7 +161,7 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
           </>
         )}
         <Button
-          disabled={disabled || !requestId || (mode === 'prepared' && !executionId)}
+          disabled={disabled || !eligibleRequest || !eligibleProof}
           onClick={() =>
             command('proof.submit', {
               receiverId,

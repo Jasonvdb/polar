@@ -351,8 +351,11 @@ async fn prepare_onchain(
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("change address missing"))?;
     let mut outputs = vec![json!({e.view.endpoint:btc(needed)})];
-    if total > needed + fee {
-        outputs.push(json!({change:btc(total-needed-fee)}));
+    let change_amount = total - needed - fee;
+    let change_address =
+        bitcoin::Address::from_str(change)?.require_network(bitcoin::Network::Regtest)?;
+    if change_amount >= change_address.script_pubkey().minimal_non_dust().to_sat() {
+        outputs.push(json!({change:btc(change_amount)}));
     }
     state.executions[index].inputs = selected;
     state.executions[index].outputs = outputs;

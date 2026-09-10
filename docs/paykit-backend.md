@@ -239,7 +239,8 @@ across binding aliases; actual LND identities identify shared Lightning wallets.
 Unresolved attempts block another spend on the same wallet. Bitcoin selected inputs
 and outputs are committed before signing, and the exact signed bytes and transaction
 ID before broadcasting. `testmempoolaccept` checks the original transaction. Dust is
-rejected explicitly; ambiguous errors stay uncertain. Reconciliation queries the
+rejected explicitly; below-dust change is omitted and added to the fee without changing
+the requested output. Ambiguous errors stay uncertain. Reconciliation queries the
 original wallet and only rebroadcasts the original bytes. Lightning persists the
 invoice hash before sending; reconciliation queries paginated payment history by
 that hash and distinguishes failed, in-flight and successful payments. It never
@@ -248,7 +249,10 @@ creates a replacement invoice/payment for an uncertain attempt.
 `proof.submit` accepts a successful execution ID or an editable strict proof object:
 `{method:"btc-onchain",txid,outputIndex}` or
 `{method:"btc-lightning-bolt11",paymentHash,preimage}`. The pinned SDK owns event IDs,
-queueing, delivery and lifecycle derivation. Persisted application correlation and
+queueing, delivery and lifecycle derivation. Payer role, accepted lifecycle, supported
+terms and accepted rail are validated before reserving the proof checkpoint. Rejected
+preflight input can be corrected after restart; uncertain SDK writes retain their
+checkpoint until reconciled. Persisted application correlation and
 existing SDK records recover interrupted event submission without regenerating an
 event. `proof.verify` runs at the payee: Core transaction output script and amount
 must match the request's own reservation; Lightning preimage/hash and independently
@@ -266,7 +270,9 @@ the same durable signed-transaction coordinator. Channel-open intent is persiste
 before RPC and interrupted setup reconciles the original open/pending channel;
 unknown outcomes never trigger another channel funding transaction. Root state
 `funding` exposes progress, verified balances and channel points. Repeating funding
-reuses original transfer and channel identities.
+reuses original transfer and channel identities. Startup exposes interrupted funding
+as `uncertain`, enabling explicit recovery without automatically replaying the command.
+Undersized Core groups are skipped before reading setup credentials or making RPCs.
 
 Wallet configuration adds `bitcoinBackendId` and optional Lightning
 `paymentMacaroonPath`, `setupMacaroonPath`, and `peerAddress`. Electron main bakes
