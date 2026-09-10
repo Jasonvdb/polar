@@ -14,10 +14,10 @@ function walletEvidence(environment) {
     gateCounts: { core: { issuanceSuccess: 2, executionSuccess: 1 }, lnd: { issuanceSuccess: 1, executionSuccess: 1 } },
     gateEvents: [completed('core', 1), dropped('core', 1), completed('lnd', 2), dropped('lnd', 2), completed('core', 3), { event: 'hold.finished', channel: 'core', id: 3, nonce: 'nonce-3', action: 'relay', reason: 'control' }, { ...completed('core', 4), successfulIssuance: false, successfulExecution: true }, dropped('core', 4), { ...completed('lnd', 5), successfulIssuance: false, successfulExecution: true }, dropped('lnd', 5)],
     storageFaults: ['payments', 'workspace', 'requests', 'executions'].flatMap(ledger => [
-      { receiverId: 'receiver', faultId: ledger, boundary: `${ledger}.cbor atomic rename`, phase: 'host', active: true },
-      { receiverId: 'receiver', faultId: ledger, boundary: `${ledger}.cbor atomic rename`, phase: 'guest', active: true, observed: 'directory' },
-      { receiverId: 'receiver', faultId: ledger, boundary: `${ledger}.cbor atomic rename`, phase: 'host', active: false },
-      { receiverId: 'receiver', faultId: ledger, boundary: `${ledger}.cbor atomic rename`, phase: 'guest', active: false, observed: 'originalFile' },
+      { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'host', active: true },
+      { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'guest', active: true, observed: ledger === 'executions' ? 'readableCommitBlocked' : 'directory', ...(ledger === 'executions' ? { uid: 1001, writable: false } : {}) },
+      { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'host', active: false },
+      { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'guest', active: false, observed: 'originalFile', ...(ledger === 'executions' ? { uid: 1001, writable: true } : {}) },
     ]),
   };
 }
@@ -99,9 +99,12 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
   for (const change of [
     wallets => { wallets.gateEvents = []; },
     wallets => { wallets.gateEvents = wallets.gateEvents.filter(event => !event.successfulExecution); },
-    wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.boundary !== 'executions.cbor atomic rename'); },
+    wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.boundary !== 'executions.cbor commit temp creation'); },
     wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.boundary !== 'requests.cbor atomic rename'); },
     wallets => { wallets.gateEvents.find(event => event.event === 'upstream.completed').nonce = 'unrelated'; },
+    wallets => { wallets.storageFaults.find(e => e.boundary === 'executions.cbor commit temp creation' && e.phase === 'guest' && e.active).uid = 0; },
+    wallets => { wallets.storageFaults.find(e => e.boundary === 'executions.cbor commit temp creation' && e.phase === 'guest' && e.active).writable = true; },
+    wallets => { wallets.storageFaults.find(e => e.boundary === 'executions.cbor commit temp creation' && e.phase === 'guest' && !e.active).writable = false; },
     wallets => { wallets.storageFaults.pop(); },
     wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.phase !== 'guest'); },
     wallets => { wallets.storageFaults[1].observed = 'file'; },
@@ -139,4 +142,14 @@ test('unexpected operation diagnostics retain public failure and receiver state 
   assert(message.includes('receiver-id') && message.includes('crashed') && message.includes('Restart required'));
   assert(!message.includes('secret-'));
   assert(operationFailure('receiver.restart', { id: 'id', status: 'failed' }).includes('id'));
+});
+
+
+test('survivor assertion preserves strict running gate and emits only redacted receiver identities and statuses', () => {
+  const { assertRunningReceivers, redactedReceiverStatuses } = require('./paykit-ci');
+  const records = [{ id: 'receiver-id', status: 'crashed', generation: 4, session: 'private-session', lastError: 'sensitive detail', publicKey: 'not-needed' }];
+  assert.deepEqual(redactedReceiverStatuses(records), [{ id: 'receiver-id', status: 'crashed', generation: 4 }]);
+  assert.throws(() => assertRunningReceivers(records), error => error.message.includes('receiver-id') && error.message.includes('crashed') && !error.message.includes('private-session') && !error.message.includes('sensitive detail'));
+  assertRunningReceivers([{ id: 'receiver-id', status: 'running', generation: 4 }]);
+  assert.throws(() => assertRunningReceivers([]));
 });

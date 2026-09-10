@@ -49,15 +49,16 @@ function validateReport(root) {
       assert(completed?.nonce, 'Missing lost successful execution response');
     }
     for (const ledger of ['payments', 'workspace', 'requests', 'executions']) {
-      assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active && event.boundary === `${ledger}.cbor atomic rename`), `Missing ${ledger} commit fault evidence`);
+      assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active && event.boundary === (ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`)), `Missing ${ledger} commit fault evidence`);
     }
     const finalFaults = new Map(wallets.storageFaults.map(event => [`${event.receiverId}:${event.boundary}`, event.active]));
     assert([...finalFaults.values()].every(active => active === false));
     for (const fault of wallets.storageFaults.filter(event => event.phase === 'host' && event.active)) {
       assert(fault.faultId);
       const events = wallets.storageFaults.filter(event => event.faultId === fault.faultId && event.receiverId === fault.receiverId);
-      const blocked = events.findIndex(event => event.phase === 'guest' && event.active && event.observed === 'directory');
-      const restored = events.findIndex(event => event.phase === 'guest' && !event.active && ['originalFile', 'absent'].includes(event.observed));
+      const execution = fault.boundary === 'executions.cbor commit temp creation';
+      const blocked = events.findIndex(event => event.phase === 'guest' && event.active && (execution ? event.observed === 'readableCommitBlocked' && event.uid > 0 && event.writable === false : event.observed === 'directory'));
+      const restored = events.findIndex(event => event.phase === 'guest' && !event.active && ['originalFile', 'absent'].includes(event.observed) && (!execution || event.uid > 0 && event.writable === true));
       assert(blocked >= 0 && restored > blocked, 'Missing confirmed guest ledger boundaries');
     }
     assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active));
@@ -73,6 +74,14 @@ function validateReport(root) {
   assert.equal(report.survivingWalletEnvironmentVerified, true);
   assert(!ledger.environments[0].wallets.readiness.some(aWallet => ledger.environments[1].wallets.readiness.some(bWallet => aWallet.publicKey === bWallet.publicKey)));
   return report;
+}
+
+function redactedReceiverStatuses(receivers) {
+  return receivers.map(({ id, status, generation }) => ({ id, status, generation }));
+}
+function assertRunningReceivers(receivers) {
+  const statuses = redactedReceiverStatuses(receivers);
+  assert(statuses.length > 0 && statuses.every(r => r.status === 'running'), `Survivor receivers unavailable: ${JSON.stringify(statuses)}`);
 }
 
 function start() {
@@ -159,7 +168,11 @@ function start() {
     const survivor = await requestJson(`${survivorBase}/v1/state`, { headers: { authorization: `Bearer ${fs.readFileSync(b.tokenFile, 'utf8').trim()}` } }, signal);
     assert.equal(survivor.status, 200);
     assert.deepEqual(survivor.data.participants.map(p => p.publicKey), reportB.participantKeys);
-    assert(survivor.data.receivers.every(r => r.status === 'running'));
+    try { assertRunningReceivers(survivor.data.receivers); }
+    catch (error) {
+      fs.writeFileSync(path.join(root, 'survivor-receiver-statuses.json'), JSON.stringify(redactedReceiverStatuses(survivor.data.receivers), null, 2));
+      throw error;
+    }
     assert.deepEqual(b.walletFixture.walletSnapshot(), walletSurvivorBefore, 'Environment B wallets changed while A ran');
     return { environments: [reportA, reportB], survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true };
   }
@@ -229,7 +242,7 @@ function start() {
     },
   });
 }
-module.exports = { validateReport, requiredStages };
+module.exports = { validateReport, requiredStages, redactedReceiverStatuses, assertRunningReceivers };
 if (require.main === module) {
   if (process.argv[2] === '--verify-report') {
     try { validateReport(process.argv[3]); console.log('Required Paykit completion report verified.'); }

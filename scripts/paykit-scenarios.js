@@ -69,6 +69,7 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     const marker = JSON.parse(docker('exec', serviceContainer, 'polar-paykit', 'inspect-marker', owner.publicKey, receiver.path));
     assert.equal(marker.noise_public_key, receiver.noisePublicKey);
     assert.equal(marker.receiver_path, receiver.path);
+    assert.deepEqual(marker.capabilities, { private_payments: true, payment_requests: true, receipts: false, outgoing_payments: true });
   };
 
   stage('readiness');
@@ -129,6 +130,7 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     assert.equal(restored.path, previous.path);
     assert.equal(restored.status, 'running');
   }
+  if (serviceContainer) initial.receivers.forEach(inspectMarker);
   if (serviceContainer && postgresContainer) {
     stage('database-outage');
     docker('stop', '--timeout', '-1', postgresContainer);

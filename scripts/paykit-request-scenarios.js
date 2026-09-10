@@ -168,9 +168,24 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   stage('execution-reconciliation');
 
   await publish(bob, ONCHAIN); const blockedId = await accepted(); const snapshots = await transactions(alice); const executionCount = (await view(alice)).executions.length;
+  const runningBeforeFault = (await state()).receivers.map(r => ({ id: r.id, status: r.status, generation: r.generation }));
+  assert(runningBeforeFault.every(r => r.status === 'running'), `Receivers unavailable before execution commit fault: ${JSON.stringify(runningBeforeFault)}`);
   let restore = await fixture.blockExecutionCommit(serviceContainer);
-  try { const failed = await execute(blockedId); assert.equal(failed.op.status, 'failed'); assert.equal(failed.execution, undefined); }
-  finally { await restore(); }
+  const healthyDuringFault = async () => {
+    await restore.assertActive();
+    const current = await state();
+    const receivers = current.receivers.map(r => ({ id: r.id, status: r.status, generation: r.generation }));
+    assert.deepEqual(receivers, runningBeforeFault, `Receiver health changed during readable execution commit fault: ${JSON.stringify(receivers)}`);
+    assert.equal(workspace(current, alice).executions.length, executionCount);
+    assert.deepEqual(await transactions(alice), snapshots);
+  };
+  try {
+    // Every receiver reads this shared snapshot on its two-second background tick.
+    // Keep the fault active across multiple ticks before and after the rejected write.
+    for (let tick = 0; tick < 3; tick++) { await sleep(2200, signal); await healthyDuringFault(); }
+    const failed = await execute(blockedId); assert.equal(failed.op.status, 'failed'); assert.equal(failed.execution, undefined);
+    for (let tick = 0; tick < 2; tick++) { await sleep(2200, signal); await healthyDuringFault(); }
+  } finally { await restore(); }
   await command('receiver.restart', { receiverId: alice.id }); assert.deepEqual(await transactions(alice), snapshots); assert.equal((await view(alice)).executions.length, executionCount);
   restore = await fixture.blockWorkspaceCommit(alice.id, serviceContainer);
   try { await command('payment.execute', { receiverId: alice.id, requestId: blockedId, walletId: fixture.walletIds.alice, source: 'public', method: ONCHAIN }, randomUUID(), 'failed'); }

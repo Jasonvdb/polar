@@ -38,7 +38,7 @@ async function waitFor(check, signal, description, timeoutMs = 120000) {
   throw new Error(`${description} timed out`);
 }
 function storageFaults(stateRoot, journal = () => {}, ledger = 'payments') {
-  assert(['payments', 'requests', 'workspace', 'executions'].includes(ledger));
+  assert(['payments', 'requests', 'workspace'].includes(ledger));
   const boundary = `${ledger}.cbor atomic rename`;
   const pending = new Map();
   const root = fs.realpathSync(stateRoot);
@@ -85,6 +85,49 @@ function storageFaults(stateRoot, journal = () => {}, ledger = 'payments') {
   }
   return { setLedgerWritable, restoreFaults, boundary };
 }
+// Shared execution snapshots are read by every receiver. Deny new commits while
+// preserving those reads; replacing this ledger with a directory crashes readers.
+function executionCommitFaults(stateRoot, journal = () => {}) {
+  const root = fs.realpathSync(stateRoot);
+  const directory = path.join(root, 'receivers', 'wallet-execution');
+  const target = path.join(directory, 'executions.cbor');
+  const boundary = 'executions.cbor commit temp creation';
+  let pending;
+  const digest = () => {
+    const stat = fs.lstatSync(target);
+    assert(stat.isFile() && !stat.isSymbolicLink(), 'Expected regular shared execution ledger');
+    return createHash('sha256').update(fs.readFileSync(target)).digest('hex');
+  };
+  function setLedgerWritable(receiverId, writable) {
+    assert.equal(receiverId, 'wallet-execution', 'Invalid shared execution fault scope');
+    if (writable && !pending) return;
+    assert.equal(fs.realpathSync(directory), directory, 'Shared execution fault path is not canonical');
+    const stat = fs.statSync(directory);
+    if (writable) {
+      if (!pending) return;
+      assert(stat.dev === pending.dev && stat.ino === pending.ino, 'Shared execution directory changed');
+      const saved = pending;
+      fs.chmodSync(directory, saved.expected.mode);
+      pending = undefined;
+      journal({ receiverId, faultId: saved.faultId, phase: 'host', active: false, boundary });
+      assert.equal(digest(), saved.expected.digest, 'Shared execution snapshot changed during commit fault');
+      return;
+    }
+    assert(!pending, 'Storage fault already active');
+    const lock = fs.lstatSync(path.join(directory, 'spending.lock'));
+    assert(lock.isFile() && !lock.isSymbolicLink(), 'Existing spending lock required to reach commit boundary');
+    const mode = stat.mode & 0o7777;
+    assert(mode & 0o200, 'Shared execution directory must initially be writable');
+    const expected = { kind: 'file', digest: digest(), mode, writable: true };
+    const saved = { faultId: randomUUID(), dev: stat.dev, ino: stat.ino, expected,
+      blocked: { ...expected, mode: mode & ~0o222, writable: false } };
+    fs.chmodSync(directory, saved.blocked.mode);
+    pending = saved;
+    journal({ receiverId, faultId: saved.faultId, phase: 'host', active: true, boundary });
+    return saved;
+  }
+  return { setLedgerWritable, restoreFaults: () => setLedgerWritable('wallet-execution', true), boundary };
+}
 // Bind mounts can publish host rename results asynchronously. The scenario must
 // observe each boundary from the same namespace as the receiver before proceeding.
 function visibleStorageFaults(faults, readGuest, journal, { timeoutMs = 5000, pollMs = 50 } = {}) {
@@ -97,7 +140,9 @@ function visibleStorageFaults(faults, readGuest, journal, { timeoutMs = 5000, po
       try {
         const observed = await readGuest(receiverId);
         if (observed.kind === expected.kind &&
-            (expected.kind !== 'file' || observed.digest === expected.digest)) return attempts;
+            (expected.kind !== 'file' || observed.digest === expected.digest) &&
+            (expected.mode === undefined || observed.mode === expected.mode) &&
+            (expected.writable === undefined || observed.writable === expected.writable)) return { attempts, observed };
       } catch (_) { /* Only a matching guest observation permits progression. */ }
       await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
     }
@@ -105,9 +150,10 @@ function visibleStorageFaults(faults, readGuest, journal, { timeoutMs = 5000, po
   }
   async function blockLedgerCommit(receiverId) {
     const saved = faults.setLedgerWritable(receiverId, false);
-    const record = (active, observed, attempts) => journal({
+    const record = (active, observed, confirmation) => journal({
       receiverId, faultId: saved.faultId, phase: 'guest', active,
-      observed, attempts, boundary,
+      observed, attempts: confirmation.attempts, boundary,
+      ...(saved.blocked ? { uid: confirmation.observed.uid, mode: confirmation.observed.mode, writable: confirmation.observed.writable } : {}),
     });
     const restore = async () => {
       faults.setLedgerWritable(receiverId, true);
@@ -115,12 +161,16 @@ function visibleStorageFaults(faults, readGuest, journal, { timeoutMs = 5000, po
       record(false, saved.expected.kind === 'file' ? 'originalFile' : 'absent', attempts);
     };
     try {
-      const attempts = await confirm(receiverId, { kind: 'directory' });
-      record(true, 'directory', attempts);
+      const attempts = await confirm(receiverId, saved.blocked || { kind: 'directory' });
+      record(true, saved.blocked ? 'readableCommitBlocked' : 'directory', attempts);
     } catch (error) {
       await restore();
       throw error;
     }
+    restore.assertActive = async () => {
+      const confirmation = await confirm(receiverId, saved.blocked || { kind: 'directory' });
+      record(true, saved.blocked ? 'readableCommitBlocked' : 'directory', confirmation);
+    };
     return restore;
   }
   return { blockLedgerCommit };
@@ -137,6 +187,16 @@ function readGuestLedger(docker, serviceContainer, receiverId, ledger = 'payment
   assert(match, 'Invalid guest ledger visibility response');
   // The encrypted-file digest is compared only in memory and never journaled.
   return { kind: 'file', digest: match[1] };
+}
+function readGuestExecutionLedger(docker, serviceContainer, receiverId) {
+  assert.equal(receiverId, 'wallet-execution', 'Invalid shared execution fault scope');
+  assert.equal(typeof docker.withTimeout, 'function', 'A bounded Docker probe is required');
+  const output = docker.withTimeout(1000, 'exec', serviceContainer, 'sh', '-c',
+    "set -eu; uid=$(id -u); test \"$uid\" -gt 0; service_uid=$(awk '/^Uid:/ {print $2}' /proc/1/status); test \"$uid\" = \"$service_uid\"; test ! -L \"$1\"; test -f \"$1\"; test -r \"$1\"; parent=${1%/*}; mode=$(stat -c %a \"$parent\"); digest=$(sha256sum \"$1\"); writable=false; if probe=$(mktemp \"$parent/.paykit-fixture-write-XXXXXX\" 2>/dev/null); then rm -- \"$probe\"; writable=true; fi; printf \"%s %s %s %s\\n\" \"$uid\" \"$mode\" \"${digest%% *}\" \"$writable\"",
+    'paykit-execution-commit-visibility', '/data/receivers/wallet-execution/executions.cbor').trim();
+  const match = /^([1-9][0-9]*) ([0-7]{3,4}) ([a-f0-9]{64}) (true|false)$/.exec(output);
+  assert(match, 'Invalid non-root shared execution commit observation');
+  return { kind: 'file', uid: Number(match[1]), mode: parseInt(match[2], 8), digest: match[3], writable: match[4] === 'true' };
 }
 function gateControls(controlDir, signal) {
   function arm(channel, action = 'drop', operation) {
@@ -298,7 +358,7 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
   const storageJournal = [];
   const recordStorage = entry => { storageJournal.push(entry); recordWallets({ ...details, storageFaults: storageJournal }); };
   const faults = storageFaults(stateRoot, recordStorage);
-  const executionFaults = storageFaults(stateRoot, recordStorage, 'executions');
+  const executionFaults = executionCommitFaults(stateRoot, recordStorage);
   const requestFaults = storageFaults(stateRoot, recordStorage, 'requests');
   const workspaceFaults = storageFaults(stateRoot, recordStorage, 'workspace');
   function verifyOwned(id) {
@@ -342,7 +402,7 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
     },
     blockExecutionCommit: serviceContainer => {
       verifyOwned(serviceContainer);
-      return visibleStorageFaults(executionFaults, id => readGuestLedger(docker, serviceContainer, id, 'executions'), recordStorage).blockLedgerCommit('wallet-execution');
+      return visibleStorageFaults(executionFaults, id => readGuestExecutionLedger(docker, serviceContainer, id), recordStorage).blockLedgerCommit('wallet-execution');
     },
     blockWorkspaceCommit: (receiverId, serviceContainer) => {
       verifyOwned(serviceContainer);
@@ -358,4 +418,4 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
     } };
 
 }
-module.exports = { createWalletFixture, storageFaults, visibleStorageFaults, readGuestLedger, gateControls, atomicJson, images, paymentPermissions, setupPermissions };
+module.exports = { createWalletFixture, storageFaults, executionCommitFaults, visibleStorageFaults, readGuestLedger, readGuestExecutionLedger, gateControls, atomicJson, images, paymentPermissions, setupPermissions };

@@ -103,9 +103,9 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
     );
     sdk.publish_paykit_receiver_marker(PaykitReceiverCapabilities {
         private_payments: true,
-        payment_requests: false,
+        payment_requests: true,
         receipts: false,
-        outgoing_payments: false,
+        outgoing_payments: true,
     })
     .await?;
     let marker = sdk
