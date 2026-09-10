@@ -869,13 +869,106 @@ describe('DockerService', () => {
   });
 
   describe('getDocker', () => {
-    it('should detect DOCKER_HOST', async () => {
+    afterEach(() => {
+      Object.defineProperty(electronMock.remote, 'process', { get: () => ({ env: {} }) });
+    });
+
+    it('passes the main-process socket explicitly and uses it for Compose despite inherited context', async () => {
+      const socketPath = '/run/owned-daemon.sock';
+      const previousHost = process.env.DOCKER_HOST;
+      process.env.DOCKER_HOST = 'unix:///run/unrelated-daemon.sock';
       Object.defineProperty(electronMock.remote, 'process', {
-        get: () => ({ env: { DOCKER_HOST: '/var/run/docker.sock' } }),
+        get: () => ({
+          env: { DOCKER_HOST: `unix://${socketPath}`, DOCKER_CONTEXT: 'unrelated' },
+        }),
+      });
+      try {
+        await getDocker(false);
+        expect(mockDockerode.prototype.constructor).toHaveBeenCalledWith({
+          host: undefined,
+          socketPath,
+        });
+        expect(filesMock.exists).not.toHaveBeenCalled();
+        await dockerService.getVersions();
+        const args = composeMock.version.mock.calls[0][0];
+        expect(args?.env?.DOCKER_HOST).toBe(`unix://${socketPath}`);
+        expect(args?.env?.DOCKER_CONTEXT).toBeUndefined();
+      } finally {
+        if (previousHost === undefined) delete process.env.DOCKER_HOST;
+        else process.env.DOCKER_HOST = previousHost;
+      }
+    });
+
+    it('preserves TCP TLS credentials, path prefix and timeout from the main environment', async () => {
+      const ca = Buffer.from('test-ca'),
+        cert = Buffer.from('test-cert'),
+        key = Buffer.from('test-key');
+      fsMock.readFile
+        .mockResolvedValueOnce(ca as any)
+        .mockResolvedValueOnce(cert as any)
+        .mockResolvedValueOnce(key as any);
+      Object.defineProperty(electronMock.remote, 'process', {
+        get: () => ({
+          env: {
+            DOCKER_HOST: 'tcp://docker.example:2376',
+            DOCKER_TLS_VERIFY: '1',
+            DOCKER_CERT_PATH: '/certs',
+            DOCKER_PATH_PREFIX: '/proxy/',
+            DOCKER_CLIENT_TIMEOUT: '9000',
+          },
+        }),
       });
       await getDocker(false);
-      expect(mockDockerode.prototype.constructor).toHaveBeenCalledWith();
-      Object.defineProperty(electronMock.remote, 'process', { get: () => ({ env: {} }) });
+      expect(mockDockerode.prototype.constructor).toHaveBeenCalledWith({
+        host: 'docker.example',
+        port: 2376,
+        protocol: 'https',
+        pathPrefix: '/proxy/',
+        timeout: 9000,
+        ca,
+        cert,
+        key,
+      });
+      expect(fsMock.readFile.mock.calls.map(args => args[0])).toEqual(
+        ['/certs/ca.pem', '/certs/cert.pem', '/certs/key.pem'].map(path => join(path)),
+      );
+    });
+
+    it.each([
+      [
+        'tcp://docker.example:2375',
+        { host: 'docker.example', port: 2375, protocol: 'http', pathPrefix: '/' },
+      ],
+      [
+        'https://docker.example:443',
+        { host: 'docker.example', port: undefined, protocol: 'https', pathPrefix: '/' },
+      ],
+      ['npipe:////./pipe/owned', { host: undefined, socketPath: '//./pipe/owned' }],
+      [
+        'ssh://alice@docker.example:22',
+        {
+          host: 'docker.example',
+          port: 22,
+          protocol: 'ssh',
+          pathPrefix: '/',
+          username: 'alice',
+          sshOptions: { agent: '/agent.sock' },
+        },
+      ],
+    ])('passes explicit options for %s', async (host, options) => {
+      Object.defineProperty(electronMock.remote, 'process', {
+        get: () => ({ env: { DOCKER_HOST: host, SSH_AUTH_SOCK: '/agent.sock' } }),
+      });
+      await getDocker(false);
+      expect(mockDockerode.prototype.constructor).toHaveBeenCalledWith(options);
+    });
+
+    it('does not silently fall back when an explicit host is invalid', async () => {
+      Object.defineProperty(electronMock.remote, 'process', {
+        get: () => ({ env: { DOCKER_HOST: 'unix://' } }),
+      });
+      await expect(getDocker(false)).rejects.toThrow('explicit socket');
+      expect(mockDockerode.prototype.constructor).not.toHaveBeenCalled();
     });
 
     it('should check paths on Mac', async () => {

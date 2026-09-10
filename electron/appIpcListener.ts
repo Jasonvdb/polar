@@ -4,6 +4,7 @@ import windowState from 'electron-window-state';
 import { join } from 'path';
 import { ipcChannels } from '../src/shared';
 import { APP_ROOT, BASE_URL } from './constants';
+import { paykitProxy } from './paykitProxy';
 import { httpProxy } from './httpProxy';
 import { clearLitdProxyCache } from './litd/litdProxyServer';
 import { clearLndProxyCache } from './lnd/lndProxyServer';
@@ -68,6 +69,7 @@ const listeners: {
   [ipcChannels.openWindow]: openWindow,
   [ipcChannels.clearCache]: clearCache,
   [ipcChannels.http]: httpProxy,
+  [ipcChannels.paykit]: paykitProxy,
   [ipcChannels.zip]: zip,
   [ipcChannels.unzip]: unzip,
 };

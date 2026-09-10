@@ -1,3 +1,4 @@
+import { paykitTool } from './paykit';
 import { getBitcoinWalletInfoTool } from './bitcoin/getBitcoinWalletInfo';
 import { getBlockchainInfoTool } from './bitcoin/getBlockchainInfo';
 import { getNewBitcoinAddressTool } from './bitcoin/getNewBitcoinAddress';
@@ -49,6 +50,7 @@ import { sendTapAssetTool } from './tap/sendTapAsset';
 import { syncTapUniverseTool } from './tap/syncTapUniverse';
 
 export interface McpModel {
+  paykit: typeof paykitTool;
   // Tool implementations
   listNetworks: typeof listNetworksTool;
   createNetwork: typeof createNetworkTool;
@@ -105,6 +107,7 @@ export interface McpModel {
 }
 
 const mcpModel: McpModel = {
+  paykit: paykitTool,
   // Network tools
   listNetworks: listNetworksTool,
   createNetwork: createNetworkTool,

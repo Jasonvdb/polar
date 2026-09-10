@@ -21,7 +21,7 @@ const logMock = log as jest.Mocked<typeof log>;
 describe('MCP model > IPC', () => {
   describe('AVAILABLE_TOOLS', () => {
     it('should have correct number of tools', () => {
-      expect(AVAILABLE_TOOLS).toHaveLength(48);
+      expect(AVAILABLE_TOOLS).toHaveLength(49);
     });
 
     it('should include all tool definitions', () => {

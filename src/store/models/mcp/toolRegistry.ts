@@ -1,3 +1,4 @@
+import { paykitDefinition } from './paykit';
 import type { Actions } from 'easy-peasy';
 import { getBitcoinWalletInfoDefinition } from './bitcoin/getBitcoinWalletInfo';
 import { getBlockchainInfoDefinition } from './bitcoin/getBlockchainInfo';
@@ -85,6 +86,10 @@ const callAction = <TAction extends ToolActionKey>(
  * Uses definition.name as keys for type safety and to eliminate magic strings.
  */
 export const TOOL_REGISTRY = {
+  [paykitDefinition.name]: {
+    definition: paykitDefinition,
+    executor: callAction('paykit'),
+  },
   // Network tools (18)
   [listNetworksDefinition.name]: {
     definition: listNetworksDefinition,
@@ -314,6 +319,7 @@ export function getToolEntry(toolName: string): ToolRegistryEntry {
  * Export the list of tool definitions with shortened names
  */
 export const tools = {
+  paykit: paykitDefinition,
   listNetworks: listNetworksDefinition,
   createNetwork: createNetworkDefinition,
   importNetworkFromZip: importNetworkFromZipDefinition,

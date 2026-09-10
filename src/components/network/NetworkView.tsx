@@ -4,7 +4,7 @@ import { Redirect, RouteComponentProps } from 'react-router';
 import { info } from 'electron-log';
 import styled from '@emotion/styled';
 import { InfoCircleOutlined } from '@ant-design/icons';
-import { Alert, Button, Empty, Input, Modal, PageHeader, Tooltip } from 'antd';
+import { Alert, Button, Empty, Input, Modal, PageHeader, Tooltip, Tabs } from 'antd';
 import { usePrefixedTranslation } from 'hooks';
 import { useTheme } from 'hooks/useTheme';
 import { Status } from 'shared/types';
@@ -15,6 +15,7 @@ import { StatusTag } from 'components/common';
 import NetworkDesigner from 'components/designer/NetworkDesigner';
 import { HOME } from 'components/routing';
 import NetworkActions from './NetworkActions';
+import PaykitWorkspace from './PaykitWorkspace';
 
 const Styled = {
   Empty: styled(Empty)`
@@ -45,6 +46,20 @@ const Styled = {
   `,
   DescriptionInput: styled(Input.TextArea)`
     width: 500px;
+  `,
+  Tabs: styled(Tabs)`
+    flex: 1;
+    min-height: 0;
+    .ant-tabs-content-holder,
+    .ant-tabs-content,
+    .ant-tabs-tabpane-active {
+      display: flex;
+      flex: 1;
+      min-height: 0;
+    }
+    .ant-tabs-tabpane-active {
+      flex-direction: column;
+    }
   `,
   NetworkDesigner: styled(NetworkDesigner)`
     flex: 1;
@@ -251,7 +266,21 @@ const NetworkView: React.FC<RouteComponentProps<MatchParams>> = ({ match }) => {
           message={<Styled.Error>{toggleAsync.error.message}</Styled.Error>}
         />
       )}
-      <Styled.NetworkDesigner network={network} />
+      <Styled.Tabs
+        defaultActiveKey="network"
+        items={[
+          {
+            key: 'network',
+            label: 'Network',
+            children: <Styled.NetworkDesigner network={network} />,
+          },
+          {
+            key: 'paykit',
+            label: 'Paykit',
+            children: <PaykitWorkspace key={network.id} network={network} />,
+          },
+        ]}
+      />
     </Styled.NetworkView>
   );
 };

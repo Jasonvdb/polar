@@ -3,6 +3,7 @@ export default {
   openWindow: 'open-window',
   clearCache: 'clear-cache',
   http: 'http',
+  paykit: 'paykit',
   zip: 'zip',
   unzip: 'unzip',
   // MCP channels

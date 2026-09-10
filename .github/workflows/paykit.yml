@@ -1,0 +1,57 @@
+name: Paykit
+on:
+  push:
+    branches: [master, 'codex/flow-vibe-*']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - name: Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component clippy,rustfmt && rustup default 1.96.0
+      - name: Native build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake clang libclang-dev pkg-config libssl-dev
+      - name: Format
+        run: cargo fmt --manifest-path paykit/Cargo.toml --check
+      - name: Clippy
+        run: cargo clippy --manifest-path paykit/Cargo.toml --locked --all-targets -- -D warnings
+      - name: Unit and API tests
+        run: cargo test --manifest-path paykit/Cargo.toml --locked
+      - name: Documentation
+        run: cargo doc --manifest-path paykit/Cargo.toml --locked --no-deps
+  scenarios:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6.0.3
+      - uses: actions/setup-node@v6.4.0
+        with:
+          node-version: 20
+      - name: Harness failure guards
+        run: node --test scripts/paykit-harness.test.js
+      - name: Build local service
+        run: docker build -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
+      - name: Real Pubky and PostgreSQL scenarios
+        id: scenarios
+        run: node scripts/paykit-ci.js
+      - name: Require complete scenario report
+        env:
+          PAYKIT_REPORT_ROOT: ${{ steps.scenarios.outputs.artifact-root }}
+        run: node scripts/paykit-ci.js --verify-report "$PAYKIT_REPORT_ROOT"
+      - name: Public diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paykit-scenarios
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/polar-paykit-ci-*/report.json
+            ${{ runner.temp }}/polar-paykit-ci-*/resources.json
+            ${{ runner.temp }}/polar-paykit-ci-*/progress.json

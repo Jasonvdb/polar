@@ -1,0 +1,39 @@
+[workspace]
+members = ["."]
+resolver = "2"
+
+[package]
+name = "polar-paykit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+async-trait = "0.1"
+async-stream = "0.3"
+axum = "0.8"
+chacha20poly1305 = "0.10"
+ciborium = "0.2"
+fs2 = "0.4"
+hex = "0.4"
+libc = "0.2"
+paykit-sdk = { git = "https://github.com/pubky/paykit-rs", rev = "5ef8caf8d9a812f571a954fd3b7afe5ef22fd10f" }
+paykit-lib = { git = "https://github.com/pubky/paykit-rs", rev = "5ef8caf8d9a812f571a954fd3b7afe5ef22fd10f" }
+pubky = "=0.11.0"
+pubky-testnet = "=0.11.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+strip = true
