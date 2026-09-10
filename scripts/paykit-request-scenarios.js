@@ -24,7 +24,17 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   const link = async (a, b) => {
     if ((await view(a)).links.some(l => l.peerPublicKey === owner(b) && l.peerReceiverPath === b.path && l.state === 'linked')) return;
     await command('link.initiate', peer(a, b)); await command('link.accept', peer(b, a));
-    await wait(s => [a, b].every((r, i) => workspace(s, r).links.some(l => l.peerPublicKey === owner(i ? a : b) && l.state === 'linked')));
+    await wait(s => [a, b].every((r, i) => workspace(s, r).links.some(l => l.peerPublicKey === owner(i ? a : b) && l.peerReceiverPath === (i ? a : b).path && l.state === 'linked')));
+  };
+  const unlinkLocally = async (local, remote) => {
+    await command('link.block', peer(local, remote));
+    await command('link.unblock', peer(local, remote));
+    assert.equal((await view(local)).links.find(l => l.peerPublicKey === owner(remote) && l.peerReceiverPath === remote.path).state, 'notLinked');
+  };
+  const relinkAfterRestart = async (local, remote) => {
+    await command('receiver.restart', { receiverId: local.id });
+    await unlinkLocally(remote, local);
+    await link(local, remote);
   };
   const proposal = async (payee = bob, payer = alice, amountSats = '5000', method = ONCHAIN, expirySeconds = 600, prepare = true) => {
     if (prepare) await publish(payee, method, amountSats);
@@ -80,17 +90,28 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
 
   const chainId = await proposal();
   await command('proof.submit', { receiverId: alice.id, requestId: chainId, proof: { method: ONCHAIN, txid: 'ab'.repeat(32), outputIndex: 0 } }, randomUUID(), 'failed');
-  await command('receiver.restart', { receiverId: alice.id });
+  await unlinkLocally(alice, bob);
+  await command('request.accept', { receiverId: alice.id, requestId: chainId }, randomUUID(), 'failed');
+  assert.equal((await view(alice)).requests.find(r => r.id === chainId).lifecycle, 'proposed');
+  await relinkAfterRestart(alice, bob);
+  await command('request.accept', { receiverId: alice.id, requestId: chainId });
   await command('request.accept', { receiverId: alice.id, requestId: chainId });
   await wait(s => workspace(s, bob).requests.find(r => r.id === chainId)?.lifecycle === 'accepted');
   const chain = await execute(chainId); assert.equal(chain.execution.status, 'succeeded');
   await command('proof.submit', { receiverId: alice.id, requestId: chainId, proof: { method: BOLT11, paymentHash: 'cd'.repeat(32), preimage: 'ef'.repeat(32) } }, randomUUID(), 'failed');
-  await command('receiver.restart', { receiverId: alice.id });
-  assert(!(await view(alice)).proofs.some(p => p.requestId === chainId), 'Rejected premature and wrong-rail proofs must leave the original paid request available for its correct proof');
+  await unlinkLocally(alice, bob);
+  await command('proof.submit', { receiverId: alice.id, requestId: chainId, executionId: chain.execution.id }, randomUUID(), 'failed');
+  assert.equal((await view(alice)).requests.find(r => r.id === chainId).lifecycle, 'accepted');
+  await relinkAfterRestart(alice, bob);
+  assert(!(await view(alice)).proofs.some(p => p.requestId === chainId), 'Rejected premature, wrong-rail and unlinked proofs must leave the original paid request available for its correct proof');
   let tx = await fixture.core('getrawtransaction', [chain.execution.txid, true]);
   assert.equal(String(tx.vout[chain.execution.outputIndex].value), '0.00005'); assert.equal(tx.vout[chain.execution.outputIndex].scriptPubKey.address, chain.execution.endpoint);
   assert.equal(tx.confirmations || 0, 0); stage('onchain-execution');
-  const chainProof = await submit(chainId, chain.execution); assert.equal((await verify(chainId, chainProof)).status, 'pending');
+  const chainProof = await submit(chainId, chain.execution);
+  await command('proof.submit', { receiverId: alice.id, requestId: chainId, executionId: chain.execution.id });
+  assert.equal((await view(alice)).proofs.filter(p => p.requestId === chainId).length, 1);
+  assert.equal((await view(bob)).proofs.filter(p => p.requestId === chainId).length, 1);
+  assert.equal((await verify(chainId, chainProof)).status, 'pending');
   await mine(1); assert.equal((await verify(chainId, chainProof, 2)).status, 'pending');
   await mine(1); assert.equal((await verify(chainId, chainProof, 2)).status, 'verified');
   await publish(bob, ONCHAIN, '7777');

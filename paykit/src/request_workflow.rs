@@ -8,8 +8,8 @@ use crate::{
     wallet_execution::{self, SpendState},
 };
 use paykit_sdk::{
-    PaykitReceiverPath, PaymentRequestLifecycleState, PaymentRequestLocalRole,
-    PaymentRequestRecord, PubkyPublicKey,
+    storage::StorageAdapter, LinkedPeerState, PaykitReceiverPath, PaymentRequestLifecycleState,
+    PaymentRequestLocalRole, PaymentRequestRecord, PubkyPublicKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -182,6 +182,45 @@ impl Runtime {
         }
         Ok(bindings)
     }
+    /// The pinned SDK has no public combined private-send readiness query. Mirror
+    /// its identity + linked-peer/snapshot predicate before our one-shot intent.
+    /// This inspects local readiness only: offline peers and paused delivery may queue.
+    async fn ensure_request_send_ready(&self, record: &PaymentRequestRecord) -> anyhow::Result<()> {
+        let identity = self.sdk.identity_status().await?;
+        let linked = self
+            .storage
+            .transaction(|tx| {
+                Ok(tx
+                    .linked_peer(&record.counterparty, &record.counterparty_receiver_path)
+                    .is_some_and(|peer| peer.state == LinkedPeerState::Linked)
+                    && tx
+                        .encrypted_link_state(
+                            &record.counterparty,
+                            &record.counterparty_receiver_path,
+                        )
+                        .and_then(|state| state.link_snapshot)
+                        .is_some())
+            })
+            .await?;
+        if !linked
+            || self.state.uncertain_peers.contains(&(
+                record.counterparty.to_string(),
+                record.counterparty_receiver_path.to_string(),
+            ))
+        {
+            return Err(crate::model::PublicError::new("request_link_required", "Relink this peer and finish local link recovery before sending a request response or payment proof.").into());
+        }
+        if !identity.is_some_and(|identity| {
+            identity.public_key.is_some() && identity.live_session_available
+        }) {
+            return Err(crate::model::PublicError::new(
+                "request_session_required",
+                "Restore the receiver session before sending a request response or payment proof.",
+            )
+            .into());
+        }
+        Ok(())
+    }
     async fn transition_request(&self, c: &Command) -> anyhow::Result<()> {
         let i: Request = serde_json::from_value(c.input.clone())?;
         let record = self.request_record(i.request_id).await?;
@@ -193,6 +232,7 @@ impl Runtime {
         if already {
             return Ok(());
         }
+        self.ensure_request_send_ready(&record).await?;
         let mut local = self.request_state()?;
         let transition = format!("{}:{}", c.command, record.payment_request_id);
         anyhow::ensure!(
@@ -352,6 +392,7 @@ impl Runtime {
             );
             return Ok(());
         }
+        self.ensure_request_send_ready(&record).await?;
         checkpoint_proof(&self.vault, c.command_id, &record, &proof)?;
         self.sdk
             .submit_payment_proof(
@@ -824,6 +865,314 @@ mod binding_tests {
             assert!(checkpoint_proof(&vault, Uuid::new_v4(), &record, &proof).is_err());
         }
         assert!(vault
+            .load::<RequestState>("requests.cbor")
+            .unwrap()
+            .is_none());
+    }
+    fn request_runtime(directory: &std::path::Path, receiver_id: Uuid, accepted: bool) -> Runtime {
+        use crate::storage::{ReceiverStorage, Vault};
+        use paykit_sdk::storage::{
+            OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageState,
+        };
+        use std::sync::Arc;
+        let vault =
+            Arc::new(Vault::new(directory.into(), [24; 32], "request-readiness".into()).unwrap());
+        let owner =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[27; 32]).public_key());
+        let peer =
+            PubkyPublicKey::from_public_key(&pubky::Keypair::from_secret(&[28; 32]).public_key());
+        let receiver_path = PaykitReceiverPath::new("fixture/wallet").unwrap();
+        if !directory.join("sdk.cbor").exists() {
+            let now = chrono::Utc::now();
+            let id = paykit_lib::PaymentRequestId::new_v4();
+            let terms = paykit_lib::PaymentRequestTerms {
+                amount: paykit_lib::PaymentAmount::new("5000", "sat").unwrap(),
+                payment_reference: paykit_lib::PaymentReference::new("readiness-regression")
+                    .unwrap(),
+                proposal_expires_at: None,
+                recurrence: None,
+                accepted_payment_endpoint_identifiers: vec![
+                    paykit_lib::PaymentEndpointIdentifier::new(ONCHAIN).unwrap(),
+                ],
+                metadata: Default::default(),
+            };
+            let proposal = paykit_lib::serialize_payment_request_event(
+                &paykit_lib::PaymentRequestEvent::Request(paykit_lib::PaymentRequest::new(
+                    paykit_lib::EventId::new_v4(),
+                    id.clone(),
+                    terms,
+                )),
+            )
+            .unwrap();
+            let mut state = StorageState {
+                identity_state: Some(paykit_sdk::IdentityState {
+                    local_pubky_public_key: Some(owner.clone()),
+                    local_receiver_noise_public_key: Some(owner.clone()),
+                    initialized_at: now,
+                    sign_out_generation: 0,
+                }),
+                ..Default::default()
+            };
+            let kind = serde_json::from_str::<Value>(&proposal).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            state.private_stream_items.push(PrivateStreamItemRecord {
+                stream_item_id: 1,
+                counterparty: peer.clone(),
+                counterparty_receiver_path: receiver_path.clone(),
+                receive_batch_id: 1,
+                raw_json: proposal,
+                parsed_version: Some(1),
+                parsed_kind: Some(kind.clone()),
+                known_paykit_kind: Some(kind),
+                parse_status: paykit_sdk::PrivateStreamParseStatus::Valid,
+                parse_error: None,
+                received_at: now,
+            });
+            state.next_private_stream_item_id = 2;
+            if accepted {
+                let raw = paykit_lib::serialize_payment_request_event(
+                    &paykit_lib::PaymentRequestEvent::Acceptance(
+                        paykit_lib::PaymentRequestAcceptance::new(
+                            paykit_lib::EventId::new_v4(),
+                            id,
+                        ),
+                    ),
+                )
+                .unwrap();
+                let kind = serde_json::from_str::<Value>(&raw).unwrap()["kind"]
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                state
+                    .outbound_private_messages
+                    .push(OutboundPrivateMessageRecord {
+                        outbound_message_id: 1,
+                        counterparty: peer.clone(),
+                        counterparty_receiver_path: receiver_path.clone(),
+                        kind,
+                        raw_json: raw,
+                        status: paykit_sdk::OutboundPrivateMessageStatus::Sent,
+                        attempt_count: 1,
+                        created_at: now,
+                        updated_at: now,
+                        last_attempt_at: Some(now),
+                        sent_at: Some(now),
+                        last_error: None,
+                    });
+            }
+            vault.save("sdk.cbor", &state).unwrap();
+        }
+        let storage = Arc::new(
+            ReceiverStorage::open(
+                Vault::new(directory.into(), [24; 32], "request-readiness".into()).unwrap(),
+            )
+            .unwrap(),
+        );
+        let provider = crate::receiver::SessionProvider::without_access(vault.clone());
+        let payments = crate::wallet_adapter::WalletAdapter::open(
+            vault.clone(),
+            receiver_id,
+            owner.to_string(),
+        )
+        .unwrap();
+        let sdk = paykit_sdk::PaykitSdk::new(
+            storage.clone(),
+            provider.clone(),
+            payments.clone(),
+            paykit_sdk::PaykitSdkConfig::new(receiver_path),
+        )
+        .unwrap();
+        Runtime::new(sdk, storage, vault, receiver_id, owner, provider, payments).unwrap()
+    }
+    async fn seed_readiness(
+        runtime: &Runtime,
+        record: &PaymentRequestRecord,
+        state: LinkedPeerState,
+        snapshot: bool,
+    ) {
+        runtime
+            .storage
+            .transaction(|tx| {
+                tx.save_linked_peer(paykit_sdk::storage::LinkedPeerRecord {
+                    counterparty: record.counterparty.clone(),
+                    counterparty_receiver_path: record.counterparty_receiver_path.clone(),
+                    state,
+                    last_sync_at: None,
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                tx.save_encrypted_link_state(paykit_sdk::storage::EncryptedLinkStateRecord {
+                    counterparty: record.counterparty.clone(),
+                    counterparty_receiver_path: record.counterparty_receiver_path.clone(),
+                    link_snapshot: snapshot.then_some(vec![1]),
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 1,
+                    checkpointed_at: chrono::Utc::now(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+    }
+    #[tokio::test]
+    async fn actual_sdk_block_unblock_rejects_proof_and_transition_before_checkpoint_across_reopen()
+    {
+        for accepted in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let receiver_id = Uuid::new_v4();
+            let mut runtime = request_runtime(dir.path(), receiver_id, accepted);
+            let record = runtime.sdk.payment_requests().await.unwrap().remove(0);
+            seed_readiness(&runtime, &record, LinkedPeerState::Linked, true).await;
+            runtime
+                .sdk
+                .block_peer(
+                    record.counterparty.clone(),
+                    record.counterparty_receiver_path.clone(),
+                )
+                .await
+                .unwrap();
+            runtime
+                .sdk
+                .unblock_peer(
+                    record.counterparty.clone(),
+                    record.counterparty_receiver_path.clone(),
+                )
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                let retained = runtime.sdk.payment_requests().await.unwrap().remove(0);
+                assert!(
+                    retained.state
+                        == if accepted {
+                            PaymentRequestLifecycleState::Accepted
+                        } else {
+                            PaymentRequestLifecycleState::Proposed
+                        }
+                );
+                assert_eq!(retained.payment_proofs.len(), 0);
+                assert_eq!(
+                    runtime.sdk.linked_peers().await.unwrap()[0].state,
+                    LinkedPeerState::NotLinked
+                );
+                let command = Command {
+                    command_id: Uuid::new_v4(),
+                    command: if accepted {
+                        "proof.submit"
+                    } else {
+                        "request.accept"
+                    }
+                    .into(),
+                    input: if accepted {
+                        json!({"receiverId":receiver_id,"requestId":record.payment_request_id,"proof":{"method":ONCHAIN,"txid":"ab".repeat(32),"outputIndex":0}})
+                    } else {
+                        json!({"receiverId":receiver_id,"requestId":record.payment_request_id})
+                    },
+                };
+                let error = if accepted {
+                    runtime.submit_proof(&command).await
+                } else {
+                    runtime.transition_request(&command).await
+                }
+                .unwrap_err();
+                assert_eq!(
+                    error
+                        .downcast_ref::<crate::model::PublicError>()
+                        .unwrap()
+                        .code,
+                    "request_link_required"
+                );
+                assert!(runtime
+                    .vault
+                    .load::<RequestState>("requests.cbor")
+                    .unwrap()
+                    .is_none());
+                let count = runtime
+                    .storage
+                    .transaction(|tx| Ok(tx.export_storage_state().outbound_private_messages.len()))
+                    .await
+                    .unwrap();
+                assert_eq!(count, usize::from(accepted));
+                drop(runtime);
+                runtime = request_runtime(dir.path(), receiver_id, accepted);
+            }
+            if accepted {
+                // Existing SDK acceptance acknowledgments remain idempotent with no active link/session.
+                let command = Command {
+                    command_id: Uuid::new_v4(),
+                    command: "request.accept".into(),
+                    input: json!({"receiverId":receiver_id,"requestId":record.payment_request_id}),
+                };
+                runtime.transition_request(&command).await.unwrap();
+                assert!(runtime
+                    .vault
+                    .load::<RequestState>("requests.cbor")
+                    .unwrap()
+                    .is_none());
+            }
+        }
+    }
+    #[tokio::test]
+    async fn request_readiness_requires_actual_snapshot_session_and_local_recovery_clearance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = request_runtime(dir.path(), Uuid::new_v4(), true);
+        let record = runtime.sdk.payment_requests().await.unwrap().remove(0);
+        for (state, snapshot) in [
+            (LinkedPeerState::NotLinked, true),
+            (LinkedPeerState::Linking, true),
+            (LinkedPeerState::RecoveryRequired, true),
+            (LinkedPeerState::Blocked, true),
+            (LinkedPeerState::Linked, false),
+        ] {
+            seed_readiness(&runtime, &record, state, snapshot).await;
+            let error = runtime
+                .ensure_request_send_ready(&record)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                error
+                    .downcast_ref::<crate::model::PublicError>()
+                    .unwrap()
+                    .code,
+                "request_link_required"
+            );
+        }
+        seed_readiness(&runtime, &record, LinkedPeerState::Linked, true).await;
+        let error = runtime
+            .ensure_request_send_ready(&record)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::model::PublicError>()
+                .unwrap()
+                .code,
+            "request_session_required"
+        );
+        runtime.state.uncertain_peers.push((
+            record.counterparty.to_string(),
+            record.counterparty_receiver_path.to_string(),
+        ));
+        let error = runtime
+            .ensure_request_send_ready(&record)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<crate::model::PublicError>()
+                .unwrap()
+                .code,
+            "request_link_required"
+        );
+        assert!(runtime
+            .vault
             .load::<RequestState>("requests.cbor")
             .unwrap()
             .is_none());

@@ -250,8 +250,12 @@ creates a replacement invoice/payment for an uncertain attempt.
 `{method:"btc-onchain",txid,outputIndex}` or
 `{method:"btc-lightning-bolt11",paymentHash,preimage}`. The pinned SDK owns event IDs,
 queueing, delivery and lifecycle derivation. Payer role, accepted lifecycle, supported
-terms and accepted rail are validated before reserving the proof checkpoint. Rejected
-preflight input can be corrected after restart; uncertain SDK writes retain their
+terms and accepted rail are validated before reserving the proof checkpoint. New
+request responses and proofs also require a live local session, an SDK Linked peer
+with an active snapshot, and no unresolved local link recovery. Failed readiness
+checks leave no request/proof checkpoint; remote availability and paused delivery
+do not prevent queueing.
+Rejected preflight input can be corrected after restart; uncertain SDK writes retain their
 checkpoint until reconciled. Persisted application correlation and
 existing SDK records recover interrupted event submission without regenerating an
 event. `proof.verify` runs at the payee: Core transaction output script and amount
