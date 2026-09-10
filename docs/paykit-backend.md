@@ -80,3 +80,41 @@ Inside the service's network namespace, `polar-paykit inspect-marker OWNER_PUBLI
 Run `cargo fmt --manifest-path paykit/Cargo.toml --check`, `cargo clippy --manifest-path paykit/Cargo.toml --locked --all-targets -- -D warnings`, `cargo test --manifest-path paykit/Cargo.toml --locked` and `cargo doc --manifest-path paykit/Cargo.toml --locked --no-deps`.
 
 The unit/API suite starts no services. Real scenarios additionally create participants and both Bob receivers, inspect Pubky markers, independently restart a receiver, restart the full service, verify names/identities/markers/SDK grants, retry commands and preserve a second environment throughout. Network archives containing Paykit are currently rejected until the encrypted recovery format ships.
+
+## Encrypted links, profiles and contacts
+
+Receiver processes now own a bounded stdin/stdout command channel. The supervisor continuously consumes typed public workspace updates and command replies; no second process opens the SDK writer. Each receiver persists its pause setting, profile cache, owned avatar references and command outcomes in authenticated `workspace.cbor`. SDK transactions that change no state do not rewrite the encrypted SDK file. Public workspace events are emitted only when their content changes.
+
+The v1 workspace commands are:
+
+| Commands                                                                                           | Input                                                      |
+| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| `link.initiate`, `link.accept`, `link.advance`, `link.block`, `link.unblock`, `link.sendEmptyList` | `{receiverId,peerPublicKey,peerReceiverPath}`              |
+| `delivery.pause`, `delivery.resume`, `delivery.sync`, `profile.delete`                             | `{receiverId}`                                             |
+| `profile.publish`                                                                                  | `{receiverId,displayName,about,avatarBase64?,avatarMime?}` |
+| `profile.fetch`, `contact.publish`, `contact.unpublish`                                            | `{receiverId,peerPublicKey,peerReceiverPath}`              |
+| `contact.save`                                                                                     | `{receiverId,peerPublicKey,label,receiverPaths}`           |
+| `contact.remove`, `contact.discover`                                                               | `{receiverId,peerPublicKey}`                               |
+
+Peer keys must be canonical Pubky z-base32 public keys. Receiver paths follow the pinned SDK grammar: a 1–64 character lowercase ASCII letter/digit/hyphen app segment other than `private`, followed by `/wallet` or `/server`. Discovery only lists real public receiver markers; it never saves contacts or accepts a link. Same-owner encrypted links are rejected.
+
+Initiation and acceptance are explicit. Background work advances existing linking peers and uses the SDK durable send queue and receive cursor for linked peers. It never automatically initiates a peer, unblocks a peer, or restarts a recovery-required handshake. Pause persists across restarts and prevents both outbound publication and inbound receipt; an empty list may still be queued while paused. `delivery.sync` fails visibly until resumed. Blocking clears the SDK link; unblocking requires explicit new linking.
+
+`link.sendEmptyList` demonstrates the actual encrypted Private Payment List protocol with zero payment endpoints. Its string `outboundMessageId` identifies durable queue acceptance. `lastSentMessageId` is projected only from an SDK record with successful sent status and timestamp; the recipient independently exposes `latestReceivedListId`. These identifiers are strings to preserve full u64 precision. No payment execution or funded wallets ship in this increment.
+
+Receiver intent is committed before SDK effects and its terminal result before emitting a reply. Identical receiver command IDs return the saved result. If the receiver was interrupted before recording its result, the intent fails visibly and affected private peers require explicit relinking. If the child completed but the supervisor did not record completion, supervisor restart marks the old operation `reconciliation_required`; it does not blindly dispatch it again. Keep the original ID and inspect receiver state. The deterministic unit test covers this exact persisted child-result/lost-supervisor-reply boundary; it does not claim a physical power-loss test.
+
+Profiles and public contact markers use the existing receiver-scoped SDK namespace and grants. Saved contact labels stay local. Public sharing requires an explicit command and only one marker path per contact may be public or uncertain; unpublish before switching/removing that path. Failed publication/removal remains visible instead of being reported private.
+
+Avatar publication accepts decoded PNG/JPEG files up to 256 KiB, at most 1024×1024 pixels, with a 16 MiB decoder allocation limit (`image` 0.25.10, PNG/JPEG features only). Invalid/truncated content and MIME mismatches are rejected before command acceptance. Omitting both avatar fields retains the previous reference; both empty removes it. Obsolete blobs are deleted only from tracked owned references through the SDK scoped blob API; cleanup errors fail the operation visibly. Fetched previews are actual bounded public blob reads under the advertised owner's receiver namespace, validated again and returned as at most 48×48 PNG thumbnail data URLs (aspect preserved, encoded data URL at most 16 KiB). Original published bytes and Pubky URIs remain unchanged. Arbitrary HTTP/file targets never load in the renderer. Public profile lookup distinguishes a missing profile from a failed fetch and preserves old cache on transport failure.
+
+Additional diagnostics inside the service namespace:
+
+- `inspect-private-list RECEIVER_UUID PEER_KEY PEER_PATH` requires the receiver stopped and its exclusive lock. It reports only valid list count, latest stream item ID and endpoint count from the actual SDK store.
+- `inspect-contact OWNER_KEY RECEIVER_PATH PEER_KEY PEER_PATH` reads the real public contact marker and returns its public fields and whether an unexpected local label was present.
+
+The cumulative real scenario runner retains all eleven environment stages and adds explicit links to both Bob receivers, queue/publication/receive evidence, offline delivery, independent inbound/outbound pause with restart, blocking, actual PNG/JPEG profile fetch, contact discovery/edit/sharing/cleanup and receiver-state persistence. CI validates the complete ordered stage list and cleanup report; a skipped stage cannot count as passing.
+
+Read caches retain the 16 most recent fetched profiles and 64 discovery results. Saved contacts and linked peers are never silently evicted: each receiver permits 128 contacts and 64 peer records, with visible limit errors before creating more. Existing records remain editable at the limit. This bounds receiver IPC previews independently of original avatar size.
+
+`inspect-avatar OWNER_KEY RECEIVER_PATH BLOB_NAME` reads one scoped original public avatar with the same size/content validation and returns its MIME, size and public base64 bytes (or `exists:false`). Real scenarios compare those bytes to the uploaded fixtures independently of thumbnail rendering.

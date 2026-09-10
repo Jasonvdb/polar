@@ -138,3 +138,81 @@ describe('Main process Paykit boundary', () => {
     }
   });
 });
+
+describe('Recursive public receiver projection', () => {
+  const injected = { secretKey: 'hidden' };
+  const workspace = {
+    receiverId: 'receiver',
+    deliveryPaused: true,
+    session: injected,
+    links: [
+      {
+        peerPublicKey: 'peer',
+        peerReceiverPath: 'app/wallet',
+        state: 'linked',
+        pendingMessages: 2,
+        latestReceivedListId: '18446744073709551615',
+        handshake: injected,
+        lastError: injected,
+      },
+    ],
+    profile: {
+      displayName: 'Alice',
+      about: 'Public bio',
+      imageUri: 'pubky://public/avatar',
+      avatarDataUrl: 'https://evil.test/tracker',
+      session: injected,
+    },
+    profiles: [
+      {
+        displayName: 'Bob',
+        about: injected,
+        avatarDataUrl: 'data:image/svg+xml;base64,PHN2Zz4=',
+        receiptKey: 'hidden',
+      },
+    ],
+    contacts: [
+      {
+        peerPublicKey: 'peer',
+        label: 'Local label',
+        publicSharing: 'public',
+        receiverPaths: ['app/wallet', injected],
+        session: injected,
+      },
+    ],
+    discoveries: [
+      { peerPublicKey: 'peer', receiverPaths: ['app/server', injected], raw: injected },
+    ],
+  };
+  it('projects state and operation workspaces recursively, including arrays and scalar injection', () => {
+    const raw = {
+      apiVersion: 1,
+      environmentId: envId,
+      participants: [],
+      receivers: [],
+      operations: [],
+      receiverWorkspaces: [workspace],
+    };
+    const projected = publicState(raw, envId);
+    const operation = publicOperation({
+      id: 'o',
+      result: {
+        receiverId: injected,
+        outboundMessageId: '18446744073709551615',
+        workspace,
+        snapshot: injected,
+      },
+    });
+    for (const value of [projected, operation]) {
+      const text = JSON.stringify(value);
+      expect(text).not.toContain('hidden');
+      expect(text).not.toContain('evil.test');
+      expect(text).not.toContain('svg');
+      expect(text).toContain('18446744073709551615');
+    }
+    expect(projected.receiverWorkspaces[0].contacts[0].receiverPaths).toEqual([
+      'app/wallet',
+    ]);
+    expect(operation.result).not.toHaveProperty('receiverId');
+  });
+});

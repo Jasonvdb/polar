@@ -1,5 +1,9 @@
 import { thunk } from 'easy-peasy';
-import { PaykitCommandRequest, paykitCommands } from 'shared/paykitApi';
+import {
+  PaykitCommandRequest,
+  paykitCommands,
+  paykitCommandFields,
+} from 'shared/paykitApi';
 import { RootModel } from 'store/models';
 import { StoreInjections } from 'types';
 import { paykitService } from 'lib/paykit/paykitService';
@@ -32,7 +36,13 @@ export const paykitDefinition: McpToolDefinition = {
           input: {
             type: 'object',
             description:
-              'participant.create: name; participant.rename: participantId,name; receiver.create: participantId,name,kind(wallet|server); receiver.rename: receiverId,name; receiver.start/stop/restart: receiverId; preset.create: empty object.',
+              Object.entries(paykitCommandFields)
+                .map(
+                  ([command, fields]) =>
+                    `${command}: ${fields.join(', ') || 'empty object'}`,
+                )
+                .join('; ') +
+              '. receiverPaths is a string array; other fields are strings. profile.publish avatar fields are optional together: absent retains, both empty removes; otherwise PNG/JPEG base64 up to 256 KiB. Peer paths must be explicit. link.sendEmptyList queues an encrypted list without payment endpoints. delivery.sync respects pause. Public contact sharing is explicit via contact.publish; unpublish before removing a shared contact or path. Unblock requires explicit relinking.',
           },
         },
       },

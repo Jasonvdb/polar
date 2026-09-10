@@ -84,3 +84,81 @@ describe('Paykit workspace', () => {
     );
   });
 });
+
+it('resets receiver drafts on selection and preserves uncertain peer-command identity across edits', async () => {
+  const participantId = newPaykitId();
+  const firstId = newPaykitId();
+  const secondId = newPaykitId();
+  service.state.mockResolvedValue({
+    ...state,
+    participants: [{ id: participantId, name: 'Bob', publicKey: 'y'.repeat(52) }],
+    receivers: [firstId, secondId].map((id, index) => ({
+      id,
+      participantId,
+      name: `Receiver ${index + 1}`,
+      path: `bob${index}/wallet`,
+      status: 'running' as const,
+      generation: 1,
+      noisePublicKey: 'public',
+    })),
+    receiverWorkspaces: [firstId, secondId].map(receiverId => ({
+      receiverId,
+      deliveryPaused: false,
+      links: [],
+      profiles: [],
+      contacts: [],
+      discoveries: [],
+    })),
+  });
+  service.command
+    .mockRejectedValueOnce(new Error('Paykit service is unavailable'))
+    .mockResolvedValueOnce({ operationId: newPaykitId() });
+  const view = setup();
+  await waitFor(() =>
+    expect(
+      view.getByText('Create Alice / Bob / Carol preset').closest('button'),
+    ).not.toBeDisabled(),
+  );
+  const select = (label: string, text: string) => {
+    fireEvent.mouseDown(
+      view.getAllByLabelText(label).find(element => element.tagName === 'INPUT')!,
+    );
+    fireEvent.click(view.getByText(text));
+  };
+  select('Participant', 'Bob');
+  select('Receiver', 'Receiver 1 (running)');
+  fireEvent.change(view.getByLabelText('Link peer public key'), {
+    target: { value: 'y'.repeat(52) },
+  });
+  fireEvent.change(view.getByLabelText('Profile display name'), {
+    target: { value: 'Draft for first receiver' },
+  });
+  fireEvent.change(view.getByLabelText('Contact label'), {
+    target: { value: 'Private first draft' },
+  });
+  select('Receiver', 'Receiver 2 (running)');
+  expect(view.getByLabelText('Link peer public key')).toHaveValue('');
+  expect(view.getByLabelText('Profile display name')).toHaveValue('');
+  expect(view.getByLabelText('Contact label')).toHaveValue('');
+  fireEvent.change(view.getByLabelText('Link peer public key'), {
+    target: { value: 'y'.repeat(52) },
+  });
+  fireEvent.change(view.getByLabelText('Link peer receiver path'), {
+    target: { value: 'alice/wallet' },
+  });
+  fireEvent.click(view.getByText('Initiate link'));
+  await view.findByText('Retry command');
+  expect(view.getByText('Pause private delivery').closest('button')).toBeDisabled();
+  expect(view.getByText('Initiate link').closest('button')).toBeDisabled();
+  fireEvent.change(view.getByLabelText('Link peer receiver path'), {
+    target: { value: 'carol/server' },
+  });
+  fireEvent.click(view.getByText('Retry command'));
+  await waitFor(() => expect(service.command).toHaveBeenCalledTimes(2));
+  expect(service.command.mock.calls[0]).toEqual(service.command.mock.calls[1]);
+  expect(service.command.mock.calls[1][1].input).toEqual({
+    receiverId: secondId,
+    peerPublicKey: 'y'.repeat(52),
+    peerReceiverPath: 'alice/wallet',
+  });
+});

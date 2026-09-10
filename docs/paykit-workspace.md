@@ -65,3 +65,59 @@ Polar does not generate a replacement identity for an existing environment.
 Deleting a network deletes its Paykit data and credentials after stopping it.
 Paykit export and import are deliberately unavailable until validated Backup and
 Recovery is implemented. Ordinary Polar network archives remain supported.
+
+## Encrypted links and private delivery
+
+Select a participant and a running receiver to open **Encrypted links** and
+**Profiles / Contacts**. Changing receivers clears unfinished drafts. Every
+command remains scoped to the selected receiver, including retries after an
+uncertain submission.
+
+Choose a local peer receiver or enter its public key and full receiver path.
+Paths have the form `application/wallet` or `application/server`; the application
+uses lowercase letters, digits and hyphens. Initiate a link on one receiver and
+accept it on the peer. **Advance link** explicitly advances setup. Links show
+handshake state, generation, failures and recovery requirements. Blocking stops
+that peer; unblocking requires explicit relinking.
+
+**Pause private delivery** persists the receiver-wide inbound/outbound pause.
+It retains links and queued messages; it does not pause link handshakes.
+**Sync private delivery** is unavailable while paused. Resume delivery to process
+pending work. **Queue empty encrypted list** demonstrates the real encrypted
+payment-list transport without payment endpoints. Queued messages, an observed
+published message and the latest received list have separate displays. Acceptance
+of a command alone is not proof of delivery. Stop/start a receiver to exercise
+outages while its peer remains available.
+
+## Public profiles, avatars and local contacts
+
+Edit a display name and biography, choose to retain, replace or remove the
+avatar, then select **Publish profile**. PNG and JPEG uploads must be at most
+256 KiB, at most 1024 × 1024 pixels, and decode as images before submission. The workbench shows supported
+public avatar previews and the stored Pubky URI. It never loads arbitrary remote
+image URLs. **Edit published profile** loads the current public text into the
+form; **Delete published profile** removes this receiver's publication. Operation
+failures, including obsolete-avatar cleanup failures, remain visible.
+
+Enter a contact public key, a local label and receiver paths (one per line), then
+**Save local contact**. **Discover receiver paths** queries public markers without
+automatically saving or linking. Use the discovered paths in a draft, or edit an
+existing contact. **Fetch public profile** requires a separate, explicit target
+receiver path and can also fetch your own publication. Fetched profiles remain
+associated with both the public key and receiver path.
+
+Contacts start private. **Share contact publicly** explicitly publishes the
+selected contact/path in this receiver's namespace. Labels remain local. Sharing
+status distinguishes private, publishing, public, removing and error; pending or
+failed work can still have a public marker. Unpublish the current shared path
+before publishing another path, removing it from the contact or deleting the
+contact. **Unpublish contact** uses the recorded shared path even if the draft
+target has changed.
+
+MCP and CLI expose the same `link.*`, `delivery.*`, `profile.*` and `contact.*`
+commands. MCP metadata lists exact input fields; `receiverPaths` is a string
+array, all other inputs are strings. `profile.publish` omits both avatar fields
+to retain an image, sends both as empty strings to remove it, or sends
+`avatarBase64` with `avatarMime` for a replacement. Query state or the accepted
+operation ID for results. Public results are projected recursively by Electron;
+SDK sessions, private keys and storage snapshots are never forwarded.

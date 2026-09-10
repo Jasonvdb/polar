@@ -132,6 +132,7 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, signa
     await command('receiver.restart', { receiverId: wallet.id });
     inspectMarker(wallet);
   }
+  await require('./paykit-workspace-scenarios').run({ initial, state, command, request, stage, docker, serviceContainer, signal });
   stage('complete');
   return { stages, environmentId: initial.environmentId, participantKeys: initial.participants.map(p => p.publicKey), receiverNoiseKeys: initial.receivers.map(r => r.noisePublicKey), passed: true };
 }

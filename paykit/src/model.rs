@@ -46,7 +46,7 @@ pub enum OperationStatus {
     Succeeded,
     Failed,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PublicError {
     pub code: String,
     pub message: String,
@@ -79,6 +79,7 @@ pub struct Event {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicState {
+    pub receiver_workspaces: Vec<crate::workspace_model::Workspace>,
     pub api_version: u8,
     pub environment_id: Uuid,
     pub ready: bool,
@@ -106,6 +107,8 @@ pub struct OperationRecord {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct AppState {
+    #[serde(default)]
+    pub receiver_workspaces: Vec<crate::workspace_model::Workspace>,
     pub environment_id: Uuid,
     pub participants: Vec<OwnerRecord>,
     pub receivers: Vec<ReceiverRecord>,
@@ -116,6 +119,7 @@ impl AppState {
     pub fn new(environment_id: Uuid) -> Self {
         Self {
             environment_id,
+            receiver_workspaces: vec![],
             participants: vec![],
             receivers: vec![],
             operations: vec![],
@@ -125,6 +129,7 @@ impl AppState {
     pub fn public(&self, ready: bool) -> PublicState {
         PublicState {
             api_version: 1,
+            receiver_workspaces: self.receiver_workspaces.clone(),
             environment_id: self.environment_id,
             ready,
             participants: self.participants.iter().map(|v| v.public.clone()).collect(),
@@ -141,3 +146,10 @@ impl AppState {
         });
     }
 }
+
+impl std::fmt::Display for PublicError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for PublicError {}

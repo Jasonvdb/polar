@@ -5,6 +5,7 @@ import { createServer } from 'net';
 import { join, resolve } from 'path';
 import {
   isUuid,
+  safePaykitAvatar,
   newPaykitId,
   PaykitEnvironment,
   PaykitRequest,
@@ -209,13 +210,91 @@ async function callService(
 // Project known public fields, even if a future backend accidentally adds secrets.
 const fields = (value: any, names: string[]) =>
   Object.fromEntries(
-    names.filter(name => value[name] !== undefined).map(name => [name, value[name]]),
+    names
+      .filter(
+        name => value && ['string', 'number', 'boolean'].includes(typeof value[name]),
+      )
+      .map(name => [name, value[name]]),
   );
+const strings = (value: unknown) =>
+  Array.isArray(value) ? value.filter(item => typeof item === 'string') : [];
+const list = (value: unknown, project: (item: any) => any) =>
+  Array.isArray(value)
+    ? value.filter(item => item && typeof item === 'object').map(project)
+    : [];
+const publicProfile = (value: any) => ({
+  ...fields(value, [
+    'peerPublicKey',
+    'peerReceiverPath',
+    'displayName',
+    'about',
+    'imageUri',
+    'path',
+    'updatedAt',
+  ]),
+  ...(safePaykitAvatar(value.avatarDataUrl)
+    ? { avatarDataUrl: safePaykitAvatar(value.avatarDataUrl) }
+    : {}),
+});
+export const publicWorkspace = (value: any) => ({
+  ...fields(value, ['receiverId', 'deliveryPaused', 'lastError', 'updatedAt']),
+  links: list(value.links, item =>
+    fields(item, [
+      'peerPublicKey',
+      'peerReceiverPath',
+      'state',
+      'generation',
+      'handshakeRole',
+      'lastSyncAt',
+      'lastReceiveAt',
+      'failureCount',
+      'pendingMessages',
+      'latestReceivedListId',
+      'lastSentMessageId',
+      'lastError',
+    ]),
+  ),
+  ...(value.profile && typeof value.profile === 'object'
+    ? { profile: publicProfile(value.profile) }
+    : {}),
+  profiles: list(value.profiles, publicProfile),
+  contacts: list(value.contacts, item => ({
+    ...fields(item, [
+      'peerPublicKey',
+      'label',
+      'publicSharing',
+      'publicReceiverPath',
+      'lastError',
+    ]),
+    receiverPaths: strings(item.receiverPaths),
+  })),
+  discoveries: list(value.discoveries, item => ({
+    ...fields(item, ['peerPublicKey', 'updatedAt']),
+    receiverPaths: strings(item.receiverPaths),
+  })),
+});
 export const publicOperation = (value: any) => ({
   ...fields(value, ['id', 'command', 'status']),
   ...(value.result
     ? {
-        result: fields(value.result, ['participantId', 'receiverId', 'preset', 'funded']),
+        result: {
+          ...fields(value.result, [
+            'participantId',
+            'receiverId',
+            'preset',
+            'funded',
+            'peerPublicKey',
+            'peerReceiverPath',
+            'outboundMessageId',
+            'deliveryPaused',
+            'status',
+            'path',
+            'imageUri',
+          ]),
+          ...(value.result.workspace && typeof value.result.workspace === 'object'
+            ? { workspace: publicWorkspace(value.result.workspace) }
+            : {}),
+        },
       }
     : {}),
   ...(value.error ? { error: fields(value.error, ['code', 'message']) } : {}),
@@ -241,6 +320,7 @@ export const publicState = (value: any, environmentId: string) => {
       ]),
     ),
     operations: value.operations.map(publicOperation),
+    receiverWorkspaces: list(value.receiverWorkspaces, publicWorkspace),
   };
 };
 
