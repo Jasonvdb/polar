@@ -5,6 +5,7 @@ import { IChart } from '@mrblenny/react-flow-chart';
 import detectPort from 'detect-port';
 import { tmpdir } from 'os';
 import { ipcChannels } from 'shared';
+import { getNamespacedContainerName, paykitConfig } from 'shared/paykitConfig';
 import {
   AnyNode,
   BitcoinNode,
@@ -45,7 +46,7 @@ import { prefixTranslation } from './translate';
 const { l } = prefixTranslation('utils.network');
 
 export const getContainerName = (node: CommonNode) =>
-  `polar-n${node.networkId}-${node.name}`;
+  getNamespacedContainerName(node.networkId, node.name);
 
 export const getNetworkBackendId = (node: BitcoinNode) =>
   `${node.networkId}-${node.name}`;
@@ -1033,7 +1034,7 @@ export const importNetworkFromZip = async (
   id: number,
 ): Promise<[Network, IChart]> => {
   // extract zip to a temp folder first
-  const tmpDir = join(tmpdir(), 'polar', basename(zipPath, '.zip'));
+  const tmpDir = join(tmpdir(), paykitConfig.namespace, basename(zipPath, '.zip'));
   const ipc = createIpcSender('NetworkUtil', 'app');
   await ipc(ipcChannels.unzip, { filePath: zipPath, destination: tmpDir });
   debug(`Extracted '${zipPath}' to '${tmpDir}'`);

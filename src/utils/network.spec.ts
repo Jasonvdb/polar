@@ -184,7 +184,7 @@ describe('Network Utils', () => {
     });
 
     it('should update the rest port for bitcoind', async () => {
-      const portsInUse = [18443];
+      const portsInUse = [38443];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -198,7 +198,7 @@ describe('Network Utils', () => {
     });
 
     it('should update the p2p port for bitcoind', async () => {
-      const portsInUse = [19444];
+      const portsInUse = [39444];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -212,7 +212,7 @@ describe('Network Utils', () => {
     });
 
     it('should update the zmq block port for bitcoind', async () => {
-      const portsInUse = [28334];
+      const portsInUse = [48334];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -226,7 +226,7 @@ describe('Network Utils', () => {
     });
 
     it('should update the zmq tx port for bitcoind', async () => {
-      const portsInUse = [29335];
+      const portsInUse = [49335];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -240,19 +240,19 @@ describe('Network Utils', () => {
     });
 
     it('should update the grpc ports for lightning nodes', async () => {
-      const portsInUse = [10001];
+      const portsInUse = [30001];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
       network.nodes.bitcoin = [];
       const ports = (await getOpenPorts(network)) as OpenPorts;
       expect(ports).toBeDefined();
-      expect(ports[network.nodes.lightning[0].name].grpc).toBe(10002);
-      expect(ports[network.nodes.lightning[4].name].grpc).toBe(10005);
+      expect(ports[network.nodes.lightning[0].name].grpc).toBe(30002);
+      expect(ports[network.nodes.lightning[4].name].grpc).toBe(30005);
     });
 
     it("should not update zero'd grpc port for c-lightning nodes", async () => {
-      const portsInUse = [8182, 10001];
+      const portsInUse = [28182, 30001];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -261,56 +261,56 @@ describe('Network Utils', () => {
       (network.nodes.lightning[1] as CLightningNode).ports.grpc = 0;
       const ports = (await getOpenPorts(network)) as OpenPorts;
       expect(ports).toBeDefined();
-      expect(ports[network.nodes.lightning[1].name].rest).toBe(8183);
+      expect(ports[network.nodes.lightning[1].name].rest).toBe(28183);
       expect(ports[network.nodes.lightning[1].name].grpc).toBeUndefined();
     });
 
     it('should update the rest ports for lightning nodes', async () => {
-      const portsInUse = [8081];
+      const portsInUse = [28081];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
       network.nodes.bitcoin = [];
       const ports = (await getOpenPorts(network)) as OpenPorts;
       expect(ports).toBeDefined();
-      expect(ports[network.nodes.lightning[0].name].rest).toBe(8082);
-      expect(ports[network.nodes.lightning[4].name].rest).toBe(8085);
+      expect(ports[network.nodes.lightning[0].name].rest).toBe(28082);
+      expect(ports[network.nodes.lightning[4].name].rest).toBe(28085);
     });
 
     it('should update the p2p ports for lightning nodes', async () => {
-      const portsInUse = [9735, 9836, 9937, 9737];
+      const portsInUse = [29735, 29836, 29937, 29737];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
       network.nodes.bitcoin = [];
       const ports = (await getOpenPorts(network)) as OpenPorts;
       expect(ports).toBeDefined();
-      expect(ports[network.nodes.lightning[0].name].p2p).toBe(9736);
-      expect(ports[network.nodes.lightning[1].name].p2p).toBe(9837);
-      expect(ports[network.nodes.lightning[2].name].p2p).toBe(9938);
-      expect(ports[network.nodes.lightning[4].name].p2p).toBe(9739);
+      expect(ports[network.nodes.lightning[0].name].p2p).toBe(29736);
+      expect(ports[network.nodes.lightning[1].name].p2p).toBe(29837);
+      expect(ports[network.nodes.lightning[2].name].p2p).toBe(29938);
+      expect(ports[network.nodes.lightning[4].name].p2p).toBe(29739);
     });
 
     it('should update the p2p ports for litd nodes', async () => {
-      const portsInUse = [9638];
+      const portsInUse = [29638];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
       network.nodes.bitcoin = [];
       const ports = (await getOpenPorts(network)) as OpenPorts;
       expect(ports).toBeDefined();
-      expect(ports[network.nodes.lightning[3].name].p2p).toBe(9639);
+      expect(ports[network.nodes.lightning[3].name].p2p).toBe(29639);
     });
 
     it('should update the web ports for litd nodes', async () => {
-      const portsInUse = [8446];
+      const portsInUse = [28446];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
       network.nodes.bitcoin = [];
       const ports = (await getOpenPorts(network)) as OpenPorts;
       expect(ports).toBeDefined();
-      expect(ports[network.nodes.lightning[3].name].web).toBe(8447);
+      expect(ports[network.nodes.lightning[3].name].web).toBe(28447);
     });
 
     it('should not update ports if none are in use', async () => {
@@ -325,7 +325,7 @@ describe('Network Utils', () => {
 
     it('should update the grpc ports for TAP nodes', async () => {
       network = getNetwork(1, 'tap network', undefined, 3);
-      const portsInUse = [12030];
+      const portsInUse = [32030];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -333,14 +333,14 @@ describe('Network Utils', () => {
       network.nodes.lightning = [];
       const ports = (await getOpenPorts(network)) as OpenPorts;
       expect(ports).toBeDefined();
-      expect(ports[network.nodes.tap[0].name].grpc).toBe(12029);
-      expect(ports[network.nodes.tap[1].name].grpc).toBe(12031);
-      expect(ports[network.nodes.tap[2].name].grpc).toBe(12032);
+      expect(ports[network.nodes.tap[0].name].grpc).toBe(32029);
+      expect(ports[network.nodes.tap[1].name].grpc).toBe(32031);
+      expect(ports[network.nodes.tap[2].name].grpc).toBe(32032);
     });
 
     it('should update the rest ports for TAP nodes', async () => {
       network = getNetwork(1, 'tap network', undefined, 3);
-      const portsInUse = [8290];
+      const portsInUse = [28290];
       mockDetectPort.mockImplementation(port =>
         Promise.resolve(portsInUse.includes(port) ? port + 1 : port),
       );
@@ -348,9 +348,9 @@ describe('Network Utils', () => {
       network.nodes.lightning = [];
       const ports = (await getOpenPorts(network)) as OpenPorts;
       expect(ports).toBeDefined();
-      expect(ports[network.nodes.tap[0].name].rest).toBe(8289);
-      expect(ports[network.nodes.tap[1].name].rest).toBe(8291);
-      expect(ports[network.nodes.tap[2].name].rest).toBe(8292);
+      expect(ports[network.nodes.tap[0].name].rest).toBe(28289);
+      expect(ports[network.nodes.tap[1].name].rest).toBe(28291);
+      expect(ports[network.nodes.tap[2].name].rest).toBe(28292);
     });
 
     it('should not update TAP ports if none are in use', async () => {

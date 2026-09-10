@@ -42,7 +42,7 @@ describe('ComposeFile', () => {
   });
 
   it('should have a name', () => {
-    expect(composeFile.content.name).toEqual('polar-network-1');
+    expect(composeFile.content.name).toEqual('polar-paykit-network-1');
   });
 
   it('should add multiple services', () => {
@@ -61,7 +61,7 @@ describe('ComposeFile', () => {
     composeFile.addBitcoind(btcNode);
     const service = composeFile.content.services['backend1'];
     expect(service.image).toContain('bitcoind');
-    expect(service.container_name).toEqual('polar-n1-backend1');
+    expect(service.container_name).toEqual('polar-paykit-n1-backend1');
     expect(service.command).toContain(bitcoinCredentials.user);
     expect(service.volumes[0]).toContain('/backend1:');
   });
@@ -83,7 +83,7 @@ describe('ComposeFile', () => {
     composeFile.addLnd(lndNode, btcNode);
     const service = composeFile.content.services['alice'];
     expect(service.image).toContain('lnd');
-    expect(service.container_name).toEqual('polar-n1-alice');
+    expect(service.container_name).toEqual('polar-paykit-n1-alice');
     expect(service.command).toContain('backend');
     expect(service.volumes[0]).toContain('/alice:');
   });
@@ -106,7 +106,7 @@ describe('ComposeFile', () => {
     composeFile.addClightning(clnNode, btcNode);
     const service = composeFile.content.services['bob'];
     expect(service.image).toContain('clightning');
-    expect(service.container_name).toEqual('polar-n1-bob');
+    expect(service.container_name).toEqual('polar-paykit-n1-bob');
     expect(service.command).toContain('backend');
     expect(service.volumes[0]).toContain('/bob/lightningd:');
   });
@@ -116,10 +116,10 @@ describe('ComposeFile', () => {
     composeFile.addClightning(clnNode, btcNode);
     const service = composeFile.content.services['bob'];
     expect(service.image).toContain('clightning');
-    expect(service.container_name).toEqual('polar-n1-bob');
+    expect(service.container_name).toEqual('polar-paykit-n1-bob');
     expect(service.command).toContain('backend');
-    expect(service.volumes[0]).toContain('polar-n1-bob:');
-    expect(composeFile.content.volumes).toHaveProperty('polar-n1-bob');
+    expect(service.volumes[0]).toContain('polar-paykit-n1-bob:');
+    expect(composeFile.content.volumes).toHaveProperty('polar-paykit-n1-bob');
   });
 
   it('should have the grpc port for c-lightning', () => {
@@ -153,8 +153,8 @@ describe('ComposeFile', () => {
     composeFile.addTapd(tapNode, lndNode);
     const service = composeFile.content.services['alice-tap'];
     expect(service.image).toContain('tapd');
-    expect(service.container_name).toEqual('polar-n1-alice-tap');
-    expect(service.command).toContain('lnd.host=polar-n1-alice');
+    expect(service.container_name).toEqual('polar-paykit-n1-alice-tap');
+    expect(service.command).toContain('lnd.host=polar-paykit-n1-alice');
     expect(service.volumes[0]).toContain('/alice:');
     expect(service.volumes[1]).toContain('/alice-tap:');
   });
@@ -196,8 +196,8 @@ describe('ComposeFile', () => {
     composeFile.addLitd(litdNode, btcNode, litdNode);
     const service = composeFile.content.services['dave'];
     expect(service.image).toContain('litd');
-    expect(service.container_name).toEqual('polar-n1-dave');
-    expect(service.command).toContain('lnd.bitcoind.rpchost=polar-n1-backend1');
+    expect(service.container_name).toEqual('polar-paykit-n1-dave');
+    expect(service.command).toContain('lnd.bitcoind.rpchost=polar-paykit-n1-backend1');
     expect(service.volumes[0]).toContain('/dave/lit:');
     expect(service.volumes[1]).toContain('/dave/lnd:');
     expect(service.volumes[2]).toContain('/dave/tapd:');
@@ -220,7 +220,7 @@ describe('ComposeFile', () => {
     composeFile.addSimln(1);
     const service = composeFile.content.services['simln'];
     expect(service.image).toContain('simln');
-    expect(service.container_name).toEqual('polar-n1-simln');
+    expect(service.container_name).toEqual('polar-paykit-n1-simln');
     expect(service.command).toBe('');
   });
 
@@ -229,7 +229,7 @@ describe('ComposeFile', () => {
     composeFile.addClightning(clnNode, btcNode);
     const secondClnNode = { ...clnNode, name: 'carol' };
     composeFile.addClightning(secondClnNode as CLightningNode, btcNode);
-    expect(composeFile.content.volumes).toHaveProperty('polar-n1-bob');
-    expect(composeFile.content.volumes).toHaveProperty('polar-n1-carol');
+    expect(composeFile.content.volumes).toHaveProperty('polar-paykit-n1-bob');
+    expect(composeFile.content.volumes).toHaveProperty('polar-paykit-n1-carol');
   });
 });

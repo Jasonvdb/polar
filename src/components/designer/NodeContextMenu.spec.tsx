@@ -195,7 +195,7 @@ describe('NodeContextMenu', () => {
     await act(async () => {
       fireEvent.click(getByText('Launch Terminal'));
     });
-    const url = '/terminal/LND/polar-n1-alice';
+    const url = '/terminal/LND/polar-paykit-n1-alice';
     expect(ipcMock).toBeCalledWith(ipcChannels.openWindow, { url });
   });
 
@@ -223,7 +223,7 @@ describe('NodeContextMenu', () => {
     await act(async () => {
       fireEvent.click(getByText('View Logs'));
     });
-    const url = '/logs/LND/polar-n1-alice';
+    const url = '/logs/LND/polar-paykit-n1-alice';
     expect(ipcMock).toBeCalledWith(ipcChannels.openWindow, { url });
   });
 

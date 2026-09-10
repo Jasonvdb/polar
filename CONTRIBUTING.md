@@ -297,3 +297,38 @@ If you would like to fix a bug or implement a new feature, here are the recommen
    $ git push
    ```
 1. Open a pull request on GitHub ([docs](https://help.github.com/en/github/collaborating-with-issues-and-pull-requests/creating-a-pull-request-from-a-fork))
+
+## Polar Paykit isolation
+
+This fork is **Polar Paykit** (`com.jasonvdb.polar-paykit`). Its default data root is
+`~/.polar-paykit` (or `~/.local/share/polar-paykit` when that directory already
+exists). Electron preferences and window state live in `electron/` under that
+root; logs live in `logs/`. Existing upstream Polar data is never migrated into
+Paykit automatically. Docker projects, networks, containers, and named volumes
+use the `polar-paykit` prefix. Node host ports start 20,000 above upstream's
+ports; ports inside containers are unchanged. MCP listens on localhost:38383.
+
+For a separate installation or test run, set `POLAR_PAYKIT_INSTANCE` to a unique
+lowercase name. Optional `POLAR_PAYKIT_DATA_ROOT` must be absolute;
+`POLAR_PAYKIT_MCP_PORT` and `POLAR_PAYKIT_PORT_OFFSET` select allocated ports.
+Choose different available ports for concurrent instances. Existing networks
+retain their assigned ports; Polar's existing port-conflict checks still apply.
+Do not share a namespace or data directory between running instances.
+
+UI tests require an empty, dedicated, canonical directory and a non-default
+instance name. Provision them before launching the runner, for example:
+
+```sh
+mkdir /private/tmp/my-paykit-ui-run
+POLAR_PAYKIT_E2E_ROOT=/private/tmp/my-paykit-ui-run \
+POLAR_PAYKIT_INSTANCE=my-ui-run yarn test:e2e
+```
+
+The runner writes an exclusive ownership marker, directs application state into
+`data/`, and only removes that run's `data/networks` after each test and at exit.
+It refuses existing installations, mismatched ownership and symlinked data roots.
+It never prunes Docker resources. The current UI suite creates stopped networks;
+it does not launch service containers. After the process exits, inspect and remove
+only your test directory. `yarn test:isolation` exercises cleanup against a second
+installation and a concurrent test environment. CI runs UI tests under Xvfb on
+Linux. Packaging keeps artifacts in fork CI and never uploads release assets.

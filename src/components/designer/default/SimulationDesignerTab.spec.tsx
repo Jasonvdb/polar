@@ -256,7 +256,7 @@ describe('SimulationDesignerTab', () => {
       const ipcMock = injections.ipc as jest.Mock;
       ipcMock.mockResolvedValue(true);
       fireEvent.click(getByText('View Logs'));
-      const url = '/logs/simln/polar-n1-simln';
+      const url = '/logs/simln/polar-paykit-n1-simln';
       await waitFor(() => {
         expect(ipcMock).toBeCalledWith(ipcChannels.openWindow, { url });
       });

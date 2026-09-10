@@ -1,21 +1,19 @@
 import { remote } from 'electron';
-import { existsSync } from 'fs';
 import { join } from 'path';
 import { NodeImplementationWithSimln } from 'shared/types';
+import { paykitConfig } from 'shared/paykitConfig';
 import { Network } from 'types';
 import { dockerConfigs } from './constants';
 
 /**
  * XDG-compliant path where application data is stored
  */
-export const xdgDataPath = join(remote.app.getPath('home'), '.local', 'share', 'polar');
+export const xdgDataPath = paykitConfig.xdgDataPath;
 
 /**
  * root path where application data is stored
  */
-export const dataPath = existsSync(xdgDataPath)
-  ? xdgDataPath
-  : join(remote.app.getPath('home'), '.polar');
+export const dataPath = paykitConfig.dataPath;
 
 /**
  * legacy path where application data was stored in v0.1.0

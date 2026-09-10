@@ -1,3 +1,4 @@
+import { getNamespacedContainerName } from 'shared/paykitConfig';
 import React, { ReactNode, useCallback, useEffect } from 'react';
 import { useAsyncCallback } from 'react-async-hook';
 import {
@@ -127,7 +128,7 @@ const SimulationDesignerTab: React.FC<Props> = ({ network }) => {
   };
 
   const openAsync = useAsyncCallback(async () => {
-    await openWindow(`/logs/simln/polar-n${network.id}-simln`);
+    await openWindow(`/logs/simln/${getNamespacedContainerName(network.id, 'simln')}`);
   });
 
   const handleClick = useCallback(

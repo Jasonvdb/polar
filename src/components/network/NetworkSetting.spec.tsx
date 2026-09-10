@@ -64,11 +64,11 @@ describe('NetworkSetting Component', () => {
   it('should have the correct default ports', async () => {
     const { getByLabelText, getAllByLabelText } = renderComponent();
     expect(getAllByLabelText('LND')[0]).toHaveValue('8081');
-    expect(getAllByLabelText('Core Lightning')[0]).toHaveValue('8181');
-    expect(getAllByLabelText('Taproot Assets')[0]).toHaveValue('8289');
+    expect(getAllByLabelText('Core Lightning')[0]).toHaveValue('28181');
+    expect(getAllByLabelText('Taproot Assets')[0]).toHaveValue('28289');
     expect(getByLabelText('Eclair')).toHaveValue('8281');
-    expect(getByLabelText('Bitcoin Core')).toHaveValue('18443');
-    expect(getAllByLabelText('LND')[1]).toHaveValue('10001');
+    expect(getByLabelText('Bitcoin Core')).toHaveValue('38443');
+    expect(getAllByLabelText('LND')[1]).toHaveValue('30001');
     expect(getAllByLabelText('Core Lightning')[1]).toHaveValue('11001');
     expect(getAllByLabelText('Taproot Assets')[1]).toHaveValue('12029');
   });

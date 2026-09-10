@@ -1,3 +1,4 @@
+import { getProjectName, getNamespacedContainerName } from 'shared/paykitConfig';
 import {
   BitcoinNode,
   CLightningNode,
@@ -45,7 +46,7 @@ class ComposeFile {
 
   constructor(id: number) {
     this.content = {
-      name: `polar-network-${id}`,
+      name: getProjectName(id),
       services: {},
     };
   }
@@ -220,7 +221,7 @@ class ComposeFile {
 
   addSimln(networkId: number) {
     const { name, imageName, command, env } = dockerConfigs.simln;
-    const containerName = `polar-n${networkId}-simln`;
+    const containerName = getNamespacedContainerName(networkId, 'simln');
     const svc = simln(name, containerName, imageName, command, { ...env });
     this.addService(svc);
   }

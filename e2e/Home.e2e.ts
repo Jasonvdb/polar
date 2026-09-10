@@ -1,7 +1,7 @@
-import { assertNoConsoleErrors, cleanup, getPageUrl, pageUrl } from './helpers';
+import { afterEach, getPageUrl, pageUrl } from './helpers';
 import { App, Home, NewNetwork } from './pages';
 
-fixture`Home`.page(pageUrl).afterEach(assertNoConsoleErrors).afterEach(cleanup);
+fixture`Home`.page(pageUrl).afterEach(afterEach);
 
 test('should be on the home screen route', async t => {
   await t.expect(getPageUrl()).match(/.*#\/$/);

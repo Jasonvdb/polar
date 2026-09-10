@@ -140,7 +140,7 @@ async function handleRequest(
   try {
     // GET /health - Health check endpoint
     if (req.method === 'GET' && url.pathname === '/health') {
-      sendJson(res, 200, { status: 'ok', service: 'polar-mcp-bridge' });
+      sendJson(res, 200, { status: 'ok', service: 'polar-paykit-mcp-bridge' });
       return;
     }
 

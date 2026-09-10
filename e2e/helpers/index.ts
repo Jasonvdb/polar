@@ -1,6 +1,5 @@
-import { remove } from 'fs-extra';
 import { ClientFunction } from 'testcafe';
-import { networksPath } from '../../src/utils/config';
+import { cleanupNetworks } from '../../scripts/e2e-environment';
 
 export const pageUrl = '../build/index.html';
 
@@ -13,5 +12,13 @@ export const assertNoConsoleErrors = async (t: TestController) => {
 };
 
 export const cleanup = async () => {
-  await remove(networksPath);
+  cleanupNetworks();
+};
+
+export const afterEach = async (t: TestController) => {
+  try {
+    await assertNoConsoleErrors(t);
+  } finally {
+    await cleanup();
+  }
 };

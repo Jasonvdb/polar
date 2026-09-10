@@ -1,10 +1,18 @@
+import { app } from 'electron';
+import { mkdirSync } from 'fs';
 import electronDebug from 'electron-debug';
 import { debug, error } from 'electron-log';
 import { sync } from 'shell-env';
+import { APP_ID, APP_NAME, paykitConfig } from '../src/shared/paykitConfig';
 import { initLogger } from '../src/shared/utils';
 import { IS_DEV } from './constants';
 import { initWindowsDarkHack } from './hacks/windows';
 import WindowManager from './windowManager';
+
+app.setName(APP_NAME);
+app.setAppUserModelId(APP_ID);
+mkdirSync(paykitConfig.userDataPath, { recursive: true });
+app.setPath('userData', paykitConfig.userDataPath);
 
 // set global configuration for logging
 initLogger();
@@ -20,8 +28,8 @@ electronDebug({ isEnabled: IS_DEV });
 // merge in env vars from the user's shell (i.e. PATH) so that
 // docker commands can be executed
 process.env = {
-  ...process.env,
   ...sync(),
+  ...process.env,
 };
 
 // This is needed to run electron on windows with dark mode. There's currently a bug in

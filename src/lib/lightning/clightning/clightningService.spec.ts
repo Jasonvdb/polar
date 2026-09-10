@@ -342,7 +342,7 @@ describe('CLightningService', () => {
       fsMock.pathExists = jest.fn().mockResolvedValue(true);
 
       listContainers.mockResolvedValue([
-        { Id: '123', Names: [`/polar-n${node.networkId}-${node.name}`] },
+        { Id: '123', Names: [`/polar-paykit-n${node.networkId}-${node.name}`] },
       ]);
       getContainer.mockReturnValue({
         exec: jest.fn().mockResolvedValue({
@@ -476,7 +476,7 @@ describe('CLightningService', () => {
       listContainers.mockResolvedValue([
         {
           Id: '123',
-          Names: [`/polar-n${node.networkId}-${node.name}`],
+          Names: [`/polar-paykit-n${node.networkId}-${node.name}`],
         },
       ]);
       getContainer.mockReturnValue({
@@ -493,14 +493,14 @@ describe('CLightningService', () => {
     it('should throw an error if the container is not found', async () => {
       listContainers.mockResolvedValue([]);
       await expect(clightningService.waitUntilOnline(node, 0.1, 0.3)).rejects.toThrow(
-        'Docker container not found: polar-n1-bob',
+        'Docker container not found: polar-paykit-n1-bob',
       );
     }, 1000);
 
     it('should throw an error if the container is undefined', async () => {
       getContainer.mockReturnValue(undefined);
       await expect(clightningService.waitUntilOnline(node, 0.1, 0.3)).rejects.toThrow(
-        'Docker container not found: polar-n1-bob',
+        'Docker container not found: polar-paykit-n1-bob',
       );
     }, 1000);
 
@@ -555,7 +555,7 @@ describe('CLightningService', () => {
     beforeEach(() => {
       mockOS.platform.mockReturnValue('win32');
       listContainers.mockResolvedValue([
-        { Id: '123', Names: [`/polar-n${node.networkId}-${node.name}`] },
+        { Id: '123', Names: [`/polar-paykit-n${node.networkId}-${node.name}`] },
       ]);
       getContainer.mockReturnValue({
         exec: jest.fn().mockResolvedValue({
@@ -572,7 +572,7 @@ describe('CLightningService', () => {
     it('should skip cert copy when container is not found', async () => {
       listContainers
         .mockResolvedValueOnce([
-          { Id: '123', Names: [`/polar-n${node.networkId}-${node.name}`] },
+          { Id: '123', Names: [`/polar-paykit-n${node.networkId}-${node.name}`] },
         ])
         .mockResolvedValueOnce([]);
       streamMock.mockImplementation((event: string, cb: (arg: any) => void) => {

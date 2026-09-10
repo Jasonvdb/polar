@@ -27,7 +27,7 @@ const Styled = {
   `,
   Logo: styled.div`
     height: 64px;
-    width: 120px;
+    width: 190px;
   `,
   Image: styled.img`
     height: 16px;
@@ -117,7 +117,7 @@ const AppLayout: React.FC<Props> = (props: Props) => {
           <Styled.Logo>
             <Link to={HOME}>
               <Styled.Image src={logo} alt="logo" />
-              <Styled.Brand>Polar</Styled.Brand>
+              <Styled.Brand>Polar Paykit</Styled.Brand>
             </Link>
           </Styled.Logo>
           <NavMenu />

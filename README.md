@@ -1,3 +1,7 @@
+# Polar Paykit
+
+An isolated Paykit workbench built on Polar. See [development and isolation setup](CONTRIBUTING.md#polar-paykit-isolation). Paykit features are being delivered incrementally; this foundation preserves the existing editable Bitcoin and Lightning network tools.
+
 # Polar
 
 > One-click Bitcoin Lightning networks for local app development & testing

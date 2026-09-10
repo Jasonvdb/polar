@@ -1,10 +1,11 @@
 import isNotPackaged from 'electron-is-dev';
 import { join } from 'path';
+import { paykitConfig } from '../src/shared/paykitConfig';
 
 export const IS_DEV = isNotPackaged && process.env.NODE_ENV !== 'production';
 
-// MCP HTTP bridge server port. Can be overridden with POLAR_MCP_PORT environment var
-export const MCP_PORT = parseInt(process.env.POLAR_MCP_PORT || '37373', 10);
+// Paykit has its own MCP bridge port and environment override.
+export const MCP_PORT = paykitConfig.mcpPort;
 
 const APP_ROOT_DEV = join(__dirname, '..');
 const APP_ROOT_PROD = join(__dirname, '..', '..', '..');

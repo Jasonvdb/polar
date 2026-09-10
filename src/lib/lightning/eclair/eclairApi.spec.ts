@@ -58,7 +58,7 @@ describe('EclairApi', () => {
     expect(sender).toHaveBeenCalledWith(
       'http',
       expect.objectContaining({
-        url: 'http://127.0.0.1:8283/getinfo',
+        url: 'http://127.0.0.1:28283/getinfo',
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',

@@ -1,4 +1,5 @@
 import { NodeImplementation, NodeImplementationWithSimln } from 'shared/types';
+import { paykitConfig } from 'shared/paykitConfig';
 import { DockerConfig, DockerRepoState } from 'types';
 import bitcoindLogo from 'resources/bitcoin.svg';
 import clightningLogo from 'resources/clightning.png';
@@ -50,35 +51,35 @@ export const denominationNames: { [key in Denomination]: string } = {
  */
 export const BasePorts: Record<NodeImplementation, Record<string, number>> = {
   bitcoind: {
-    rest: 18443,
-    p2p: 19444,
-    zmqBlock: 28334,
-    zmqTx: 29335,
+    rest: 18443 + paykitConfig.portOffset,
+    p2p: 19444 + paykitConfig.portOffset,
+    zmqBlock: 28334 + paykitConfig.portOffset,
+    zmqTx: 29335 + paykitConfig.portOffset,
   },
   LND: {
-    rest: 8081,
-    grpc: 10001,
-    p2p: 9735,
+    rest: 8081 + paykitConfig.portOffset,
+    grpc: 10001 + paykitConfig.portOffset,
+    p2p: 9735 + paykitConfig.portOffset,
   },
   'c-lightning': {
-    rest: 8181,
-    p2p: 9835,
-    grpc: 11001,
+    rest: 8181 + paykitConfig.portOffset,
+    p2p: 9835 + paykitConfig.portOffset,
+    grpc: 11001 + paykitConfig.portOffset,
   },
   eclair: {
-    rest: 8281,
-    p2p: 9935,
+    rest: 8281 + paykitConfig.portOffset,
+    p2p: 9935 + paykitConfig.portOffset,
   },
   btcd: {},
   tapd: {
-    grpc: 12029,
-    rest: 8289,
+    grpc: 12029 + paykitConfig.portOffset,
+    rest: 8289 + paykitConfig.portOffset,
   },
   litd: {
-    rest: 8381,
-    grpc: 13001,
-    p2p: 9635,
-    web: 8443,
+    rest: 8381 + paykitConfig.portOffset,
+    grpc: 13001 + paykitConfig.portOffset,
+    p2p: 9635 + paykitConfig.portOffset,
+    web: 8443 + paykitConfig.portOffset,
   },
 };
 

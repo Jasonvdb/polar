@@ -1,20 +1,15 @@
-import { app, remote } from 'electron';
 import log from 'electron-log';
-import { existsSync } from 'fs';
 import { join } from 'path';
 import http from 'http';
 import https from 'https';
+import { paykitConfig } from './paykitConfig';
 
 /**
- * setup logging to store log files in ~/.polar/logs/ dir
+ * setup logging to store log files in the Paykit data root logs/ dir
  */
 export const initLogger = () => {
   log.transports.file.resolvePath = (variables: log.PathVariables) => {
-    const ap = app || remote.app;
-    const home = ap.getPath('home');
-    const xdgPath = join(home, '.local', 'share', 'polar');
-    const dataPath = existsSync(xdgPath) ? xdgPath : join(home, '.polar');
-    return join(dataPath, 'logs', variables.fileName as string);
+    return join(paykitConfig.dataPath, 'logs', variables.fileName as string);
   };
 };
 

@@ -7,6 +7,9 @@ on:
       - 'ci/*'
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Run tests on ${{ matrix.os }}
@@ -48,7 +51,14 @@ jobs:
         if: startsWith(github.ref_name, 'release/') == false
         run: yarn build
 
-      - name: coverage
-        uses: codecov/codecov-action@v5.5.5
+      - name: isolation regression tests
+        run: yarn test:isolation
+
+      - name: isolated Electron UI tests
+        if: matrix.os == 'ubuntu-latest'
         env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+          POLAR_PAYKIT_E2E_ROOT: ${{ runner.temp }}/paykit-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          POLAR_PAYKIT_INSTANCE: ci-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          mkdir -p "$POLAR_PAYKIT_E2E_ROOT"
+          xvfb-run --auto-servernum yarn test:cafe

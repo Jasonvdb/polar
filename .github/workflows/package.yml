@@ -5,6 +5,9 @@ on:
     branches:
       - 'release/*'
 
+permissions:
+  contents: read
+
 jobs:
   package:
     name: Package on ${{ matrix.os }}
@@ -57,19 +60,18 @@ jobs:
             yarn package:electron --publish never --mac --x64
             # arm64 requires manual ad-hoc signing for Gatekeeper
             yarn package:electron --publish never --mac --arm64 --dir
-            codesign --sign - --force --deep dist/mac-arm64/Polar.app
-            yarn package:electron --publish never --mac --arm64 --prepackaged dist/mac-arm64/Polar.app
+            codesign --sign - --force --deep 'dist/mac-arm64/Polar Paykit.app'
+            yarn package:electron --publish never --mac --arm64 --prepackaged 'dist/mac-arm64/Polar Paykit.app'
           fi
 
-      - name: publish assets to github release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          shopt -s nullglob
-          VERSION=$(node -p "require('./package.json').version")
-          FILES=(dist/*.dmg dist/*.exe dist/*.deb dist/*.rpm dist/*.AppImage)
-          if [[ ${#FILES[@]} -gt 0 ]]; then
-            gh release upload "v${VERSION}" "${FILES[@]}" --clobber
-          fi
-
+      - name: retain fork build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: polar-paykit-${{ matrix.os }}
+          path: |
+            dist/*.dmg
+            dist/*.exe
+            dist/*.deb
+            dist/*.rpm
+            dist/*.AppImage
+          if-no-files-found: error

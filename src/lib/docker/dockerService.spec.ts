@@ -164,7 +164,7 @@ describe('DockerService', () => {
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.bitcoin[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.bitcoin[0].name}`,
         ),
       );
     });
@@ -174,7 +174,7 @@ describe('DockerService', () => {
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -200,7 +200,7 @@ describe('DockerService', () => {
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -226,7 +226,7 @@ describe('DockerService', () => {
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -252,7 +252,7 @@ describe('DockerService', () => {
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -263,7 +263,7 @@ describe('DockerService', () => {
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.not.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -273,7 +273,9 @@ describe('DockerService', () => {
       dockerService.saveComposeFile(net);
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
-        expect.stringContaining(`--lnd.host=polar-n1-${net.nodes.lightning[1].name}`),
+        expect.stringContaining(
+          `--lnd.host=polar-paykit-n1-${net.nodes.lightning[1].name}`,
+        ),
       );
     });
 
@@ -284,7 +286,9 @@ describe('DockerService', () => {
       dockerService.saveComposeFile(net);
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
-        expect.stringContaining(`--lnd.host=polar-n1-${net.nodes.lightning[0].name}`),
+        expect.stringContaining(
+          `--lnd.host=polar-paykit-n1-${net.nodes.lightning[0].name}`,
+        ),
       );
     });
 
@@ -294,7 +298,9 @@ describe('DockerService', () => {
       dockerService.saveComposeFile(net);
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
-        expect.not.stringContaining(`container_name: polar-n1-${net.nodes.tap[0].name}`),
+        expect.not.stringContaining(
+          `container_name: polar-paykit-n1-${net.nodes.tap[0].name}`,
+        ),
       );
     });
 
@@ -318,7 +324,7 @@ describe('DockerService', () => {
       const { backendName } = net.nodes.lightning[0] as LitdNode;
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
-        expect.stringContaining(`--lnd.bitcoind.rpchost=polar-n1-${backendName}`),
+        expect.stringContaining(`--lnd.bitcoind.rpchost=polar-paykit-n1-${backendName}`),
       );
     });
 
@@ -344,7 +350,7 @@ describe('DockerService', () => {
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `--lnd.bitcoind.rpchost=polar-n1-${net.nodes.bitcoin[0].name}`,
+          `--lnd.bitcoind.rpchost=polar-paykit-n1-${net.nodes.bitcoin[0].name}`,
         ),
       );
     });
@@ -370,7 +376,7 @@ describe('DockerService', () => {
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.not.stringContaining(
-          `container_name: polar-n1-${net.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${net.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -1000,7 +1006,7 @@ describe('DockerService', () => {
       dockerService.saveComposeFile(network);
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
-        expect.stringContaining(`container_name: polar-n1-simln`),
+        expect.stringContaining(`container_name: polar-paykit-n1-simln`),
       );
     });
 
@@ -1021,7 +1027,7 @@ describe('DockerService', () => {
       dockerService.saveComposeFile(network);
       expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
-        expect.stringContaining(`container_name: polar-n1-simln`),
+        expect.stringContaining(`container_name: polar-paykit-n1-simln`),
       );
 
       composeMock.upOne.mockResolvedValue(mockResult);
@@ -1193,8 +1199,8 @@ describe('DockerService', () => {
 
     it('should remove the named volume', async () => {
       await dockerService.removeCLNVolume(clnNode);
-      const containerName = `polar-n${clnNode.networkId}-${clnNode.name}`;
-      const volumeName = `polar-network-${clnNode.networkId}_${containerName}`;
+      const containerName = `polar-paykit-n${clnNode.networkId}-${clnNode.name}`;
+      const volumeName = `polar-paykit-network-${clnNode.networkId}_${containerName}`;
       expect(getVolume).toHaveBeenCalledWith(volumeName);
       expect(mockVolume.remove).toHaveBeenCalled();
     });
@@ -1237,8 +1243,8 @@ describe('DockerService', () => {
 
     it('should create a new volume with the correct name', async () => {
       await dockerService.renameNodeDir(network, clnNode, 'new-bob');
-      const newContainerName = `polar-n${network.id}-new-bob`;
-      const newVolumeName = `polar-network-${network.id}_${newContainerName}`;
+      const newContainerName = `polar-paykit-n${network.id}-new-bob`;
+      const newVolumeName = `polar-paykit-network-${network.id}_${newContainerName}`;
       expect(createVolume).toHaveBeenCalledWith({ Name: newVolumeName });
     });
 
@@ -1252,8 +1258,8 @@ describe('DockerService', () => {
 
     it('should throw if cleanup itself fails', async () => {
       const removeNewVolume = jest.fn().mockRejectedValue(new Error('volume in use'));
-      const newContainerName = `polar-n${network.id}-new-bob`;
-      const newVolumeName = `polar-network-${network.id}_${newContainerName}`;
+      const newContainerName = `polar-paykit-n${network.id}-new-bob`;
+      const newVolumeName = `polar-paykit-network-${network.id}_${newContainerName}`;
 
       getVolume.mockImplementation((name: string) =>
         name === newVolumeName
@@ -1284,8 +1290,8 @@ describe('DockerService', () => {
     });
 
     it('should log and not throw if removing the old volume after rename fails', async () => {
-      const oldContainerName = `polar-n${network.id}-${clnNode.name}`;
-      const oldVolumeName = `polar-network-${network.id}_${oldContainerName}`;
+      const oldContainerName = `polar-paykit-n${network.id}-${clnNode.name}`;
+      const oldVolumeName = `polar-paykit-network-${network.id}_${oldContainerName}`;
       const removeError = new Error('volume still in use');
       getVolume.mockImplementation((name: string) =>
         name === oldVolumeName
@@ -1359,8 +1365,8 @@ describe('DockerService', () => {
 
     it('should seed the volume without pulling if the image already exists', async () => {
       await dockerService.copyHostToVolume(clnNode);
-      const containerName = `polar-n${clnNode.networkId}-${clnNode.name}`;
-      const volumeName = `polar-network-${clnNode.networkId}_${containerName}`;
+      const containerName = `polar-paykit-n${clnNode.networkId}-${clnNode.name}`;
+      const volumeName = `polar-paykit-network-${clnNode.networkId}_${containerName}`;
       expect(getImage).toHaveBeenCalled();
       expect(pull).not.toHaveBeenCalled();
       expect(createVolume).toHaveBeenCalledWith({ Name: volumeName });

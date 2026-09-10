@@ -1,3 +1,4 @@
+import { getProjectName, getNamespacedContainerName } from 'shared/paykitConfig';
 import { remote } from 'electron';
 import { debug, info } from 'electron-log';
 import { copy, ensureDir } from 'fs-extra';
@@ -587,7 +588,7 @@ class DockerService implements DockerLibrary {
     await ensureDir(hostDataDir);
 
     const containerName = getContainerName(node);
-    const volumeName = `polar-network-${node.networkId}_${containerName}`;
+    const volumeName = `${getProjectName(node.networkId)}_${containerName}`;
     const image =
       node.docker.image || `${dockerConfigs['c-lightning'].imageName}:${node.version}`;
 
@@ -634,7 +635,7 @@ class DockerService implements DockerLibrary {
     const log = (...args: any[]) => debug(`CLightningService ${node.name}:`, ...args);
 
     const containerName = getContainerName(node);
-    const volumeName = `polar-network-${node.networkId}_${containerName}`;
+    const volumeName = `${getProjectName(node.networkId)}_${containerName}`;
 
     try {
       const docker = await getDocker();
@@ -658,9 +659,9 @@ class DockerService implements DockerLibrary {
    */
   private async renameCLNVolume(network: Network, node: CLightningNode, newName: string) {
     const docker = await getDocker();
-    const networkName = `polar-network-${network.id}`;
+    const networkName = getProjectName(network.id);
     const oldContainerName = getContainerName(node);
-    const newContainerName = `polar-n${network.id}-${newName}`;
+    const newContainerName = getNamespacedContainerName(network.id, newName);
     const oldVolumeName = `${networkName}_${oldContainerName}`;
     const newVolumeName = `${networkName}_${newContainerName}`;
 
@@ -722,7 +723,7 @@ class DockerService implements DockerLibrary {
     }
 
     const containerName = getContainerName(node);
-    const volumeName = `polar-network-${node.networkId}_${containerName}`;
+    const volumeName = `${getProjectName(node.networkId)}_${containerName}`;
     const image =
       node.docker.image || `${dockerConfigs['c-lightning'].imageName}:${node.version}`;
 

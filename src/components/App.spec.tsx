@@ -6,7 +6,7 @@ describe('App Component', () => {
   it('renders without crashing', async () => {
     const { getByText, unmount } = render(<App />);
     await waitFor(() => {
-      expect(getByText('Polar')).toBeInTheDocument();
+      expect(getByText('Polar Paykit')).toBeInTheDocument();
     });
     unmount();
   });
