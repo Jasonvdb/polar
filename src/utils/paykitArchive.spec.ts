@@ -1,4 +1,5 @@
 import fsExtra from 'fs-extra';
+import { join } from 'path';
 import { createIpcSender } from 'lib/ipc/ipcService';
 import { importNetworkFromZip, zipNetwork } from './network';
 import { getNetwork } from './tests';
@@ -28,7 +29,7 @@ describe('Paykit archive safety', () => {
         ) as any,
       );
       files.pathExists.mockImplementation(async path =>
-        `${path}`.endsWith(`/volumes/${source}`),
+        `${path}`.endsWith(join('volumes', source)),
       );
       await expect(importNetworkFromZip('/archive.zip', 2)).rejects.toThrow(
         'Backup and Recovery',

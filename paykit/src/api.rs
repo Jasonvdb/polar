@@ -29,6 +29,7 @@ use zeroize::Zeroizing;
 pub struct ApiState {
     pub repository: Arc<Repository>,
     pub token: Arc<Zeroizing<String>>,
+    pub shutdown: tokio::sync::watch::Receiver<bool>,
 }
 pub fn router(state: ApiState) -> Router {
     let protected = Router::new()
@@ -147,13 +148,29 @@ async fn events(
             ),
         );
     }
-    let stream = async_stream::stream! {let mut cursor=query.after;loop{
-        let notified=state.repository.notify.notified();
-        let Ok(snapshot)=state.repository.snapshot()else{break;};
-        for event in snapshot.events.into_iter().filter(|v|v.sequence>cursor).collect::<Vec<_>>(){cursor=event.sequence;
-            yield Ok::<_,Infallible>(Event::default().id(cursor.to_string()).event(event.event_type.clone()).data(serde_json::to_string(&event).unwrap_or_default()));}
-        tokio::select!{_=notified=>{},_=tokio::time::sleep(Duration::from_secs(2))=>{}}
-    }};
+    let stream = async_stream::stream! {
+        let mut cursor = query.after;
+        let mut shutdown = state.shutdown;
+        'events: loop {
+            if *shutdown.borrow() { break; }
+            let notified = state.repository.notify.notified();
+            let Ok(snapshot) = state.repository.snapshot() else { break; };
+            for event in snapshot.events.into_iter().filter(|event| event.sequence > cursor).collect::<Vec<_>>() {
+                if *shutdown.borrow() { break 'events; }
+                cursor = event.sequence;
+                yield Ok::<_, Infallible>(Event::default()
+                    .id(cursor.to_string())
+                    .event(event.event_type.clone())
+                    .data(serde_json::to_string(&event).unwrap_or_default()));
+            }
+            tokio::select! {
+                biased;
+                _ = shutdown.wait_for(|stopping| *stopping) => break,
+                _ = notified => {},
+                _ = tokio::time::sleep(Duration::from_secs(2)) => {},
+            }
+        }
+    };
     Sse::new(stream)
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(10)))
         .into_response()
@@ -176,7 +193,12 @@ mod tests {
         http::Request,
     };
     use tower::ServiceExt;
-    fn fixture() -> (tempfile::TempDir, Router, Arc<Repository>) {
+    fn fixture() -> (
+        tempfile::TempDir,
+        Router,
+        Arc<Repository>,
+        tokio::sync::watch::Sender<bool>,
+    ) {
         let dir = tempfile::tempdir().unwrap();
         let config = crate::config::Config {
             environment_id: Uuid::new_v4(),
@@ -187,15 +209,17 @@ mod tests {
         };
         let repository = Arc::new(Repository::open(&config).unwrap());
         repository.ready.store(true, Ordering::SeqCst);
+        let (shutdown_sender, shutdown) = tokio::sync::watch::channel(false);
         let app = router(ApiState {
             repository: repository.clone(),
             token: Arc::new(config.token),
+            shutdown,
         });
-        (dir, app, repository)
+        (dir, app, repository, shutdown_sender)
     }
     #[tokio::test]
     async fn authenticated_acceptance_returns_before_operation_runs() {
-        let (_dir, app, repo) = fixture();
+        let (_dir, app, repo, _shutdown) = fixture();
         let id = Uuid::new_v4();
         let response = app
             .oneshot(
@@ -217,7 +241,7 @@ mod tests {
     }
     #[tokio::test]
     async fn missing_token_rejected_and_error_does_not_echo_input() {
-        let (_dir, app, _) = fixture();
+        let (_dir, app, _, _shutdown) = fixture();
         let response = app
             .oneshot(
                 Request::get("/v1/state")
@@ -233,7 +257,7 @@ mod tests {
     }
     #[tokio::test]
     async fn event_replay_returns_persisted_sequence() {
-        let (_dir, app, repo) = fixture();
+        let (_dir, app, repo, _shutdown) = fixture();
         repo.update(|s| {
             s.event("receiver.stopped", json!({"receiverId":Uuid::new_v4()}));
             Ok(())
@@ -267,7 +291,7 @@ mod tests {
     }
     #[tokio::test]
     async fn cursor_ahead_requires_explicit_state_reset() {
-        let (_dir, app, _) = fixture();
+        let (_dir, app, _, _shutdown) = fixture();
         let response = app
             .oneshot(
                 Request::get("/v1/events?after=99")
@@ -278,5 +302,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::CONFLICT);
+    }
+    #[tokio::test]
+    async fn held_http_event_stream_ends_before_graceful_server_shutdown_completes() {
+        let (_dir, app, repository, shutdown) = fixture();
+        repository
+            .update(|state| {
+                state.event("receiver.stopped", json!({"receiverId":Uuid::new_v4()}));
+                Ok(())
+            })
+            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut server_shutdown = shutdown.subscribe();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = server_shutdown.wait_for(|stopping| *stopping).await;
+                })
+                .await
+                .unwrap();
+        });
+        let mut response = reqwest::Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/v1/events?after=0"))
+            .bearer_auth("a".repeat(64))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let frame = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&frame).contains("id: 1"));
+        shutdown.send(true).unwrap();
+        // Keep the client response alive: closing it would hide the shutdown bug.
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("server must finish with the SSE client still connected")
+            .unwrap();
+        let remainder = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(remainder.is_none(), "server must terminate the SSE body");
+    }
+
+    #[tokio::test]
+    async fn event_stream_opened_after_shutdown_ends_without_replaying_events() {
+        let (_dir, app, repository, shutdown) = fixture();
+        repository
+            .update(|state| {
+                state.event("receiver.stopped", json!({"receiverId":Uuid::new_v4()}));
+                Ok(())
+            })
+            .unwrap();
+        shutdown.send(true).unwrap();
+        let response = app
+            .oneshot(
+                Request::get("/v1/events?after=0")
+                    .header("authorization", format!("Bearer {}", "a".repeat(64)))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body =
+            tokio::time::timeout(Duration::from_secs(1), to_bytes(response.into_body(), 4096))
+                .await
+                .expect("already-signaled shutdown must terminate the stream")
+                .unwrap();
+        assert!(body.is_empty());
     }
 }

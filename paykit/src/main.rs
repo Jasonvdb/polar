@@ -75,12 +75,13 @@ async fn serve() -> anyhow::Result<()> {
         .await?;
     std::env::remove_var("TEST_PUBKY_CONNECTION_STRING");
     let listener = tokio::net::TcpListener::bind(&config.listen).await?;
+    let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
     let app = api::router(ApiState {
         repository: repository.clone(),
         token: Arc::new(config.token.clone()),
+        shutdown: stop_receiver.clone(),
     });
     let supervisor = Supervisor::new(config, repository);
-    let (stop_sender, stop_receiver) = tokio::sync::watch::channel(false);
     let mut server_stop = stop_receiver.clone();
     let server = axum::serve(listener, app).with_graceful_shutdown(async move {
         let _ = server_stop.wait_for(|value| *value).await;
