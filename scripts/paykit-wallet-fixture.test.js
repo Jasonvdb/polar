@@ -3,8 +3,8 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
-const { storageFaults, gateControls, atomicJson, images } = require('./paykit-wallet-fixture');
+const { randomUUID, createHash } = require('node:crypto');
+const { storageFaults, visibleStorageFaults, readGuestLedger, gateControls, atomicJson, images } = require('./paykit-wallet-fixture');
 
 function temporary(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-wallet-guard-'));
@@ -68,4 +68,75 @@ test('gate controls are private atomic one-shot inputs and counters omit sensiti
   assert.throws(() => controls.release('core', '../bad', 'relay'));
   fs.writeFileSync(path.join(root, 'events.ndjson'), JSON.stringify({ event: 'upstream.completed', channel: 'core', counts: { requests: 4, issuanceSuccess: 1 } }) + '\n' + '{"partial":');
   assert.deepEqual(controls.counts(), { core: { requests: 4, issuanceSuccess: 1 }, lnd: { requests: 0, issuanceSuccess: 0 } });
+});
+
+function visibilityFixture(t, readGuest, options) {
+  const root = temporary(t); const receiverId = randomUUID();
+  const directory = path.join(root, 'receivers', receiverId); fs.mkdirSync(directory, { recursive: true });
+  const bytes = Buffer.from('original encrypted ledger');
+  const target = path.join(directory, 'payments.cbor'); fs.writeFileSync(target, bytes);
+  const journal = []; const record = event => journal.push(event);
+  const host = storageFaults(root, record);
+  const visible = visibleStorageFaults(host, readGuest, record, options);
+  return { receiverId, target, bytes, journal, host, visible, digest: createHash('sha256').update(bytes).digest('hex') };
+}
+test('guest barriers wait for directory then exact restored bytes before allowing continuation', async t => {
+  let phase = 'blocking'; let attempts = 0; let fixture;
+  fixture = visibilityFixture(t, async () => {
+    attempts++;
+    if (attempts < 3) return { kind: phase === 'blocking' ? 'file' : 'directory', digest: 'stale' };
+    if (phase === 'blocking') return { kind: 'directory' };
+    if (attempts === 3) return { kind: 'file', digest: 'wrong bytes' };
+    return { kind: 'file', digest: fixture.digest };
+  }, { timeoutMs: 100, pollMs: 1 });
+  const restore = await fixture.visible.blockLedgerCommit(fixture.receiverId);
+  assert.equal(attempts, 3);
+  assert(fs.statSync(fixture.target).isDirectory());
+  phase = 'restoring'; attempts = 0;
+  await restore();
+  assert.equal(attempts, 4);
+  assert.deepEqual(fs.readFileSync(fixture.target), fixture.bytes);
+  const confirmed = fixture.journal.filter(event => event.phase === 'guest');
+  assert.deepEqual(confirmed.map(event => event.observed), ['directory', 'originalFile']);
+  assert.equal(confirmed[0].faultId, confirmed[1].faultId);
+  assert(!JSON.stringify(fixture.journal).includes(fixture.digest));
+});
+test('failed activation restores host bytes and never claims a guest-confirmed fault', async t => {
+  let fixture;
+  fixture = visibilityFixture(t, async () => ({ kind: 'file', digest: fixture.digest }), { timeoutMs: 10, pollMs: 1 });
+  await assert.rejects(fixture.visible.blockLedgerCommit(fixture.receiverId), /directory visibility deadline/);
+  assert.deepEqual(fs.readFileSync(fixture.target), fixture.bytes);
+  assert(!fixture.journal.some(event => event.phase === 'guest' && event.active));
+  assert(fixture.journal.some(event => event.phase === 'guest' && !event.active));
+});
+test('restoration deadline fails closed and synchronous cleanup never claims guest visibility', async t => {
+  let restoring = false;
+  const fixture = visibilityFixture(t, async () => {
+    if (restoring) throw new Error('guest exec unavailable');
+    return { kind: 'directory' };
+  }, { timeoutMs: 10, pollMs: 1 });
+  const restore = await fixture.visible.blockLedgerCommit(fixture.receiverId);
+  restoring = true;
+  await assert.rejects(restore(), /file visibility deadline/);
+  fixture.host.restoreFaults();
+  assert.deepEqual(fs.readFileSync(fixture.target), fixture.bytes);
+  assert(!fixture.journal.some(event => event.phase === 'guest' && !event.active));
+});
+test('restoration of an initially absent ledger waits for guest absence', async t => {
+  let observed = 'directory';
+  const fixture = visibilityFixture(t, async () => ({ kind: observed }), { timeoutMs: 100, pollMs: 1 });
+  fs.unlinkSync(fixture.target);
+  const restore = await fixture.visible.blockLedgerCommit(fixture.receiverId);
+  observed = 'absent'; await restore();
+  assert.equal(fs.existsSync(fixture.target), false);
+  assert.equal(fixture.journal.at(-1).observed, 'absent');
+});
+test('guest probes use bounded exec in service namespace and keep digests out of arguments', () => {
+  const receiverId = randomUUID(); const digest = 'a'.repeat(64); let args;
+  const docker = { withTimeout: (...input) => { args = input; return digest + '  /data/receiver/payments.cbor\n'; } };
+  assert.deepEqual(readGuestLedger(docker, 'owned-service', receiverId), { kind: 'file', digest });
+  assert.deepEqual(args.slice(0, 5), [1000, 'exec', 'owned-service', 'sh', '-c']);
+  assert.equal(args.at(-1), `/data/receivers/${receiverId}/payments.cbor`);
+  assert(!args.some(value => String(value).includes(digest)));
+  assert.throws(() => readGuestLedger(docker, 'owned-service', '../escape'));
 });

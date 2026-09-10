@@ -46,6 +46,14 @@ function validateReport(root) {
     assert(wallets.storageFaults.some(event => event.active === true));
     const finalFaults = new Map(wallets.storageFaults.map(event => [event.receiverId, event.active]));
     assert([...finalFaults.values()].every(active => active === false));
+    for (const fault of wallets.storageFaults.filter(event => event.phase === 'host' && event.active)) {
+      assert(fault.faultId);
+      const events = wallets.storageFaults.filter(event => event.faultId === fault.faultId && event.receiverId === fault.receiverId);
+      const blocked = events.findIndex(event => event.phase === 'guest' && event.active && event.observed === 'directory');
+      const restored = events.findIndex(event => event.phase === 'guest' && !event.active && ['originalFile', 'absent'].includes(event.observed));
+      assert(blocked >= 0 && restored > blocked, 'Missing confirmed guest ledger boundaries');
+    }
+    assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active));
     assert.deepEqual(environment.stages, requiredStages);
     assert.equal(new Set(environment.participantKeys).size, 3);
     assert.equal(new Set(environment.receiverNoiseKeys).size, 4);
@@ -72,7 +80,9 @@ function start() {
   const image = process.env.PAYKIT_TEST_IMAGE || 'polar-paykit/service:pr2';
   const postgres = 'postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af';
   const record = () => fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(resources, null, 2));
-  const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', timeout: 60000, killSignal: 'SIGTERM' });
+  const boundedDocker = (timeout, ...args) => execFileSync('docker', args, { encoding: 'utf8', timeout, killSignal: 'SIGTERM', stdio: ['ignore', 'pipe', 'pipe'] });
+  const docker = (...args) => boundedDocker(60000, ...args);
+  docker.withTimeout = boundedDocker;
   function progress(stage) {
     const entry = { at: new Date().toISOString(), stage };
     journal.push(entry);

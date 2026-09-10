@@ -13,7 +13,12 @@ function walletEvidence(environment) {
     readiness: [0, 1, 2].map(i => ({ syncedToChain: true, publicKey: `${environment}-wallet-${i}`, version: '0.20.0' })),
     gateCounts: { core: { issuanceSuccess: 2 }, lnd: { issuanceSuccess: 1 } },
     gateEvents: [completed('core', 1), dropped('core', 1), completed('lnd', 2), dropped('lnd', 2), completed('core', 3), { event: 'hold.finished', channel: 'core', id: 3, nonce: 'nonce-3', action: 'relay', reason: 'control' }],
-    storageFaults: [{ receiverId: 'receiver', active: true }, { receiverId: 'receiver', active: false }],
+    storageFaults: [
+      { receiverId: 'receiver', faultId: 'fault', phase: 'host', active: true },
+      { receiverId: 'receiver', faultId: 'fault', phase: 'guest', active: true, observed: 'directory' },
+      { receiverId: 'receiver', faultId: 'fault', phase: 'host', active: false },
+      { receiverId: 'receiver', faultId: 'fault', phase: 'guest', active: false, observed: 'originalFile' },
+    ],
   };
 }
 const { validateReport, requiredStages } = require('./paykit-ci');
@@ -95,6 +100,10 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
     wallets => { wallets.gateEvents = []; },
     wallets => { wallets.gateEvents.find(event => event.event === 'upstream.completed').nonce = 'unrelated'; },
     wallets => { wallets.storageFaults.pop(); },
+    wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.phase !== 'guest'); },
+    wallets => { wallets.storageFaults[1].observed = 'file'; },
+    wallets => { wallets.storageFaults[3].faultId = 'different'; },
+    wallets => { wallets.storageFaults.reverse(); },
     wallets => { wallets.lndContainers.pop(); },
     wallets => { wallets.readiness[0].syncedToChain = false; },
   ]) {

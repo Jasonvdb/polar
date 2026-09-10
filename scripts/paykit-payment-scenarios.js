@@ -196,14 +196,22 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   await configure(carol, fixture.walletIds.fault, [ONCHAIN], [ONCHAIN]);
   const held = await fixture.arm('core', 'hold');
   const intent = command('paymentList.publish', { receiverId: carol.id, ...terms }, randomUUID(), 'failed');
-  await fixture.waitReady('core', held);
+  // Attach a handler while awaiting the independent response boundary; errors are
+  // still asserted by await intent below. A boundary failure cannot leak a rejection.
+  intent.catch(() => {});
   let restore;
+  let released = false;
   try {
-    restore = await fixture.blockLedgerCommit(carol.id);
+    await fixture.waitReady('core', held);
+    restore = await fixture.blockLedgerCommit(carol.id, serviceContainer);
     await fixture.release('core', held, 'relay');
+    released = true;
     await intent;
     assert.equal(published(carol).length, 0, 'A failed endpoint commit must prevent publication');
-  } finally { if (restore) await restore(); }
+  } finally {
+    try { if (restore) await restore(); }
+    finally { if (!released) await fixture.release('core', held, 'drop'); }
+  }
   await command('receiver.restart', { receiverId: carol.id });
   uncertain = (await view(carol)).reservations.find(r => r.status === 'uncertain'); assert(uncertain);
   await command('reservation.reconcile', { receiverId: carol.id, reservationId: uncertain.id });

@@ -2,7 +2,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { randomUUID, randomBytes } = require('node:crypto');
+const { randomUUID, randomBytes, createHash } = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { sleep } = require('./paykit-harness');
 
@@ -51,21 +51,26 @@ function storageFaults(stateRoot, journal = () => {}) {
       fs.rmdirSync(target); // Must still be the empty directory created by this fault.
       if (saved.existed) fs.renameSync(saved.backup, target);
       pending.delete(receiverId);
-      journal({ receiverId, active: false, boundary: 'payments.cbor atomic rename' });
+      journal({ receiverId, faultId: saved.faultId, phase: 'host', active: false, boundary: 'payments.cbor atomic rename' });
       return;
     }
     assert(!pending.has(receiverId), 'Storage fault already active');
-    const backup = path.join(directory, `.payments-fixture-${randomUUID()}`);
+    const faultId = randomUUID();
+    const backup = path.join(directory, `.payments-fixture-${faultId}`);
+    let expected = { kind: 'absent' };
     let existed = false;
     try {
       const stat = fs.lstatSync(target);
       assert(stat.isFile() && !stat.isSymbolicLink(), 'Expected regular payment ledger');
+      expected = { kind: 'file', digest: createHash('sha256').update(fs.readFileSync(target)).digest('hex') };
       fs.renameSync(target, backup); existed = true;
     } catch (error) { if (error.code !== 'ENOENT') throw error; }
     try { fs.mkdirSync(target, { mode: 0o700 }); }
     catch (error) { if (existed) fs.renameSync(backup, target); throw error; }
-    pending.set(receiverId, { backup, existed });
-    journal({ receiverId, active: true, boundary: 'payments.cbor atomic rename' });
+    const saved = { backup, existed, expected, faultId };
+    pending.set(receiverId, saved);
+    journal({ receiverId, faultId, phase: 'host', active: true, boundary: 'payments.cbor atomic rename' });
+    return saved;
   }
   function restoreFaults() {
     const failures = [];
@@ -75,6 +80,57 @@ function storageFaults(stateRoot, journal = () => {}) {
     assert.equal(failures.length, 0, `Storage fault restoration failed for ${failures.join(', ')}`);
   }
   return { setLedgerWritable, restoreFaults };
+}
+// Bind mounts can publish host rename results asynchronously. The scenario must
+// observe each boundary from the same namespace as the receiver before proceeding.
+function visibleStorageFaults(faults, readGuest, journal, { timeoutMs = 5000, pollMs = 50 } = {}) {
+  async function confirm(receiverId, expected) {
+    const deadline = Date.now() + timeoutMs;
+    let attempts = 0;
+    while (Date.now() < deadline) {
+      attempts++;
+      try {
+        const observed = await readGuest(receiverId);
+        if (observed.kind === expected.kind &&
+            (expected.kind !== 'file' || observed.digest === expected.digest)) return attempts;
+      } catch (_) { /* Only a matching guest observation permits progression. */ }
+      await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+    }
+    throw new Error(`Guest payment ledger ${expected.kind} visibility deadline exceeded`);
+  }
+  async function blockLedgerCommit(receiverId) {
+    const saved = faults.setLedgerWritable(receiverId, false);
+    const record = (active, observed, attempts) => journal({
+      receiverId, faultId: saved.faultId, phase: 'guest', active,
+      observed, attempts, boundary: 'payments.cbor atomic rename',
+    });
+    const restore = async () => {
+      faults.setLedgerWritable(receiverId, true);
+      const attempts = await confirm(receiverId, saved.expected);
+      record(false, saved.expected.kind === 'file' ? 'originalFile' : 'absent', attempts);
+    };
+    try {
+      const attempts = await confirm(receiverId, { kind: 'directory' });
+      record(true, 'directory', attempts);
+    } catch (error) {
+      await restore();
+      throw error;
+    }
+    return restore;
+  }
+  return { blockLedgerCommit };
+}
+function readGuestLedger(docker, serviceContainer, receiverId) {
+  assert(uuid.test(receiverId));
+  assert.equal(typeof docker.withTimeout, 'function', 'A bounded Docker probe is required');
+  const output = docker.withTimeout(1000, 'exec', serviceContainer, 'sh', '-c',
+    'if [ -L "$1" ]; then exit 2; elif [ -d "$1" ]; then echo directory; elif [ -f "$1" ]; then sha256sum "$1"; elif [ ! -e "$1" ]; then echo absent; else exit 2; fi',
+    'paykit-ledger-visibility', `/data/receivers/${receiverId}/payments.cbor`).trim();
+  if (output === 'directory' || output === 'absent') return { kind: output };
+  const match = /^([a-f0-9]{64})\s/.exec(output);
+  assert(match, 'Invalid guest ledger visibility response');
+  // The encrypted-file digest is compared only in memory and never journaled.
+  return { kind: 'file', digest: match[1] };
 }
 function gateControls(controlDir, signal) {
   function arm(channel, action = 'drop') {
@@ -218,7 +274,8 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
   const details = { coreContainer, lndContainers, gateContainer, walletIds, readiness, coreVersion: core('getnetworkinfo').version, images };
   recordWallets(details);
   const storageJournal = [];
-  const faults = storageFaults(stateRoot, entry => { storageJournal.push(entry); recordWallets({ ...details, storageFaults: storageJournal }); });
+  const recordStorage = entry => { storageJournal.push(entry); recordWallets({ ...details, storageFaults: storageJournal }); };
+  const faults = storageFaults(stateRoot, recordStorage);
   function verifyOwned(id) {
     assert.equal(docker('inspect', '-f', '{{index .Config.Labels "polar-paykit.test-run"}}', id).trim(), runId, 'Wallet container owner changed');
   }
@@ -251,7 +308,10 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
     };
   }
   return { ...details, core, lnd, stateRoot, stopLnd, startLnd, walletSnapshot, evidence, ...controls, ...faults,
-    blockLedgerCommit: receiverId => { faults.setLedgerWritable(receiverId, false); return () => faults.setLedgerWritable(receiverId, true); } };
+    blockLedgerCommit: (receiverId, serviceContainer) => {
+      verifyOwned(serviceContainer);
+      return visibleStorageFaults(faults, id => readGuestLedger(docker, serviceContainer, id), recordStorage).blockLedgerCommit(receiverId);
+    } };
 
 }
-module.exports = { createWalletFixture, storageFaults, gateControls, atomicJson, images };
+module.exports = { createWalletFixture, storageFaults, visibleStorageFaults, readGuestLedger, gateControls, atomicJson, images };
