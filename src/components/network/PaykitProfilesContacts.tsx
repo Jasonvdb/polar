@@ -54,6 +54,8 @@ const PaykitProfilesContacts: React.FC<PaykitReceiverPanelProps> = ({
     item => item.peerPublicKey === peer.peerPublicKey,
   );
   const isPrivate = !contact || contact.publicSharing === 'private';
+  const profile = workspace?.profile;
+  const publicReceiverPath = contact?.publicReceiverPath;
   const loadAvatar = (file?: File) => {
     setAvatar(undefined);
     setAvatarError('');
@@ -105,17 +107,19 @@ const PaykitProfilesContacts: React.FC<PaykitReceiverPanelProps> = ({
           Publish a public profile in this receiver’s namespace. A local contact label is
           separate from its public profile.
         </Typography.Paragraph>
-        {workspace?.profile ? (
-          <Profile profile={workspace.profile} />
+        {profile ? (
+          <Profile profile={profile} />
         ) : (
           <p>No published profile for this receiver.</p>
         )}
         <Space direction="vertical" style={{ width: '100%' }}>
           <Button
-            disabled={!workspace?.profile}
+            disabled={!profile}
             onClick={() => {
-              setName(workspace!.profile!.displayName);
-              setAbout(workspace!.profile!.about);
+              if (profile) {
+                setName(profile.displayName);
+                setAbout(profile.about);
+              }
             }}
           >
             Edit published profile
@@ -193,7 +197,7 @@ const PaykitProfilesContacts: React.FC<PaykitReceiverPanelProps> = ({
             </Button>
             <Button
               danger
-              disabled={disabled || !workspace?.profile}
+              disabled={disabled || !profile}
               onClick={() => command('profile.delete', { receiverId })}
             >
               Delete published profile
@@ -267,11 +271,12 @@ const PaykitProfilesContacts: React.FC<PaykitReceiverPanelProps> = ({
               Share contact publicly
             </Button>
             <Button
-              disabled={disabled || !contact || isPrivate || !contact.publicReceiverPath}
+              disabled={disabled || isPrivate || !publicReceiverPath}
               onClick={() =>
+                publicReceiverPath &&
                 command('contact.unpublish', {
                   ...peer,
-                  peerReceiverPath: contact!.publicReceiverPath!,
+                  peerReceiverPath: publicReceiverPath,
                 })
               }
             >

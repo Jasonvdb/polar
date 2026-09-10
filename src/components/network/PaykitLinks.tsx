@@ -84,11 +84,14 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
           style={{ minWidth: 300 }}
           value={undefined}
           onChange={(id: string) => {
-            const peer = state.receivers.find(item => item.id === id)!;
-            setKey(
-              state.participants.find(item => item.id === peer.participantId)!.publicKey,
+            const peer = state.receivers.find(item => item.id === id);
+            const owner = state.participants.find(
+              item => item.id === peer?.participantId,
             );
-            setPath(peer.path);
+            if (peer && owner) {
+              setKey(owner.publicKey);
+              setPath(peer.path);
+            }
           }}
         >
           {state.receivers

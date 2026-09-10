@@ -216,8 +216,9 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
           <Button
             disabled={disabled || !participant || !participantName.trim()}
             onClick={() =>
+              participant &&
               command('participant.rename', {
-                participantId: participant!.id,
+                participantId: participant.id,
                 name: participantName.trim(),
               })
             }
@@ -269,8 +270,9 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
           <Button
             disabled={disabled || !participant || !receiverName.trim()}
             onClick={() =>
+              participant &&
               command('receiver.create', {
-                participantId: participant!.id,
+                participantId: participant.id,
                 name: receiverName.trim(),
                 kind,
               })
@@ -281,8 +283,9 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
           <Button
             disabled={disabled || !receiver || !receiverName.trim()}
             onClick={() =>
+              receiver &&
               command('receiver.rename', {
-                receiverId: receiver!.id,
+                receiverId: receiver.id,
                 name: receiverName.trim(),
               })
             }
