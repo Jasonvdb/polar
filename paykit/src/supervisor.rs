@@ -436,9 +436,7 @@ impl Supervisor {
                 if changed
                     && repository
                         .update(|state| {
-                            state.receiver_workspaces.retain(|w| w.receiver_id != id);
-                            state.receiver_workspaces.push(frame.workspace.clone());
-                            state.event("receiver.workspace", json!(frame.workspace));
+                            state.set_workspace(frame.workspace.clone());
                             Ok(())
                         })
                         .is_err()
