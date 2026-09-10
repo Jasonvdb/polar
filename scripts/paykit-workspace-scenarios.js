@@ -101,7 +101,28 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   assert.equal(link(await state(), aw, bs).state, 'linked');
   await command('link.block', peer(bw, aw));
   await command('link.unblock', peer(bw, aw));
+  const beforeRelink = await state();
+  const oldReceived = link(beforeRelink, bw, aw).latestReceivedListId;
+  const siblingGeneration = beforeRelink.receivers.find(r => r.id === bs.id).generation;
   await establish(bw);
+  // A linked badge alone missed stale ciphertext from the abandoned outbox.
+  const afterRelink = await command('link.sendEmptyList', peer(aw, bw));
+  snapshot = await wait(s => link(s, aw, bw)?.lastSentMessageId === afterRelink.operation.result.outboundMessageId && link(s, bw, aw)?.latestReceivedListId !== oldReceived);
+  const freshReceived = link(snapshot, bw, aw).latestReceivedListId;
+  await command('delivery.sync', { receiverId: bw.id });
+  assert.equal(link(await state(), bw, aw).latestReceivedListId, freshReceived);
+  assert.equal((await state()).receivers.find(r => r.id === bs.id).generation, siblingGeneration);
+  assert.equal(link(await state(), aw, bs).state, 'linked');
+  assert.equal(link(await state(), bs, aw).latestReceivedListId, undefined);
+  if (serviceContainer) {
+    await command('receiver.stop', { receiverId: bw.id });
+    const actual = JSON.parse(docker('exec', serviceContainer, 'polar-paykit', 'inspect-private-list', bw.id, alice.publicKey, aw.path));
+    assert.equal(actual.endpointCount, 0); assert.equal(actual.validListCount, 4); assert.equal(actual.latestStreamItemId, freshReceived);
+    await command('receiver.start', { receiverId: bw.id });
+  }
+  const siblingSend = await command('link.sendEmptyList', peer(aw, bs));
+  await wait(s => link(s, aw, bs)?.lastSentMessageId === siblingSend.operation.result.outboundMessageId && link(s, bs, aw)?.latestReceivedListId !== undefined);
+  assert.equal(link(await state(), bw, aw).latestReceivedListId, freshReceived);
   stage('blocked-peer');
 
   const red = fs.readFileSync(path.join(__dirname, '../paykit/tests/fixtures/avatar-red.png')).toString('base64');

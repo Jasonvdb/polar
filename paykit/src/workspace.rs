@@ -176,10 +176,22 @@ impl Runtime {
             }
             match name {
                 "link.initiate" => {
+                    self.prepare_explicit_relink(
+                        &key,
+                        &path,
+                        self.state.uncertain_peers.contains(&peer),
+                    )
+                    .await?;
                     self.sdk.initiate_link_with_peer(key, path).await?;
                     self.state.uncertain_peers.retain(|p| p != &peer);
                 }
                 "link.accept" => {
+                    self.prepare_explicit_relink(
+                        &key,
+                        &path,
+                        self.state.uncertain_peers.contains(&peer),
+                    )
+                    .await?;
                     self.sdk.accept_link_with_peer(key, path).await?;
                     self.state.uncertain_peers.retain(|p| p != &peer);
                 }
@@ -324,6 +336,33 @@ impl Runtime {
             }
         }
         Ok(json!({"receiverId":self.state.view.receiver_id}))
+    }
+    /// SDK block/unblock abandons local snapshots but retains the old public stream.
+    /// Explicit recovery makes the SDK clear only this peer's local outbox before
+    /// the next handshake; starting directly from NotLinked would reuse old slots.
+    async fn prepare_explicit_relink(
+        &self,
+        key: &PubkyPublicKey,
+        path: &PaykitReceiverPath,
+        uncertain: bool,
+    ) -> anyhow::Result<()> {
+        let needs_recovery = self
+            .storage
+            .transaction(|tx| {
+                let peer = tx.linked_peer(key, path);
+                Ok(recovery_before_explicit_link(
+                    peer.as_ref().map(|p| &p.state),
+                    tx.encrypted_link_state(key, path).is_some(),
+                    uncertain,
+                ))
+            })
+            .await?;
+        if needs_recovery {
+            self.sdk
+                .publish_encrypted_link_recovery_marker(key.clone(), path.clone())
+                .await?;
+        }
+        Ok(())
     }
     async fn publish(&mut self, input: ProfileInput) -> anyhow::Result<()> {
         let mut image = self
@@ -592,6 +631,15 @@ impl Runtime {
         Ok(())
     }
 }
+fn recovery_before_explicit_link(
+    state: Option<&LinkedPeerState>,
+    has_checkpoint: bool,
+    uncertain: bool,
+) -> bool {
+    has_checkpoint
+        && state != Some(&LinkedPeerState::Blocked)
+        && (state == Some(&LinkedPeerState::NotLinked) || uncertain)
+}
 fn retain_recent<T>(cache: &mut Vec<T>, limit: usize) {
     if cache.len() > limit {
         cache.drain(..cache.len() - limit);
@@ -775,6 +823,85 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+    #[test]
+    fn relinking_abandoned_state_requires_sdk_recovery_but_existing_links_are_preserved() {
+        assert!(recovery_before_explicit_link(
+            Some(&LinkedPeerState::NotLinked),
+            true,
+            false
+        ));
+        assert!(!recovery_before_explicit_link(
+            Some(&LinkedPeerState::NotLinked),
+            false,
+            false
+        ));
+        assert!(!recovery_before_explicit_link(None, false, false));
+        for state in [LinkedPeerState::Linked, LinkedPeerState::Linking] {
+            assert!(!recovery_before_explicit_link(Some(&state), true, false));
+            assert!(recovery_before_explicit_link(Some(&state), true, true));
+        }
+        assert!(!recovery_before_explicit_link(
+            Some(&LinkedPeerState::Blocked),
+            true,
+            true
+        ));
+        // The SDK already clears abandoned outboxes when starting from RecoveryRequired.
+        assert!(!recovery_before_explicit_link(
+            Some(&LinkedPeerState::RecoveryRequired),
+            true,
+            false
+        ));
+    }
+    #[tokio::test]
+    async fn failed_recovery_preparation_does_not_start_a_fresh_handshake() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        runtime
+            .storage
+            .transaction(|tx| {
+                tx.save_linked_peer(paykit_sdk::storage::LinkedPeerRecord {
+                    counterparty: key.clone(),
+                    counterparty_receiver_path: path.clone(),
+                    state: LinkedPeerState::NotLinked,
+                    last_sync_at: None,
+                    last_private_receive_at: None,
+                    failure_count: 0,
+                    local_recovery_attempt_id: None,
+                    local_recovery_marker_created_at: None,
+                    local_recovery_marker_last_error: None,
+                    remote_recovery_attempt_id: None,
+                    remote_recovery_marker_observed_at: None,
+                });
+                tx.save_encrypted_link_state(paykit_sdk::storage::EncryptedLinkStateRecord {
+                    counterparty: key.clone(),
+                    counterparty_receiver_path: path.clone(),
+                    link_snapshot: None,
+                    handshake_snapshot: None,
+                    handshake_role: None,
+                    generation: 5,
+                    checkpointed_at: chrono::Utc::now(),
+                });
+                Ok(())
+            })
+            .await
+            .unwrap();
+        // An unavailable grant makes the official recovery API fail. Never bypass it.
+        assert!(runtime
+            .prepare_explicit_relink(&key, &path, false)
+            .await
+            .is_err());
+        let after = runtime
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(&key, &path).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(after.generation, 5);
+        assert!(after.handshake_snapshot.is_none());
+        assert!(after.link_snapshot.is_none());
     }
     #[test]
     fn cache_eviction_preserves_durable_data_and_capacity_allows_existing_edits() {
