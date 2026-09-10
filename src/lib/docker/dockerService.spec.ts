@@ -3,6 +3,7 @@ import { info } from 'electron-log';
 import * as fs from 'fs-extra';
 import { join } from 'path';
 import { IChart } from '@mrblenny/react-flow-chart';
+import { waitFor } from '@testing-library/react';
 import { v2 as compose } from 'docker-compose';
 import Dockerode from 'dockerode';
 import os from 'os';
@@ -796,6 +797,35 @@ describe('DockerService', () => {
       );
     });
 
+    it('should await the node directory rename before reporting success', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const node = network.nodes.lightning[1];
+      let completeRename!: () => void;
+      filesMock.renameFile.mockReturnValueOnce(
+        new Promise<void>(resolve => {
+          completeRename = resolve;
+        }),
+      );
+      const resolved = jest.fn();
+      const result = dockerService
+        .renameNodeDir(network, node, 'new-name')
+        .then(resolved);
+      await waitFor(() => expect(filesMock.renameFile).toHaveBeenCalled());
+      expect(resolved).not.toHaveBeenCalled();
+      completeRename();
+      await result;
+      expect(resolved).toHaveBeenCalledTimes(1);
+    });
+
+    it('should propagate a failed node directory rename', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const error = new Error('permission denied');
+      filesMock.renameFile.mockRejectedValueOnce(error);
+      await expect(
+        dockerService.renameNodeDir(network, network.nodes.lightning[1], 'new-name'),
+      ).rejects.toBe(error);
+    });
+
     it('should not rename a node dir that doesnt exist', async () => {
       filesMock.exists.mockResolvedValue(false);
       const node = network.nodes.lightning[0];
@@ -1281,6 +1311,77 @@ describe('DockerService', () => {
       ).rejects.toThrow('Volume copy failed with exit code 1');
     });
 
+    it('should keep the original volume when the host directory rename fails', async () => {
+      const oldVolumeName = `polar-paykit-network-${network.id}_polar-paykit-n${network.id}-${clnNode.name}`;
+      const newVolumeName = `polar-paykit-network-${network.id}_polar-paykit-n${network.id}-new-bob`;
+      const removeOld = jest.fn();
+      const removeNew = jest.fn().mockResolvedValue(undefined);
+      getVolume.mockImplementation((name: string) => ({
+        remove: name === oldVolumeName ? removeOld : removeNew,
+      }));
+      filesMock.exists.mockResolvedValue(true);
+      const error = new Error('host rename denied');
+      filesMock.renameFile.mockRejectedValueOnce(error);
+
+      await expect(dockerService.renameNodeDir(network, clnNode, 'new-bob')).rejects.toBe(
+        error,
+      );
+
+      expect(getVolume).toHaveBeenCalledWith(newVolumeName);
+      expect(removeNew).toHaveBeenCalledTimes(1);
+      expect(removeOld).not.toHaveBeenCalled();
+    });
+
+    it('should retain the original volume and error if rollback cleanup also fails', async () => {
+      const oldVolumeName = `polar-paykit-network-${network.id}_polar-paykit-n${network.id}-${clnNode.name}`;
+      const newVolumeName = `polar-paykit-network-${network.id}_polar-paykit-n${network.id}-new-bob`;
+      const removeOld = jest.fn();
+      const cleanupError = new Error('new volume busy');
+      getVolume.mockImplementation((name: string) => ({
+        remove:
+          name === oldVolumeName ? removeOld : jest.fn().mockRejectedValue(cleanupError),
+      }));
+      filesMock.exists.mockResolvedValue(true);
+      const error = new Error('host rename denied');
+      filesMock.renameFile.mockRejectedValueOnce(error);
+
+      await expect(dockerService.renameNodeDir(network, clnNode, 'new-bob')).rejects.toBe(
+        error,
+      );
+
+      expect(removeOld).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledWith(
+        `Failed to clean up new volume ${newVolumeName}: ${cleanupError}`,
+      );
+    });
+
+    it('should not move the host directory if the volume copy fails', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      mockCopyContainer.wait.mockResolvedValue({ StatusCode: 1 });
+      await expect(
+        dockerService.renameNodeDir(network, clnNode, 'new-bob'),
+      ).rejects.toThrow('Volume copy failed');
+      expect(filesMock.renameFile).not.toHaveBeenCalled();
+    });
+
+    it('should not remove the original volume until the host rename completes', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const removeVolume = jest.fn().mockResolvedValue(undefined);
+      getVolume.mockReturnValue({ remove: removeVolume });
+      let completeRename!: () => void;
+      filesMock.renameFile.mockReturnValueOnce(
+        new Promise<void>(resolve => {
+          completeRename = resolve;
+        }),
+      );
+      const result = dockerService.renameNodeDir(network, clnNode, 'new-bob');
+      await waitFor(() => expect(filesMock.renameFile).toHaveBeenCalled());
+      expect(removeVolume).not.toHaveBeenCalled();
+      completeRename();
+      await result;
+      expect(removeVolume).toHaveBeenCalledTimes(1);
+    });
+
     it('should delete stale CLN cert files before renaming', async () => {
       filesMock.exists.mockResolvedValue(true);
       await dockerService.renameNodeDir(network, clnNode, 'new-bob');
@@ -1290,6 +1391,7 @@ describe('DockerService', () => {
     });
 
     it('should log and not throw if removing the old volume after rename fails', async () => {
+      filesMock.exists.mockResolvedValue(true);
       const oldContainerName = `polar-paykit-n${network.id}-${clnNode.name}`;
       const oldVolumeName = `polar-paykit-network-${network.id}_${oldContainerName}`;
       const removeError = new Error('volume still in use');
@@ -1301,6 +1403,10 @@ describe('DockerService', () => {
 
       await dockerService.renameNodeDir(network, clnNode, 'new-bob');
 
+      expect(filesMock.renameFile).toHaveBeenCalledWith(
+        join(network.path, 'volumes', 'c-lightning', clnNode.name),
+        join(network.path, 'volumes', 'c-lightning', 'new-bob'),
+      );
       expect(info).toHaveBeenCalledWith(
         `Failed to remove old volume ${oldVolumeName}: ${removeError}`,
       );

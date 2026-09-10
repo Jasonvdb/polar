@@ -3,7 +3,13 @@ import * as log from 'electron-log';
 import { waitFor } from '@testing-library/react';
 import detectPort from 'detect-port';
 import { createStore } from 'easy-peasy';
-import { CLightningNode, NodeImplementation, Status, TapdNode } from 'shared/types';
+import {
+  CLightningNode,
+  LndNode,
+  NodeImplementation,
+  Status,
+  TapdNode,
+} from 'shared/types';
 import { AutoMineMode, CustomImage, Network } from 'types';
 import * as asyncUtil from 'utils/async';
 import { initChartFromNetwork } from 'utils/chart';
@@ -1483,6 +1489,43 @@ describe('Network model', () => {
       const { mineBlock } = store.getActions().network;
       await expect(mineBlock({ id: 10 })).rejects.toThrow();
     });
+
+    it.each([Status.Stopped, Status.Started, Status.Locked])(
+      'should preserve node and chart paths and not restart after rename fails from status %s',
+      async status => {
+        const { addNetwork, renameNode, setStatus } = store.getActions().network;
+        await addNetwork(addNetworkArgs);
+        setStatus({ id: firstNetwork().id, status });
+        const node = firstNetwork().nodes.lightning[0] as LndNode;
+        const originalName = node.name;
+        const originalPaths = { ...node.paths };
+        const originalChart = JSON.parse(
+          JSON.stringify(store.getState().designer.allCharts[node.networkId]),
+        );
+        const error = new Error('permission denied');
+        dockerServiceMock.renameNodeDir.mockRejectedValueOnce(error);
+        dockerServiceMock.saveNetworks.mockClear();
+        dockerServiceMock.saveComposeFile.mockClear();
+        dockerServiceMock.start.mockClear();
+
+        await expect(renameNode({ node, newName: 'renamed' })).rejects.toBe(error);
+
+        const savedNode = firstNetwork().nodes.lightning[0] as LndNode;
+        expect(savedNode.name).toBe(originalName);
+        expect(savedNode.paths).toEqual(originalPaths);
+        const currentChart = store.getState().designer.allCharts[node.networkId];
+        // Stopping updates chart status, but node identifiers and links stay intact.
+        expect(Object.keys(currentChart.nodes)).toEqual(Object.keys(originalChart.nodes));
+        expect(currentChart.links).toEqual(originalChart.links);
+        Object.entries(currentChart.nodes).forEach(([id, chartNode]) => {
+          expect(chartNode.id).toBe(originalChart.nodes[id].id);
+          expect(chartNode.ports).toEqual(originalChart.nodes[id].ports);
+        });
+        expect(dockerServiceMock.saveNetworks).not.toHaveBeenCalled();
+        expect(dockerServiceMock.saveComposeFile).not.toHaveBeenCalled();
+        expect(dockerServiceMock.start).not.toHaveBeenCalled();
+      },
+    );
 
     it('should fail to rename node with an invalid id', async () => {
       const { addNetwork, renameNode } = store.getActions().network;

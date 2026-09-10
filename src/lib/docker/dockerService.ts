@@ -283,11 +283,10 @@ class DockerService implements DockerLibrary {
       }
 
       await this.renameCLNVolume(network, node as CLightningNode, newName);
-      if (await exists(oldPath)) await renameFile(oldPath, newPath);
       return;
     }
 
-    if (await exists(oldPath)) renameFile(oldPath, newPath);
+    if (await exists(oldPath)) await renameFile(oldPath, newPath);
   }
 
   /**
@@ -698,9 +697,25 @@ class DockerService implements DockerLibrary {
       }
     }
 
+    // Keep the old volume authoritative until the host directory also moves.
+    // A failed host rename must leave the persisted old node name usable.
+    try {
+      const oldPath = nodePath(network, node.implementation, node.name);
+      const newPath = nodePath(network, node.implementation, newName);
+      if (await exists(oldPath)) await renameFile(oldPath, newPath);
+    } catch (error) {
+      try {
+        await docker.getVolume(newVolumeName).remove();
+      } catch (cleanupError) {
+        info(`Failed to clean up new volume ${newVolumeName}: ${cleanupError}`);
+      }
+      throw error;
+    }
+
     info(`CLN volume rename complete: ${oldVolumeName} → ${newVolumeName}`);
 
-    // remove the old volume now that data has been copied
+    // The new volume and host path are ready. Retired-volume cleanup is best
+    // effort: rejecting now would prevent the caller from persisting the new name.
     try {
       await docker.getVolume(oldVolumeName).remove();
       info(`Removed old CLN volume ${oldVolumeName}`);

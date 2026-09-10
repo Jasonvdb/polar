@@ -1,8 +1,8 @@
+import './bootstrapEnvironment';
 import { app } from 'electron';
 import { mkdirSync } from 'fs';
 import electronDebug from 'electron-debug';
 import { debug, error } from 'electron-log';
-import { sync } from 'shell-env';
 import { APP_ID, APP_NAME, paykitConfig } from '../src/shared/paykitConfig';
 import { initLogger } from '../src/shared/utils';
 import { IS_DEV } from './constants';
@@ -24,13 +24,6 @@ debug(`Starting Electron main process`);
 
 // add keyboard shortcuts and auto open dev tools for all windows
 electronDebug({ isEnabled: IS_DEV });
-
-// merge in env vars from the user's shell (i.e. PATH) so that
-// docker commands can be executed
-process.env = {
-  ...sync(),
-  ...process.env,
-};
 
 // This is needed to run electron on windows with dark mode. There's currently a bug in
 // electron v6 when used on Win10 with dark mode enabled and react/redux devtools installed.

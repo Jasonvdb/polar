@@ -71,5 +71,6 @@ export const renameFile = async (oldPath: string, newPath: string): Promise<void
     info(`File renamed successfully from ${oldPath} to ${newPath}`);
   } catch (err) {
     debug('Error occurred while renaming file:', err);
+    throw err;
   }
 };

@@ -164,14 +164,31 @@ describe('Files util', () => {
       expect(mockDebug).not.toBeCalled();
     });
 
-    it('should log an error if renaming fails', async () => {
+    it('should remain pending until the filesystem rename completes', async () => {
+      let completeRename!: () => void;
+      mockFs.rename.mockReturnValueOnce(
+        new Promise<void>(resolve => {
+          completeRename = resolve;
+        }),
+      );
+      const resolved = jest.fn();
+      const result = renameFile('oldFile.txt', 'newFile.txt').then(resolved);
+      await Promise.resolve();
+      expect(resolved).not.toHaveBeenCalled();
+      expect(mockInfo).not.toHaveBeenCalled();
+      completeRename();
+      await result;
+      expect(resolved).toHaveBeenCalledTimes(1);
+    });
+
+    it('should propagate and log an error if renaming fails', async () => {
       const oldPath = 'oldFile.txt';
       const newPath = 'newFile.txt';
       const error = new Error('Rename failed');
 
       mockFs.rename.mockRejectedValueOnce(error);
 
-      await renameFile(oldPath, newPath);
+      await expect(renameFile(oldPath, newPath)).rejects.toBe(error);
 
       expect(mockFs.rename).toBeCalledWith(abs(oldPath), abs(newPath));
       expect(mockInfo).not.toBeCalled();
