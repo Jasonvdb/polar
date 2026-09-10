@@ -220,7 +220,16 @@ impl Wallet {
         }
     }
     pub async fn cancel_invoice(&self, preimage: &[u8; 32]) -> anyhow::Result<()> {
-        self.lnd("POST","/v2/invoices/cancel",Some(json!({"payment_hash":STANDARD.encode(sha256::Hash::hash(preimage).to_byte_array())}))).await?;
+        let hash = sha256::Hash::hash(preimage);
+        let current = self.lnd("GET", &format!("/v1/invoice/{hash}"), None).await;
+        if invoice_needs_cancellation(current)? {
+            self.lnd(
+                "POST",
+                "/v2/invoices/cancel",
+                Some(json!({"payment_hash":STANDARD.encode(hash.to_byte_array())})),
+            )
+            .await?;
+        }
         Ok(())
     }
     async fn lnd(&self, method: &str, path: &str, body: Option<Value>) -> anyhow::Result<Value> {
@@ -250,17 +259,30 @@ impl Wallet {
         let response = request.send().await.map_err(|_| {
             anyhow::anyhow!("Lightning RPC unavailable; reconcile before retrying issuance")
         })?;
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Err(InvoiceMissing.into());
-        }
-        anyhow::ensure!(
-            response.status().is_success(),
-            "Lightning RPC rejected request"
-        );
-        response
+        let status = response.status();
+        let value = response
             .json()
             .await
-            .map_err(|_| anyhow::anyhow!("invalid Lightning RPC response"))
+            .map_err(|_| anyhow::anyhow!("invalid Lightning RPC response"))?;
+        lnd_response(status, value)
+    }
+}
+fn lnd_response(status: reqwest::StatusCode, value: Value) -> anyhow::Result<Value> {
+    if status == reqwest::StatusCode::NOT_FOUND && value["code"] == 5 {
+        return Err(InvoiceMissing.into());
+    }
+    anyhow::ensure!(status.is_success(), "Lightning RPC rejected request");
+    Ok(value)
+}
+fn invoice_needs_cancellation(current: anyhow::Result<Value>) -> anyhow::Result<bool> {
+    match current {
+        Err(error) if error.is::<InvoiceMissing>() => Ok(false),
+        Err(error) => Err(error),
+        Ok(value) => match value["state"].as_str() {
+            Some("CANCELED") => Ok(false),
+            Some("OPEN" | "ACCEPTED") => Ok(true),
+            _ => anyhow::bail!("invoice is settled or its state is unknown"),
+        },
     }
 }
 fn client() -> anyhow::Result<reqwest::Client> {
@@ -360,6 +382,39 @@ mod tests {
             validate_endpoint(ONCHAIN, "bcrt1q2nfxmhd4n3c8834pj72xagvyr9gl57n5r94fsx", 1).is_err()
         );
         assert!(validate_endpoint("bolt12", &good, 123).is_err());
+    }
+    #[test]
+    fn absent_invoice_cleanup_is_complete_without_cancellation_or_issuance() {
+        let missing = lnd_response(
+            reqwest::StatusCode::NOT_FOUND,
+            json!({"code":5,"message":"unable to locate invoice"}),
+        );
+        assert!(!invoice_needs_cancellation(missing).unwrap());
+        assert!(!invoice_needs_cancellation(Ok(json!({"state":"CANCELED"}))).unwrap());
+    }
+    #[test]
+    fn cleanup_preserves_auth_transport_server_and_settled_failures() {
+        for (status, code) in [(401, 16), (403, 7), (500, 2), (404, 2)] {
+            let result = lnd_response(
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                json!({"code":code}),
+            );
+            assert!(invoice_needs_cancellation(result).is_err());
+        }
+        assert!(invoice_needs_cancellation(Err(anyhow::anyhow!("transport failed"))).is_err());
+        for value in [
+            json!({"state":"SETTLED"}),
+            json!({"state":"unknown"}),
+            json!({}),
+        ] {
+            assert!(invoice_needs_cancellation(Ok(value)).is_err());
+        }
+    }
+    #[test]
+    fn existing_unsettled_invoice_still_requires_wallet_cancellation() {
+        for state in ["OPEN", "ACCEPTED"] {
+            assert!(invoice_needs_cancellation(Ok(json!({"state":state}))).unwrap());
+        }
     }
     #[test]
     fn wallet_urls_cannot_smuggle_auth_paths_or_disable_tls() {

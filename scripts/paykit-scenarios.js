@@ -4,7 +4,7 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const { randomUUID } = require('crypto');
 const { execFileSync } = require('child_process');
-const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
+const { sleep, serviceBase, requestJson, runCli, operationFailure } = require('./paykit-harness');
 
 async function run({ base, tokenFile, serviceContainer, postgresContainer, walletFixture, scope = 'full', signal, progress = stage => console.log(stage) }) {
   assert(['full', 'pubky-only'].includes(scope), 'Unknown scenario scope');
@@ -50,7 +50,12 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     while (Date.now() < deadline) {
       const operation = await request(`/v1/operations/${id}`);
       if (['succeeded', 'failed'].includes(operation.data.status)) {
-        assert.equal(operation.data.status, expected, `Unexpected ${name} outcome`);
+        if (operation.data.status !== expected) {
+          let receiver;
+          try { receiver = (await state()).receivers.find(item => item.id === input.receiverId); }
+          catch (_) { /* The known operation error is retained if state is unavailable. */ }
+          assert.fail(operationFailure(name, operation.data, receiver));
+        }
         return { body, operation: operation.data };
       }
       if (Date.now() - lastProgress >= 15000) { progress(`operation.waiting:${name}:${operation.data.status}`); lastProgress = Date.now(); }

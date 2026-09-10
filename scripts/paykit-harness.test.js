@@ -118,3 +118,13 @@ test('requests resolve the current Docker mapping after restart rather than the 
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(JSON.parse(result.stdout), ['http://127.0.0.1:32769/health', 'http://127.0.0.1:32770/health', 'http://127.0.0.1:32770/v1/state']);
 });
+
+
+test('unexpected operation diagnostics retain public failure and receiver state only', () => {
+  const { operationFailure } = require('./paykit-harness');
+  const message = operationFailure('receiver.restart', { id: 'operation-id', status: 'failed', error: { code: 'operation_failed', message: 'Receiver unavailable', privateDetail: 'secret-error' }, result: { privateState: 'secret-result' } }, { id: 'receiver-id', status: 'crashed', generation: 4, lastError: 'Restart required', session: 'secret-session' });
+  assert(message.includes('operation_failed') && message.includes('Receiver unavailable'));
+  assert(message.includes('receiver-id') && message.includes('crashed') && message.includes('Restart required'));
+  assert(!message.includes('secret-'));
+  assert(operationFailure('receiver.restart', { id: 'id', status: 'failed' }).includes('id'));
+});

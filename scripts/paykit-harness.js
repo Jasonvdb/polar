@@ -9,6 +9,13 @@ function sleep(ms, signal) {
   });
 }
 
+function operationFailure(name, operation, receiver) {
+  const text = value => typeof value === 'string' ? value.slice(0, 2048) : undefined;
+  const error = operation.error && { code: text(operation.error.code), message: text(operation.error.message) };
+  const currentReceiver = receiver && { id: text(receiver.id), status: text(receiver.status), generation: receiver.generation, lastError: text(receiver.lastError) };
+  return `Unexpected ${name} outcome: ${JSON.stringify({ operationId: text(operation.id), status: text(operation.status), error, receiver: currentReceiver })}`;
+}
+
 function serviceBase(serviceContainer, docker) {
   const address = docker('port', serviceContainer, '10090/tcp').trim();
   const match = /^127\.0\.0\.1:([0-9]+)$/.exec(address);
@@ -97,4 +104,4 @@ function runCli(work, { cleanup = () => ({ completed: true }), complete, fail, t
   });
 }
 
-module.exports = { sleep, serviceBase, requestJson, runCli };
+module.exports = { sleep, serviceBase, requestJson, runCli, operationFailure };

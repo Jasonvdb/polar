@@ -1,5 +1,5 @@
 import { promises as fs } from 'fs';
-import { join, resolve } from 'path';
+import { join, resolve, sep } from 'path';
 import {
   paykitProxy,
   publicOperation,
@@ -314,21 +314,23 @@ describe('Trusted receiving wallet configuration', () => {
     expect(JSON.stringify(data)).not.toContain('/ignored/untrusted/path');
   });
   it('copies only bounded TLS and invoice authorization files and does not rewrite unchanged files', async () => {
+    const sourceRoot = resolve(walletNetwork().path, 'volumes', 'lnd', 'alice');
+    const expectedSources = [
+      join(sourceRoot, 'tls.cert'),
+      join(sourceRoot, 'data', 'chain', 'bitcoin', 'regtest', 'invoices.macaroon'),
+    ];
     fsMock.readFile.mockImplementation(async path => {
-      if (`${path}`.includes('/volumes/lnd/')) return Buffer.from('credential');
+      if (expectedSources.includes(`${path}`)) return Buffer.from('credential');
       throw Object.assign(new Error('missing'), { code: 'ENOENT' });
     });
     await refreshWalletConfig(walletNetwork(), binding as any);
     const sources = fsMock.readFile.mock.calls
       .map(([path]) => `${path}`)
-      .filter(path => path.includes('/volumes/lnd/'));
-    expect(sources).toEqual([
-      expect.stringMatching(/\/alice\/tls.cert$/),
-      expect.stringMatching(/\/alice\/data\/chain\/bitcoin\/regtest\/invoices.macaroon$/),
-    ]);
+      .filter(path => path.startsWith(`${sourceRoot}${sep}`));
+    expect(sources).toEqual(expectedSources);
     expect(sources.join()).not.toContain('admin.macaroon');
     expect(fsMock.mkdir).toHaveBeenCalledWith(
-      expect.stringContaining('/wallets/lnd-0-core-0'),
+      join(paykitConfig.dataPath, 'paykit-credentials', envId, 'wallets', 'lnd-0-core-0'),
       { recursive: true, mode: 0o700 },
     );
     fsMock.rename.mockClear();
