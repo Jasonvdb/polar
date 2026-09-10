@@ -331,7 +331,11 @@ It never prunes Docker resources. The current UI suite creates stopped networks;
 it does not launch service containers. After the process exits, inspect and remove
 only your test directory. `yarn test:isolation` exercises cleanup against a second
 installation and a concurrent test environment. CI runs UI tests under Xvfb on
-Linux.
+Linux. The runner writes its TestCafe configuration into the owned test root.
+Linux CI passes `--no-sandbox` to the test Electron process because hosted runners
+restrict Chromium user namespaces; interactive launches and other platforms keep
+their normal sandbox settings. CI retains Electron child-process output and
+shared-library diagnostics as workflow artifacts to make startup failures visible.
 
 Before the first feature-branch push, enable GitHub Actions in `Jasonvdb/polar`.
 Fork CI runs for pushes to `codex/flow-vibe-*` branches and for pull requests, as

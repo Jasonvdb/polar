@@ -87,3 +87,64 @@ test('refuses symlinked roots and never follows a networks symlink', t => {
     /canonical/,
   );
 });
+
+const { createTestcafeConfig } = require('./run-e2e');
+
+test('Linux CI uses explicit application paths and the test-only sandbox option', () => {
+  const appRoot = path.resolve('test-application');
+  const config = createTestcafeConfig(appRoot, 'linux', true);
+  assert.equal(config.appPath, appRoot);
+  assert.equal(config.mainWindowUrl, path.join(appRoot, 'build', 'index.html'));
+  assert.deepEqual(config.appArgs, ['--no-sandbox']);
+});
+
+test('interactive Linux and other platforms retain their sandbox launch defaults', () => {
+  for (const [platform, ci] of [
+    ['linux', false],
+    ['darwin', true],
+    ['win32', true],
+  ]) {
+    assert.deepEqual(createTestcafeConfig(path.resolve('app'), platform, ci).appArgs, []);
+  }
+});
+
+test('runner writes the generated configuration only inside the guarded owned root', t => {
+  const { run, other, env } = fixture(t);
+  const launched = [];
+  const entry = { exports: {} };
+  const runnerRequire = name =>
+    name === 'child_process'
+      ? {
+          spawnSync: (...args) => {
+            launched.push(args);
+            return { status: 0 };
+          },
+        }
+      : require(name);
+  runnerRequire.resolve = require.resolve;
+  runnerRequire.main = entry;
+  const execute = runEnv =>
+    require('vm').runInNewContext(
+      fs.readFileSync(path.join(__dirname, 'run-e2e.js'), 'utf8'),
+      {
+        require: runnerRequire,
+        module: entry,
+        __dirname,
+        process: { env: runEnv, platform: 'linux', execPath: process.execPath, argv: [] },
+      },
+    );
+
+  execute({ ...env, CI: 'true' });
+  const configPath = path.join(run, 'testcafe-electron.json');
+  assert.equal(launched.length, 1);
+  assert.equal(launched[0][1][1], `electron:${configPath}`);
+  assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')).appArgs, [
+    '--no-sandbox',
+  ]);
+  assert.throws(
+    () => execute({ ...env, POLAR_PAYKIT_E2E_ROOT: other, CI: 'true' }),
+    /empty/,
+  );
+  assert.equal(fs.existsSync(path.join(other, 'testcafe-electron.json')), false);
+  assert.equal(launched.length, 1);
+});
