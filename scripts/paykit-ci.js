@@ -1,72 +1,180 @@
 #!/usr/bin/env node
 /* Disposable CI runtime. Every Docker object has a unique recorded owner label. */
+const assert = require('assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { randomUUID, randomBytes } = require('crypto');
 const { execFileSync } = require('child_process');
 const { run } = require('./paykit-scenarios');
-const root = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'polar-paykit-ci-'));
-const runId = randomUUID();
-const label = `polar-paykit.test-run=${runId}`;
-const resources = { root, runId, containers: [], networks: [] };
-const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', timeout: 180000 });
-const image = process.env.PAYKIT_TEST_IMAGE || 'polar-paykit/service:pr2';
-const postgres = 'postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af';
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-function record() { fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(resources, null, 2)); }
-async function environment(suffix) {
-  const environmentId = randomUUID();
-  const prefix = `polar-paykit-ci-${runId.slice(0, 8)}-${suffix}`;
-  const data = path.join(root, suffix);
-  const secrets = path.join(data, 'credentials');
-  fs.mkdirSync(secrets, { recursive: true, mode: 0o700 });
-  for (const name of ['master-key', 'api-token', 'postgres-password']) fs.writeFileSync(path.join(secrets, name), randomBytes(32).toString('hex'), { mode: 0o600 });
-  for (const name of ['state', 'postgres']) fs.mkdirSync(path.join(data, name));
-  const network = docker('network', 'create', '--label', label, prefix).trim();
-  resources.networks.push(network); record();
-  const uid = process.getuid ? `${process.getuid()}:${process.getgid()}` : '1000:1000';
-  const database = docker('run', '-d', '--name', `${prefix}-postgres`, '--label', label, '--network', prefix, '--network-alias', 'paykit-postgres', '--user', uid,
-    '-v', `${secrets}:/run/paykit:ro`, '-v', `${path.join(data, 'postgres')}:/var/lib/postgresql`,
-    '-e', 'POSTGRES_USER=pubky', '-e', 'POSTGRES_DB=pubky', '-e', 'PGDATA=/var/lib/postgresql/18/docker', '-e', 'POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', postgres).trim();
-  resources.containers.push(database); record();
-  let ready = false;
-  for (let attempt = 0; attempt < 60; attempt++) {
-    try { docker('exec', database, 'pg_isready', '-U', 'pubky', '-d', 'pubky'); ready = true; break; } catch (_) { await sleep(1000); }
+const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
+const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', 'complete'];
+
+function validateReport(root) {
+  const report = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));
+  const ledger = JSON.parse(fs.readFileSync(path.join(root, 'resources.json'), 'utf8'));
+  assert.equal(report.schemaVersion, 1);
+  assert.equal(report.runId, ledger.runId);
+  assert.equal(report.passed, true);
+  assert(Number.isFinite(Date.parse(report.completedAt)));
+  assert.equal(report.cleanup.completed, true);
+  assert.deepEqual(report.cleanup.remainingContainers, []);
+  assert.deepEqual(report.cleanup.remainingNetworks, []);
+  assert.deepEqual(report.cleanup, ledger.cleanup);
+  assert.equal(report.environments.length, 2);
+  assert.equal(ledger.environments.length, 2);
+  for (const environment of report.environments) {
+    assert.equal(environment.passed, true);
+    assert(ledger.environments.some(item => item.environmentId === environment.environmentId));
+    assert.deepEqual(environment.stages, requiredStages);
+    assert.equal(new Set(environment.participantKeys).size, 3);
+    assert.equal(new Set(environment.receiverNoiseKeys).size, 4);
   }
-  if (!ready) throw new Error('PostgreSQL readiness timed out');
-  const service = docker('run', '-d', '--init', '--name', `${prefix}-service`, '--label', label, '--network', prefix, '--user', uid,
-    '-p', '127.0.0.1::10090', '-v', `${secrets}:/run/paykit:ro`, '-v', `${path.join(data, 'state')}:/data`,
-    '-e', `PAYKIT_ENVIRONMENT_ID=${environmentId}`, '-e', 'PAYKIT_DATA_DIR=/data', '-e', 'PAYKIT_KEY_FILE=/run/paykit/master-key',
-    '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', image).trim();
-  resources.containers.push(service); record();
-  const address = docker('port', service, '10090/tcp').trim();
-  return { base: `http://${address}`, tokenFile: path.join(secrets, 'api-token'), serviceContainer: service, postgresContainer: database };
+  const [a, b] = report.environments;
+  assert.notEqual(a.environmentId, b.environmentId);
+  assert(!a.participantKeys.some(key => b.participantKeys.includes(key)));
+  assert(!a.receiverNoiseKeys.some(key => b.receiverNoiseKeys.includes(key)));
+  assert.equal(report.survivingEnvironmentVerified, true);
+  return report;
 }
-async function main() {
-  record(); console.log(`Paykit CI artifact root: ${root}`);
-  try {
-    const a = await environment('a');
-    const b = await environment('b');
-    const reportB = await run(b);
-    const reportA = await run(a);
-    const survivor = await fetch(`${b.base}/v1/state`, { headers: { authorization: `Bearer ${fs.readFileSync(b.tokenFile, 'utf8').trim()}` }, signal: AbortSignal.timeout(10000) }).then(response => response.json());
-    if (JSON.stringify(survivor.participants.map(p => p.publicKey)) !== JSON.stringify(reportB.participantKeys) || survivor.receivers.some(r => r.status !== 'running')) throw new Error('Second environment changed during first environment scenarios');
-    if (reportA.environmentId === reportB.environmentId || reportA.participantKeys.some(key => reportB.participantKeys.includes(key))) throw new Error('Environments are not isolated');
-    fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify({ passed: true, environments: [reportA, reportB] }, null, 2));
-    console.log('Both persistent Paykit environment scenarios passed.');
-  } finally {
-    for (const id of resources.containers.reverse()) {
-      const owner = docker('inspect', '-f', '{{index .Config.Labels "polar-paykit.test-run"}}', id).trim();
-      if (owner !== runId) throw new Error('Cleanup owner mismatch');
-      docker('stop', '--timeout', '30', id); docker('rm', id);
+
+function start() {
+  const root = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'polar-paykit-ci-'));
+  const runId = randomUUID();
+  const label = `polar-paykit.test-run=${runId}`;
+  const startedAt = new Date().toISOString();
+  const resources = { root, runId, nodeVersion: process.version, containers: [], networks: [], environments: [] };
+  const journal = [];
+  let lastScenarioStage = 'run:started';
+  const image = process.env.PAYKIT_TEST_IMAGE || 'polar-paykit/service:pr2';
+  const postgres = 'postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af';
+  const record = () => fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(resources, null, 2));
+  const docker = (...args) => execFileSync('docker', args, { encoding: 'utf8', timeout: 60000, killSignal: 'SIGTERM' });
+  function progress(stage) {
+    const entry = { at: new Date().toISOString(), stage };
+    journal.push(entry);
+    if (!stage.startsWith('cleanup:')) lastScenarioStage = stage;
+    fs.writeFileSync(path.join(root, 'progress.json'), JSON.stringify(journal, null, 2));
+    console.log(`[${entry.at}] ${stage}`);
+  }
+  async function environment(suffix, signal) {
+    signal.throwIfAborted(); progress(`${suffix}:provisioning`);
+    const environmentId = randomUUID();
+    const prefix = `polar-paykit-ci-${runId.slice(0, 8)}-${suffix}`;
+    const data = path.join(root, suffix);
+    const secrets = path.join(data, 'credentials');
+    fs.mkdirSync(secrets, { recursive: true, mode: 0o700 });
+    for (const name of ['master-key', 'api-token', 'postgres-password']) fs.writeFileSync(path.join(secrets, name), randomBytes(32).toString('hex'), { mode: 0o600 });
+    for (const name of ['state', 'postgres']) fs.mkdirSync(path.join(data, name));
+    signal.throwIfAborted();
+    const network = docker('network', 'create', '--label', label, prefix).trim();
+    resources.networks.push(network); record();
+    const uid = process.getuid ? `${process.getuid()}:${process.getgid()}` : '1000:1000';
+    signal.throwIfAborted();
+    const database = docker('run', '-d', '--name', `${prefix}-postgres`, '--label', label, '--network', prefix, '--network-alias', 'paykit-postgres', '--user', uid,
+      '-v', `${secrets}:/run/paykit:ro`, '-v', `${path.join(data, 'postgres')}:/var/lib/postgresql`,
+      '-e', 'POSTGRES_USER=pubky', '-e', 'POSTGRES_DB=pubky', '-e', 'PGDATA=/var/lib/postgresql/18/docker', '-e', 'POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', postgres).trim();
+    resources.containers.push(database); record();
+    let ready = false;
+    for (let attempt = 0; attempt < 60; attempt++) {
+      signal.throwIfAborted();
+      try { docker('exec', database, 'pg_isready', '-U', 'pubky', '-d', 'pubky'); ready = true; break; }
+      catch (_) { await sleep(1000, signal); }
+    }
+    if (!ready) throw new Error('PostgreSQL readiness timed out');
+    signal.throwIfAborted();
+    const service = docker('run', '-d', '--init', '--name', `${prefix}-service`, '--label', label, '--network', prefix, '--user', uid,
+      '-p', '127.0.0.1::10090', '-v', `${secrets}:/run/paykit:ro`, '-v', `${path.join(data, 'state')}:/data`,
+      '-e', `PAYKIT_ENVIRONMENT_ID=${environmentId}`, '-e', 'PAYKIT_DATA_DIR=/data', '-e', 'PAYKIT_KEY_FILE=/run/paykit/master-key',
+      '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', image).trim();
+    resources.containers.push(service);
+    resources.environments.push({ environmentId, suffix, service, database }); record();
+    signal.throwIfAborted();
+    const base = serviceBase(service, docker);
+    progress(`${suffix}:provisioned`);
+    progress(`${suffix}:endpoint:${base}`);
+    return { base, tokenFile: path.join(secrets, 'api-token'), serviceContainer: service, postgresContainer: database };
+  }
+  async function work(signal) {
+    const a = await environment('a', signal);
+    const b = await environment('b', signal);
+    const reportB = await run({ ...b, signal, progress: stage => progress(`b:${stage}`) });
+    const reportA = await run({ ...a, signal, progress: stage => progress(`a:${stage}`) });
+    progress('isolation:survivor-check');
+    signal.throwIfAborted();
+    const survivorBase = serviceBase(b.serviceContainer, docker);
+    progress(`isolation:survivor-endpoint:${survivorBase}`);
+    const survivor = await requestJson(`${survivorBase}/v1/state`, { headers: { authorization: `Bearer ${fs.readFileSync(b.tokenFile, 'utf8').trim()}` } }, signal);
+    assert.equal(survivor.status, 200);
+    assert.deepEqual(survivor.data.participants.map(p => p.publicKey), reportB.participantKeys);
+    assert(survivor.data.receivers.every(r => r.status === 'running'));
+    return { environments: [reportA, reportB], survivingEnvironmentVerified: true };
+  }
+  function cleanup() {
+    progress('cleanup:started');
+    const result = { completed: false, remainingContainers: [], remainingNetworks: [], errors: [] };
+    // A timed-out Docker create may have committed before its ID reached stdout.
+    // Reconcile the unique run label before deciding which resources require cleanup.
+    try {
+      const containers = docker('ps', '-aq', '--no-trunc', '--filter', `label=${label}`).trim().split(/\s+/).filter(Boolean);
+      const networks = docker('network', 'ls', '--no-trunc', '--format', '{{.ID}}', '--filter', `label=${label}`).trim().split(/\s+/).filter(Boolean);
+      resources.containers = [...new Set([...resources.containers, ...containers])];
+      resources.networks = [...new Set([...resources.networks, ...networks])];
+      record();
+    } catch (_) { result.errors.push('Owned Docker inventory unavailable; cleanup cannot be confirmed'); }
+    for (const id of resources.containers.slice().reverse()) {
+      try {
+        const owner = docker('inspect', '-f', '{{index .Config.Labels "polar-paykit.test-run"}}', id).trim();
+        if (owner !== runId) throw new Error('owner mismatch');
+        docker('stop', '--timeout', '-1', id); docker('rm', id);
+      } catch (_) { result.remainingContainers.push(id); result.errors.push(`Container ${id} cleanup failed; retained for inspection`); }
     }
     for (const id of resources.networks) {
-      const owner = docker('network', 'inspect', '-f', '{{index .Labels "polar-paykit.test-run"}}', id).trim();
-      if (owner !== runId) throw new Error('Cleanup network owner mismatch');
-      docker('network', 'rm', id);
+      try {
+        const owner = docker('network', 'inspect', '-f', '{{index .Labels "polar-paykit.test-run"}}', id).trim();
+        if (owner !== runId) throw new Error('owner mismatch');
+        docker('network', 'rm', id);
+      } catch (_) { result.remainingNetworks.push(id); result.errors.push(`Network ${id} cleanup failed; retained for inspection`); }
     }
-    for (const suffix of ['a', 'b']) fs.rmSync(path.join(root, suffix), { recursive: true, force: true });
+    if (!result.errors.length) {
+      try {
+        const containers = docker('ps', '-aq', '--no-trunc', '--filter', `label=${label}`).trim();
+        const networks = docker('network', 'ls', '--no-trunc', '--format', '{{.ID}}', '--filter', `label=${label}`).trim();
+        if (containers || networks) throw new Error('Owned resources remain');
+      } catch (_) { result.errors.push('Final Docker cleanup inventory could not be verified'); }
+    }
+    if (!result.errors.length) {
+      try { for (const suffix of ['a', 'b']) fs.rmSync(path.join(root, suffix), { recursive: true, force: true }); }
+      catch (_) { result.errors.push('Owned data cleanup failed; retained for inspection'); }
+    }
+    result.completed = result.errors.length === 0;
+    resources.cleanup = result; record();
+    progress(result.completed ? 'cleanup:completed' : 'cleanup:incomplete');
+    return result;
+  }
+  record(); progress('run:started');
+  console.log(`Paykit CI artifact root: ${root}; Node ${process.version}`);
+  if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `artifact-root=${root}\n`);
+  runCli(work, {
+    cleanup,
+    complete(result, cleaned) {
+      const report = { schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: true, cleanup: cleaned, ...result };
+      fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(report, null, 2));
+      validateReport(root);
+      progress('run:completed');
+      console.log('Both persistent Paykit environment scenarios passed.');
+    },
+    fail(error, cleaned) {
+      fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify({ schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: false, cleanup: cleaned, error: error.message, lastStage: lastScenarioStage }, null, 2));
+    },
+  });
+}
+module.exports = { validateReport, requiredStages };
+if (require.main === module) {
+  if (process.argv[2] === '--verify-report') {
+    try { validateReport(process.argv[3]); console.log('Required Paykit completion report verified.'); }
+    catch (_) { console.error('Missing, incomplete or invalid Paykit completion report'); process.exitCode = 1; }
+  } else {
+    start();
   }
 }
-main().catch(error => { console.error(error.message); process.exitCode = 1; });
