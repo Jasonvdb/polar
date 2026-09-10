@@ -331,4 +331,10 @@ It never prunes Docker resources. The current UI suite creates stopped networks;
 it does not launch service containers. After the process exits, inspect and remove
 only your test directory. `yarn test:isolation` exercises cleanup against a second
 installation and a concurrent test environment. CI runs UI tests under Xvfb on
-Linux. Packaging keeps artifacts in fork CI and never uploads release assets.
+Linux.
+
+Before the first feature-branch push, enable GitHub Actions in `Jasonvdb/polar`.
+Fork CI runs for pushes to `codex/flow-vibe-*` branches and for pull requests, as
+well as the default branch and `ci/*` pushes. Check the fork's Actions tab for
+Linux, Windows, and macOS results. Packaging retains downloadable workflow
+artifacts; it never uploads assets to upstream releases.
