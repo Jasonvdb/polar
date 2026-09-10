@@ -122,6 +122,40 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   const rotated = await resolve(bob, 'private', ONCHAIN);
   assert(BigInt(rotated.version) > BigInt(resolved.version)); assert.notEqual(rotated.endpoint, resolved.endpoint);
   for (const old of privateRecords) { const retained = (await view(bob)).reservations.find(r => r.id === old.id); assert.equal(retained.status, 'superseded'); assert.equal(retained.cleanupStatus, 'complete'); }
+  const replacementRecords = active(await view(bob)).filter(r => r.source === 'private');
+  const assertStaleCancellationSafe = async oldRecords => {
+    for (const old of oldRecords) await command('reservation.cancel', { receiverId: bob.id, reservationId: old.id }, randomUUID());
+    // Drain the sender and receive at the peer before resolving: an immediate read
+    // could incorrectly pass while an erroneous empty list is still in transit.
+    await command('delivery.sync', { receiverId: bob.id });
+    await command('delivery.sync', { receiverId: alice.id });
+    for (const record of replacementRecords) {
+      const currentResolution = await resolve(bob, 'private', record.method);
+      assert.equal(currentResolution.version, rotated.version);
+      assert.equal(currentResolution.endpoint, record.endpoint);
+    }
+    const afterCancellation = await view(bob);
+    for (const record of replacementRecords) {
+      const retainedReplacement = afterCancellation.reservations.find(r => r.id === record.id);
+      assert.equal(retainedReplacement.status, 'active');
+      assert.equal(retainedReplacement.endpoint, record.endpoint);
+      assert.equal(retainedReplacement.cleanupStatus, 'notRequired');
+    }
+    await verifyWallet(bob, replacementRecords, 1);
+    for (const old of oldRecords) {
+      const currentOld = (await view(bob)).reservations.find(r => r.id === old.id);
+      assert.equal(currentOld.status, old.status);
+      assert.equal(currentOld.cleanupStatus, 'complete');
+      if (old.method === BOLT11) {
+        const oldInvoice = await fixture.lnd(1, 'decodepayreq', old.endpoint);
+        assert.equal((await fixture.lnd(1, 'lookupinvoice', oldInvoice.payment_hash)).state, 'CANCELED');
+      }
+    }
+  };
+  const superseded = (await view(bob)).reservations.filter(r => privateRecords.some(old => old.id === r.id));
+  await assertStaleCancellationSafe(superseded);
+  await command('receiver.restart', { receiverId: bob.id });
+  await assertStaleCancellationSafe(superseded);
   stage('reservation-rotation');
 
   const current = active(await view(bob)).find(r => r.source === 'private' && r.method === BOLT11);
@@ -154,6 +188,9 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
     const failed = (await view(bob)).reservations.find(r => r.id === cleanupRecord.id);
     assert.equal(failed.status, 'cancelled'); assert.equal(failed.cleanupStatus, 'failed'); assert(failed.lastError);
   } finally { await fixture.startLnd(1); }
+  // A repeated semantic cancellation must retry failed wallet cleanup without
+  // starting a second withdrawal; explicit reconciliation remains idempotent.
+  await command('reservation.cancel', { receiverId: bob.id, reservationId: cleanupRecord.id }, randomUUID());
   await command('reservation.reconcile', { receiverId: bob.id, reservationId: cleanupRecord.id });
   await wait(s => workspace(s, bob).reservations.find(r => r.id === cleanupRecord.id).cleanupStatus === 'complete');
   stage('wallet-cleanup-recovery');
@@ -164,6 +201,15 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   await command('reservation.create', { ...peer(bob, alice), ...terms });
   const fresh = active(await view(bob)).find(r => r.source === 'private' && r.method === ONCHAIN);
   assert(!before.some(r => r.endpoint === fresh.endpoint));
+  await wait(s => active(workspace(s, bob)).filter(r => r.source === 'private').every(r => r.deliveryStatus === 'sent'));
+  const replacementAfterCancel = await resolve(bob, 'private', ONCHAIN);
+  for (const old of [current, cleanupRecord]) await command('reservation.cancel', { receiverId: bob.id, reservationId: old.id }, randomUUID());
+  await command('delivery.sync', { receiverId: bob.id });
+  await command('delivery.sync', { receiverId: alice.id });
+  const unchanged = await resolve(bob, 'private', ONCHAIN);
+  assert.equal(unchanged.version, replacementAfterCancel.version);
+  assert.equal(unchanged.endpoint, fresh.endpoint);
+  await verifyWallet(bob, active(await view(bob)).filter(r => r.source === 'private'), 1);
   stage('reservation-persistence');
 
   await configure(carol, fixture.walletIds.fault, [ONCHAIN], [ONCHAIN]);

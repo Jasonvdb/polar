@@ -276,8 +276,12 @@ impl WalletAdapter {
     }
     pub fn retire_list(&self, list_id: &str, status: &str) -> anyhow::Result<()> {
         self.update(|s| {
+            // A terminal list may predate the peer's current list. Keep cleanup
+            // retryable without enqueueing a new peer-wide withdrawal for it.
+            let mut retired = false;
             for r in &mut s.records {
-                if r.view.list_id == list_id {
+                if r.view.list_id == list_id && eligible(&r.view) {
+                    retired = true;
                     r.view.status = status.into();
                     r.view.cleanup_status = "pending".into();
                     if let (Some(key), Some(path)) =
@@ -288,7 +292,11 @@ impl WalletAdapter {
                     }
                 }
             }
-            if let Some(list) = s.public_list.as_mut().filter(|l| l.id == list_id) {
+            if let Some(list) = s
+                .public_list
+                .as_mut()
+                .filter(|l| retired && l.id == list_id)
+            {
                 list.status = if status == "cancelled" {
                     "withdrawn"
                 } else {
@@ -859,6 +867,78 @@ mod issuance_tests {
         assert!(!a.snapshot().unwrap().records[0].issuance_started);
         task.abort();
         let _ = task.await;
+    }
+    #[tokio::test]
+    async fn terminal_retirement_preserves_replacement_and_cleanup_across_restart() {
+        for terminal in ["superseded", "cancelled", "expired"] {
+            for cleanup in ["pending", "failed", "complete"] {
+                let dir = tempfile::tempdir().unwrap();
+                let a = setup(dir.path(), "http://unused:18443".into());
+                a.retire_list("list", terminal).unwrap();
+                a.update(|s| {
+                    let old = &mut s.records[0];
+                    old.view.cleanup_status = cleanup.into();
+                    old.view.delivery_status = "sent".into();
+                    old.view.outbound_message_id = Some("11".into());
+                    let mut replacement = old.clone();
+                    replacement.view.id = "replacement".into();
+                    replacement.view.list_id = "new-list".into();
+                    replacement.view.status = "active".into();
+                    replacement.view.cleanup_status = "notRequired".into();
+                    replacement.view.outbound_message_id = Some("12".into());
+                    s.records.push(replacement);
+                    // Successful replacement publication completed the earlier withdrawal.
+                    s.withdrawals.clear();
+                    Ok(())
+                })
+                .unwrap();
+                drop(a);
+                let a = WalletAdapter::open(
+                    Arc::new(Vault::new(dir.path().into(), [6; 32], "issuance".into()).unwrap()),
+                    Uuid::nil(),
+                    "owner".into(),
+                )
+                .unwrap();
+                let before = serde_json::to_value(a.snapshot().unwrap()).unwrap();
+                a.retire_list("list", "cancelled").unwrap();
+                a.retire_list("list", "cancelled").unwrap();
+                assert_eq!(serde_json::to_value(a.snapshot().unwrap()).unwrap(), before);
+                // Pending/failed wallet cleanup remains retryable after the semantic no-op.
+                a.cleanup("reservation").await.unwrap();
+                let state = a.snapshot().unwrap();
+                assert_eq!(state.records[0].view.cleanup_status, "complete");
+                assert_eq!(state.records[0].view.status, terminal);
+                assert_eq!(state.records[1].view.status, "active");
+                assert!(state.withdrawals.is_empty());
+            }
+        }
+    }
+    #[test]
+    fn repeated_retirement_keeps_unfinished_withdrawal_and_completed_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = setup(dir.path(), "http://unused:18443".into());
+        a.update(|s| {
+            s.records[0].view.status = "active".into();
+            s.records[0].view.expires_at =
+                (chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339();
+            Ok(())
+        })
+        .unwrap();
+        a.retire_list("list", "expired").unwrap();
+        assert_eq!(a.snapshot().unwrap().records[0].view.status, "expired");
+        assert_eq!(
+            a.snapshot().unwrap().records[0].view.cleanup_status,
+            "pending"
+        );
+        a.update(|s| {
+            s.records[0].view.cleanup_status = "complete".into();
+            Ok(())
+        })
+        .unwrap();
+        let before = serde_json::to_value(a.snapshot().unwrap()).unwrap();
+        assert_eq!(a.snapshot().unwrap().withdrawals.len(), 1);
+        a.retire_list("list", "cancelled").unwrap();
+        assert_eq!(serde_json::to_value(a.snapshot().unwrap()).unwrap(), before);
     }
     #[tokio::test]
     async fn sdk_cancellation_must_match_peer_path_payload_and_attribution() {
