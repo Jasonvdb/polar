@@ -8,7 +8,7 @@ use crate::{
 use paykit_sdk::{
     storage::StorageAdapter, ContactUpdate, LinkedPeerState, OutboundPrivateMessageStatus,
     PaykitProfile, PaykitProfileRecord, PaykitReceiverPath, PaykitSdk, PubkyPublicKey,
-    PublicationStatus,
+    PubkySessionProvider, PublicationStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -42,6 +42,7 @@ pub struct Runtime {
     vault: Arc<Vault>,
     state: LocalState,
     owner: PubkyPublicKey,
+    sessions: crate::receiver::SessionProvider,
 }
 impl Runtime {
     pub(crate) fn new(
@@ -50,6 +51,7 @@ impl Runtime {
         vault: Arc<Vault>,
         id: Uuid,
         owner: PubkyPublicKey,
+        sessions: crate::receiver::SessionProvider,
     ) -> anyhow::Result<Self> {
         let mut state: LocalState = vault.load("workspace.cbor")?.unwrap_or_else(|| LocalState {
             view: Workspace {
@@ -83,6 +85,7 @@ impl Runtime {
             vault,
             state,
             owner,
+            sessions,
         })
     }
     pub fn view(&self) -> Workspace {
@@ -203,6 +206,7 @@ impl Runtime {
                     self.state.uncertain_peers.retain(|p| p != &peer);
                 }
                 "link.unblock" => {
+                    self.clear_blocked_outbox(&key, &path).await?;
                     self.sdk.unblock_peer(key, path).await?;
                 }
                 "link.sendEmptyList" => {
@@ -336,6 +340,47 @@ impl Runtime {
             }
         }
         Ok(json!({"receiverId":self.state.view.receiver_id}))
+    }
+    /// Clear abandoned responder slots before removing the block, so an initiator
+    /// cannot consume a previous handshake while a human is deciding to accept.
+    /// Every failure (including cancellation) leaves the SDK's blocked state intact.
+    async fn clear_blocked_outbox(
+        &self,
+        key: &PubkyPublicKey,
+        path: &PaykitReceiverPath,
+    ) -> anyhow::Result<()> {
+        let blocked_checkpoint = self
+            .storage
+            .transaction(|tx| {
+                Ok(tx
+                    .linked_peer(key, path)
+                    .is_some_and(|peer| peer.state == LinkedPeerState::Blocked)
+                    && tx.encrypted_link_state(key, path).is_some())
+            })
+            .await?;
+        if !blocked_checkpoint {
+            return Ok(());
+        }
+        let access = self
+            .sessions
+            .load_session_access()
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("receiver grant unavailable"))?;
+        let marker = self
+            .sdk
+            .paykit_receiver_marker(key.clone(), path.clone())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("peer receiver marker unavailable"))?;
+        paykit_lib::clear_encrypted_link_outbox(
+            &access.session,
+            access.receiver_noise_secret_key.as_bytes(),
+            &key.to_public_key()?,
+            &marker.noise_public_key,
+            &self.sdk.config().receiver_path,
+            path,
+        )
+        .await?;
+        Ok(())
     }
     /// SDK block/unblock abandons local snapshots but retains the old public stream.
     /// Explicit recovery makes the SDK clear only this peer's local outbox before
@@ -550,7 +595,7 @@ impl Runtime {
                             .state
                             .uncertain_peers
                             .contains(&(key.to_string(), path.to_string()));
-                        let state = if uncertain {
+                        let state = if uncertain && peer.state != LinkedPeerState::Blocked {
                             "recoveryRequired"
                         } else {
                             match peer.state {
@@ -715,9 +760,10 @@ mod tests {
             ReceiverStorage::open(Vault::new(path.into(), [8; 32], receiver.to_string()).unwrap())
                 .unwrap(),
         );
+        let provider = crate::receiver::SessionProvider::without_access(vault.clone());
         let sdk = PaykitSdk::new(
             storage.clone(),
-            crate::receiver::SessionProvider::without_access(vault.clone()),
+            provider.clone(),
             crate::receiver::UnsupportedPayments,
             paykit_sdk::PaykitSdkConfig::new(PaykitReceiverPath::new("test/wallet").unwrap()),
         )
@@ -728,6 +774,7 @@ mod tests {
             vault,
             receiver,
             PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key()),
+            provider,
         )
         .unwrap()
     }
@@ -853,20 +900,19 @@ mod tests {
             false
         ));
     }
-    #[tokio::test]
-    async fn failed_recovery_preparation_does_not_start_a_fresh_handshake() {
-        let dir = tempfile::tempdir().unwrap();
-        let receiver = Uuid::new_v4();
-        let runtime = open(dir.path(), receiver);
-        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
-        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+    async fn seed_abandoned_link(
+        runtime: &Runtime,
+        key: &PubkyPublicKey,
+        path: &PaykitReceiverPath,
+        state: LinkedPeerState,
+    ) {
         runtime
             .storage
             .transaction(|tx| {
                 tx.save_linked_peer(paykit_sdk::storage::LinkedPeerRecord {
                     counterparty: key.clone(),
                     counterparty_receiver_path: path.clone(),
-                    state: LinkedPeerState::NotLinked,
+                    state,
                     last_sync_at: None,
                     last_private_receive_at: None,
                     failure_count: 0,
@@ -889,6 +935,123 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+    #[tokio::test]
+    async fn failed_unblock_cleanup_preserves_durable_block_and_never_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let mut runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        runtime
+            .storage
+            .save_identity_state(paykit_sdk::IdentityState {
+                local_pubky_public_key: Some(runtime.owner.clone()),
+                local_receiver_noise_public_key: None,
+                initialized_at: chrono::Utc::now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        seed_abandoned_link(&runtime, &key, &path, LinkedPeerState::Blocked).await;
+        let command = Command {
+            command_id: Uuid::new_v4(),
+            command: "link.unblock".into(),
+            input: json!({"receiverId":receiver,"peerPublicKey":key.to_string(),"peerReceiverPath":path.to_string()}),
+        };
+        assert_eq!(
+            runtime.execute(command.clone()).await.unwrap(),
+            Err(FAILURE.into())
+        );
+        assert_eq!(
+            runtime.sdk.linked_peers().await.unwrap()[0].state,
+            LinkedPeerState::Blocked
+        );
+        drop(runtime);
+        let mut restored = open(dir.path(), receiver);
+        assert_eq!(
+            restored.execute(command).await.unwrap(),
+            Err(FAILURE.into())
+        );
+        assert_eq!(
+            restored.sdk.linked_peers().await.unwrap()[0].state,
+            LinkedPeerState::Blocked
+        );
+        // Control: the SDK itself can unblock this persisted identity without a live grant.
+        // The wrapper's cleanup gate, not an unrelated SDK identity error, kept it blocked.
+        restored.sdk.unblock_peer(key, path).await.unwrap();
+        assert_eq!(
+            restored.sdk.linked_peers().await.unwrap()[0].state,
+            LinkedPeerState::NotLinked
+        );
+    }
+    #[tokio::test]
+    async fn persisted_uncertainty_preserves_blocked_policy_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let mut runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        runtime
+            .storage
+            .save_identity_state(paykit_sdk::IdentityState {
+                local_pubky_public_key: Some(runtime.owner.clone()),
+                local_receiver_noise_public_key: None,
+                initialized_at: chrono::Utc::now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        seed_abandoned_link(&runtime, &key, &path, LinkedPeerState::Blocked).await;
+        let uncertain_peer = (key.to_string(), path.to_string());
+        runtime.state.uncertain_peers.push(uncertain_peer.clone());
+        runtime.state.view.last_error = Some(FAILURE.into());
+        runtime.save().unwrap();
+        drop(runtime);
+        let mut restored = open(dir.path(), receiver);
+        restored.refresh().await.unwrap();
+        assert_eq!(restored.view().links[0].state, "blocked");
+        assert_eq!(restored.view().last_error.as_deref(), Some(FAILURE));
+        assert_eq!(
+            restored.view().links[0].last_error.as_deref(),
+            Some(FAILURE)
+        );
+        assert!(restored.state.uncertain_peers.contains(&uncertain_peer));
+        // Uncertainty still gates private execution; a display change cannot authorize it.
+        let result = restored.execute(Command {
+            command_id: Uuid::new_v4(),
+            command: "link.sendEmptyList".into(),
+            input: json!({"receiverId":receiver,"peerPublicKey":key.to_string(),"peerReceiverPath":path.to_string()}),
+        }).await.unwrap();
+        assert_eq!(result, Err(FAILURE.into()));
+        assert_eq!(restored.view().links[0].state, "blocked");
+    }
+    #[tokio::test]
+    async fn outbox_cleanup_does_not_touch_active_or_untracked_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = open(dir.path(), Uuid::new_v4());
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        runtime.clear_blocked_outbox(&key, &path).await.unwrap();
+        for state in [
+            LinkedPeerState::Linked,
+            LinkedPeerState::Linking,
+            LinkedPeerState::NotLinked,
+            LinkedPeerState::RecoveryRequired,
+        ] {
+            seed_abandoned_link(&runtime, &key, &path, state.clone()).await;
+            runtime.clear_blocked_outbox(&key, &path).await.unwrap();
+            assert_eq!(runtime.sdk.linked_peers().await.unwrap()[0].state, state);
+        }
+    }
+    #[tokio::test]
+    async fn failed_recovery_preparation_does_not_start_a_fresh_handshake() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        seed_abandoned_link(&runtime, &key, &path, LinkedPeerState::NotLinked).await;
         // An unavailable grant makes the official recovery API fail. Never bypass it.
         assert!(runtime
             .prepare_explicit_relink(&key, &path, false)

@@ -78,7 +78,12 @@ Paths have the form `application/wallet` or `application/server`; the applicatio
 uses lowercase letters, digits and hyphens. Initiate a link on one receiver and
 accept it on the peer. **Advance link** explicitly advances setup. Links show
 handshake state, generation, failures and recovery requirements. Blocking stops
-that peer; unblocking requires explicit relinking.
+that peer; unblocking requires explicit relinking. After mutual blocking, unblock
+both receivers successfully before initiating the new link. The peer may accept
+later; its decision is never automatic. Unblocking first removes that receiver's
+abandoned encrypted outbox for the selected peer. A cleanup or service failure
+keeps the peer blocked and records a failed operation. Initiating while the other
+receiver remains blocked can fail visibly and requires explicit recovery.
 
 **Pause private delivery** persists the receiver-wide inbound/outbound pause.
 It retains links and queued messages; it does not pause link handshakes.

@@ -24,8 +24,13 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
     }
     throw new Error('Workspace state condition timed out');
   };
-  const establish = async remote => {
+  const establish = async (remote, acceptanceDelay = 0) => {
     const started = await command('link.initiate', peer(aw, remote));
+    if (acceptanceDelay) {
+      await sleep(acceptanceDelay, signal);
+      assert.equal(link(await state(), aw, remote).state, 'linking', 'Initiator must wait safely for human acceptance');
+      assert.equal(link(await state(), remote, aw).state, 'notLinked', 'No implicit acceptance during relinking');
+    }
     await command('link.accept', peer(remote, aw));
     await wait(s => link(s, aw, remote)?.state === 'linked' && link(s, remote, aw)?.state === 'linked');
     const duplicate = await request('/v1/commands', started.body);
@@ -104,7 +109,7 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   const beforeRelink = await state();
   const oldReceived = link(beforeRelink, bw, aw).latestReceivedListId;
   const siblingGeneration = beforeRelink.receivers.find(r => r.id === bs.id).generation;
-  await establish(bw);
+  await establish(bw, 5200);
   // A linked badge alone missed stale ciphertext from the abandoned outbox.
   const afterRelink = await command('link.sendEmptyList', peer(aw, bw));
   snapshot = await wait(s => link(s, aw, bw)?.lastSentMessageId === afterRelink.operation.result.outboundMessageId && link(s, bw, aw)?.latestReceivedListId !== oldReceived);

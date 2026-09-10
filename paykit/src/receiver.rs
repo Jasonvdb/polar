@@ -71,11 +71,16 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
     secrets.session = Some(session.export_session_secret().await?.into_inner());
     credentials.save("session.cbor", &secrets)?;
     let provider = SessionProvider {
-        access: Mutex::new(Some(session.access)),
-        secrets: Mutex::new(secrets),
+        access: Arc::new(Mutex::new(Some(session.access))),
+        secrets: Arc::new(Mutex::new(secrets)),
         vault: credentials.clone(),
     };
-    let sdk = PaykitSdk::new(storage.clone(), provider, UnsupportedPayments, sdk_config)?;
+    let sdk = PaykitSdk::new(
+        storage.clone(),
+        provider.clone(),
+        UnsupportedPayments,
+        sdk_config,
+    )?;
     anyhow::ensure!(
         sdk.initialize().await?.identity.live_session_available,
         "receiver has no session"
@@ -95,8 +100,14 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
         marker.noise_public_key == noise_public_key,
         "public receiver marker mismatch"
     );
-    let mut runtime =
-        crate::workspace::Runtime::new(sdk, storage, credentials, id, owner.public_key())?;
+    let mut runtime = crate::workspace::Runtime::new(
+        sdk,
+        storage,
+        credentials,
+        id,
+        owner.public_key(),
+        provider,
+    )?;
     runtime.refresh().await?;
     println!("{}", serde_json::json!({"ready":true,"receiverId":id}));
     std::io::stdout().flush()?;
@@ -112,9 +123,10 @@ pub async fn shutdown() -> anyhow::Result<()> {
     tokio::signal::ctrl_c().await?;
     Ok(())
 }
+#[derive(Clone)]
 pub(crate) struct SessionProvider {
-    access: Mutex<Option<PubkySessionAccess>>,
-    secrets: Mutex<ReceiverSecrets>,
+    access: Arc<Mutex<Option<PubkySessionAccess>>>,
+    secrets: Arc<Mutex<ReceiverSecrets>>,
     vault: Arc<Vault>,
 }
 #[async_trait]
@@ -285,13 +297,13 @@ pub async fn inspect_contact(
 impl SessionProvider {
     pub(crate) fn without_access(vault: Arc<Vault>) -> Self {
         Self {
-            access: Mutex::new(None),
-            secrets: Mutex::new(ReceiverSecrets {
+            access: Arc::new(Mutex::new(None)),
+            secrets: Arc::new(Mutex::new(ReceiverSecrets {
                 owner: [3; 32],
                 noise: [4; 32],
                 path: "test/wallet".into(),
                 session: None,
-            }),
+            })),
             vault,
         }
     }
