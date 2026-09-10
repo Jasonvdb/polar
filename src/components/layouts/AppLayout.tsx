@@ -1,15 +1,17 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { css, Global } from '@emotion/core';
+import { css, Global } from '@emotion/react';
 import styled from '@emotion/styled';
 import { Layout } from 'antd';
 import { useTheme } from 'hooks/useTheme';
-import { useStoreState } from 'store';
+import { useStoreActions, useStoreState } from 'store';
 import { ThemeColors } from 'theme/colors';
 import { NavMenu } from 'components/common';
+import ImageUpdatesModal from 'components/common/ImageUpdatesModal';
 import { HOME } from 'components/routing';
 import logo from 'resources/logo.png';
 import { DockerStatus, LocaleSwitch, ThemeSwitch } from './';
+import CheckForUpdatesButton from './CheckForUpdatesButton';
 
 const { Header, Content, Footer } = Layout;
 
@@ -20,11 +22,12 @@ const Styled = {
   `,
   Header: styled(Header)`
     padding: 0 16px;
+    display: flex;
+    justify-content: space-between;
   `,
   Logo: styled.div`
     height: 64px;
-    width: 120px;
-    float: left;
+    width: 190px;
   `,
   Image: styled.img`
     height: 16px;
@@ -82,6 +85,19 @@ const AntdOverrides: React.FC = () => {
         .ant-badge-status-default {
           background-color: ${theme.statusBadge.default};
         }
+        .polar-context-menu {
+          width: 200px;
+
+          .ant-dropdown-menu-title-content {
+            margin: -5px -12px;
+            padding: 5px 12px;
+            display: block;
+
+            svg {
+              margin-right: 5px;
+            }
+          }
+        }
       `}
     />
   );
@@ -89,6 +105,8 @@ const AntdOverrides: React.FC = () => {
 
 const AppLayout: React.FC<Props> = (props: Props) => {
   const { initialized } = useStoreState(s => s.app);
+  const { imageUpdates } = useStoreState(s => s.modals);
+  const { hideImageUpdates } = useStoreActions(s => s.modals);
   const theme = useTheme();
   return (
     <Styled.Layout>
@@ -99,7 +117,7 @@ const AppLayout: React.FC<Props> = (props: Props) => {
           <Styled.Logo>
             <Link to={HOME}>
               <Styled.Image src={logo} alt="logo" />
-              <Styled.Brand>Polar</Styled.Brand>
+              <Styled.Brand>Polar Paykit</Styled.Brand>
             </Link>
           </Styled.Logo>
           <NavMenu />
@@ -109,10 +127,12 @@ const AppLayout: React.FC<Props> = (props: Props) => {
       <Styled.Footer colors={theme.footer}>
         <DockerStatus />
         <Styled.FooterToggles>
+          <CheckForUpdatesButton />
           <LocaleSwitch />
           <ThemeSwitch />
         </Styled.FooterToggles>
       </Styled.Footer>
+      {imageUpdates.visible && <ImageUpdatesModal onClose={hideImageUpdates} />}
     </Styled.Layout>
   );
 };

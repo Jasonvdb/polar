@@ -1,30 +1,25 @@
-import React, { ReactNode } from 'react';
-import styled from '@emotion/styled';
+import React, { ReactElement, ReactNode } from 'react';
 import { ILink } from '@mrblenny/react-flow-chart';
-import { Dropdown, Menu } from 'antd';
+import { Dropdown, MenuProps } from 'antd';
 import { useStoreState } from 'store';
 import { LinkProperties } from 'utils/chart';
 import ChangeBackendButton from './link/ChangeBackendButton';
+import ChangeTapBackendButton from './link/ChangeTapBackendButton';
 import CloseChannelButton from './link/CloseChannelButton';
-
-const Styled = {
-  MenuItem: styled(Menu.Item)`
-    & > span {
-      margin: -5px -12px;
-      padding: 5px 12px;
-      display: block;
-    }
-  `,
-};
 
 interface Props {
   link: ILink;
+  children: ReactElement;
 }
 
 const LinkContextMenu: React.FC<Props> = ({ link, children }) => {
   const { activeId } = useStoreState(s => s.designer);
-  const network = useStoreState(s => s.network.networkById(activeId));
+  const networks = useStoreState(s => s.network.networks);
+  const network = networks.find(n => n.id === activeId);
   const { type, channelPoint } = (link.properties as LinkProperties) || {};
+
+  // don't add a context menu if there is no network found
+  if (!network) return <>{children}</>;
 
   let menuItem: ReactNode;
   if (type === 'open-channel') {
@@ -44,19 +39,26 @@ const LinkContextMenu: React.FC<Props> = ({ link, children }) => {
         backendName={link.to.nodeId as string}
       />
     );
+  } else if (type === 'lndbackend') {
+    menuItem = (
+      <ChangeTapBackendButton
+        type="menu"
+        tapName={link.from.nodeId}
+        lndName={link.to.nodeId as string}
+      />
+    );
   }
 
   // don't add a context menu if there is no menu item
   if (!menuItem) return <>{children}</>;
 
+  const items: MenuProps['items'] = [{ key: 'item', label: menuItem }];
+
   return (
     <Dropdown
-      overlay={
-        <Menu style={{ width: 200 }}>
-          <Styled.MenuItem>{menuItem}</Styled.MenuItem>
-        </Menu>
-      }
+      menu={{ items }}
       trigger={['contextMenu']}
+      overlayClassName="polar-context-menu"
     >
       {children}
     </Dropdown>

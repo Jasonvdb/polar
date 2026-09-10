@@ -2,12 +2,12 @@ import React from 'react';
 import { SettingOutlined } from '@ant-design/icons';
 import { Button, Form } from 'antd';
 import { usePrefixedTranslation } from 'hooks';
-import { BitcoinNode, LightningNode } from 'shared/types';
+import { AnyNode } from 'shared/types';
 import { useStoreActions } from 'store';
-import { dockerConfigs } from 'utils/constants';
+import { getDefaultCommand } from 'utils/network';
 
 interface Props {
-  node: LightningNode | BitcoinNode;
+  node: AnyNode;
   type?: 'button' | 'menu';
 }
 
@@ -18,17 +18,17 @@ const AdvancedOptionsButton: React.FC<Props> = ({ node, type }) => {
     showAdvancedOptions({
       nodeName: node.name,
       command: node.docker.command,
-      defaultCommand: dockerConfigs[node.implementation].command,
+      defaultCommand: getDefaultCommand(node.implementation, node.version),
     });
   };
 
   // render a menu item inside of the NodeContextMenu
   if (type === 'menu') {
     return (
-      <span onClick={handleClick}>
+      <div onClick={handleClick}>
         <SettingOutlined />
         <span>{l('menu')}</span>
-      </span>
+      </div>
     );
   }
 

@@ -1,11 +1,13 @@
 import * as electron from 'electron';
+import { info } from 'electron-log';
 import * as fs from 'fs-extra';
 import { join } from 'path';
 import { IChart } from '@mrblenny/react-flow-chart';
-import * as compose from 'docker-compose';
+import { waitFor } from '@testing-library/react';
+import { v2 as compose } from 'docker-compose';
 import Dockerode from 'dockerode';
 import os from 'os';
-import { LndNode } from 'shared/types';
+import { CLightningNode, LitdNode, LndNode, Status, TapdNode } from 'shared/types';
 import { dockerService } from 'lib/docker';
 import { Network, NetworksFile } from 'types';
 import { initChartFromNetwork } from 'utils/chart';
@@ -14,6 +16,7 @@ import { APP_VERSION, defaultRepoState, DOCKER_REPO } from 'utils/constants';
 import * as files from 'utils/files';
 import { createNetwork } from 'utils/network';
 import { getNetwork, mockProperty, testManagedImages } from 'utils/tests';
+import { getDocker } from './dockerService';
 
 jest.mock('dockerode');
 jest.mock('os');
@@ -21,6 +24,8 @@ jest.mock('utils/files', () => ({
   write: jest.fn(),
   read: jest.fn(),
   exists: jest.fn(),
+  renameFile: jest.fn(),
+  rm: jest.fn(),
 }));
 
 const mockOS = os as jest.Mocked<typeof os>;
@@ -28,7 +33,7 @@ const fsMock = fs as jest.Mocked<typeof fs>;
 const filesMock = files as jest.Mocked<typeof files>;
 const composeMock = compose as jest.Mocked<typeof compose>;
 const electronMock = electron as jest.Mocked<typeof electron>;
-const mockDockerode = (Dockerode as unknown) as jest.Mock<Dockerode>;
+const mockDockerode = Dockerode as unknown as jest.Mock<Dockerode>;
 
 describe('DockerService', () => {
   let network: Network;
@@ -46,7 +51,7 @@ describe('DockerService', () => {
       }),
     });
     await dockerService.getVersions();
-    expect(composeMock.version).toBeCalledWith(
+    expect(composeMock.version).toHaveBeenCalledWith(
       expect.objectContaining({
         env: expect.objectContaining({ __TESTVAR: 'TESTVAL' }),
       }),
@@ -58,7 +63,7 @@ describe('DockerService', () => {
     mockOS.platform.mockReturnValue('linux');
     mockOS.userInfo.mockReturnValue({ uid: '999', gid: '999' } as any);
     await dockerService.getVersions();
-    expect(composeMock.version).toBeCalledWith(
+    expect(composeMock.version).toHaveBeenCalledWith(
       expect.objectContaining({
         env: expect.objectContaining({ USERID: '999', GROUPID: '999' }),
       }),
@@ -69,10 +74,11 @@ describe('DockerService', () => {
   describe('detecting versions', () => {
     const dockerVersion = mockDockerode.prototype.version;
     const composeVersion = composeMock.version;
+    const versionResult = { ...mockResult, out: '4.5.6', data: { version: '4.5.6' } };
 
     it('should get both versions successfully', async () => {
       dockerVersion.mockResolvedValue({ Version: '1.2.3' });
-      composeVersion.mockResolvedValue({ ...mockResult, out: '4.5.6' });
+      composeVersion.mockResolvedValue(versionResult);
       const versions = await dockerService.getVersions(true);
       expect(versions.docker).toBe('1.2.3');
       expect(versions.compose).toBe('4.5.6');
@@ -88,7 +94,7 @@ describe('DockerService', () => {
 
     it('should return compose version if docker version fails', async () => {
       dockerVersion.mockRejectedValue(new Error('docker-error'));
-      composeVersion.mockResolvedValue({ ...mockResult, out: '4.5.6' });
+      composeVersion.mockResolvedValue(versionResult);
       const versions = await dockerService.getVersions();
       expect(versions.docker).toBe('');
       expect(versions.compose).toBe('4.5.6');
@@ -104,7 +110,7 @@ describe('DockerService', () => {
 
     it('should throw an error if docker version fails', async () => {
       dockerVersion.mockRejectedValue(new Error('docker-error'));
-      composeVersion.mockResolvedValue({ ...mockResult, out: '4.5.6' });
+      composeVersion.mockResolvedValue(versionResult);
       await expect(dockerService.getVersions(true)).rejects.toThrow('docker-error');
     });
 
@@ -148,12 +154,7 @@ describe('DockerService', () => {
     it('should save the docker-compose.yml file', () => {
       dockerService.saveComposeFile(network);
 
-      expect(filesMock.write).toBeCalledWith(
-        expect.stringContaining('docker-compose.yml'),
-        expect.stringContaining('version:'),
-      );
-
-      expect(filesMock.write).toBeCalledWith(
+      expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining('services:'),
       );
@@ -161,20 +162,20 @@ describe('DockerService', () => {
 
     it('should save with the bitcoin node in the compose file', () => {
       dockerService.saveComposeFile(network);
-      expect(filesMock.write).toBeCalledWith(
+      expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.bitcoin[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.bitcoin[0].name}`,
         ),
       );
     });
 
     it('should save with the lnd node in the compose file', () => {
       dockerService.saveComposeFile(network);
-      expect(filesMock.write).toBeCalledWith(
+      expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -183,20 +184,24 @@ describe('DockerService', () => {
       const net = createNetwork({
         id: 1,
         name: 'my network',
+        description: 'network description',
         lndNodes: 1,
         clightningNodes: 0,
         eclairNodes: 0,
         bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 0,
         repoState: defaultRepoState,
         managedImages: testManagedImages,
         customImages: [],
+        manualMineCount: 6,
       });
       net.nodes.lightning[0].backendName = 'invalid';
       dockerService.saveComposeFile(net);
-      expect(filesMock.write).toBeCalledWith(
+      expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -205,20 +210,24 @@ describe('DockerService', () => {
       const net = createNetwork({
         id: 1,
         name: 'my network',
+        description: 'network description',
         lndNodes: 0,
         clightningNodes: 1,
         eclairNodes: 0,
         bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 0,
         repoState: defaultRepoState,
         managedImages: testManagedImages,
         customImages: [],
+        manualMineCount: 6,
       });
       net.nodes.lightning[0].backendName = 'invalid';
       dockerService.saveComposeFile(net);
-      expect(filesMock.write).toBeCalledWith(
+      expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -227,20 +236,24 @@ describe('DockerService', () => {
       const net = createNetwork({
         id: 1,
         name: 'my network',
+        description: 'network description',
         lndNodes: 0,
         clightningNodes: 0,
         eclairNodes: 1,
         bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 0,
         repoState: defaultRepoState,
         managedImages: testManagedImages,
         customImages: [],
+        manualMineCount: 6,
       });
       net.nodes.lightning[0].backendName = 'invalid';
       dockerService.saveComposeFile(net);
-      expect(filesMock.write).toBeCalledWith(
+      expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
         ),
       );
     });
@@ -248,17 +261,130 @@ describe('DockerService', () => {
     it('should not save unknown lightning implementation', () => {
       network.nodes.lightning[0].implementation = 'unknown' as any;
       dockerService.saveComposeFile(network);
-      expect(filesMock.write).toBeCalledWith(
+      expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining('docker-compose.yml'),
         expect.not.stringContaining(
-          `container_name: polar-n1-${network.nodes.lightning[0].name}`,
+          `container_name: polar-paykit-n1-${network.nodes.lightning[0].name}`,
+        ),
+      );
+    });
+
+    it('should save the tapd node with the named LND node as backend', () => {
+      const net = getNetwork(1, 'my network', undefined, 2);
+      dockerService.saveComposeFile(net);
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('docker-compose.yml'),
+        expect.stringContaining(
+          `--lnd.host=polar-paykit-n1-${net.nodes.lightning[1].name}`,
+        ),
+      );
+    });
+
+    it('should save the tapd node with the first LND node as backend', () => {
+      const net = getNetwork(1, 'my network', undefined, 2);
+      const tapNode = net.nodes.tap[0] as TapdNode;
+      tapNode.lndName = 'invalid';
+      dockerService.saveComposeFile(net);
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('docker-compose.yml'),
+        expect.stringContaining(
+          `--lnd.host=polar-paykit-n1-${net.nodes.lightning[0].name}`,
+        ),
+      );
+    });
+
+    it('should not save unknown tap implementation', () => {
+      const net = getNetwork(1, 'my network', undefined, 2);
+      net.nodes.tap[0].implementation = 'unknown' as any;
+      dockerService.saveComposeFile(net);
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('docker-compose.yml'),
+        expect.not.stringContaining(
+          `container_name: polar-paykit-n1-${net.nodes.tap[0].name}`,
+        ),
+      );
+    });
+
+    it('should save the litd node with the named LND node as backend', () => {
+      const net = createNetwork({
+        id: 1,
+        name: 'my network',
+        description: 'network description',
+        lndNodes: 0,
+        clightningNodes: 0,
+        eclairNodes: 0,
+        bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 1,
+        repoState: defaultRepoState,
+        managedImages: testManagedImages,
+        customImages: [],
+        manualMineCount: 6,
+      });
+      dockerService.saveComposeFile(net);
+      const { backendName } = net.nodes.lightning[0] as LitdNode;
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('docker-compose.yml'),
+        expect.stringContaining(`--lnd.bitcoind.rpchost=polar-paykit-n1-${backendName}`),
+      );
+    });
+
+    it('should save the litd node with the first bitcoin node as backend', () => {
+      const net = createNetwork({
+        id: 1,
+        name: 'my network',
+        description: 'network description',
+        lndNodes: 0,
+        clightningNodes: 0,
+        eclairNodes: 0,
+        bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 1,
+        repoState: defaultRepoState,
+        managedImages: testManagedImages,
+        customImages: [],
+        manualMineCount: 6,
+      });
+      const litdNode = net.nodes.lightning[0] as LitdNode;
+      litdNode.backendName = 'invalid';
+      dockerService.saveComposeFile(net);
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('docker-compose.yml'),
+        expect.stringContaining(
+          `--lnd.bitcoind.rpchost=polar-paykit-n1-${net.nodes.bitcoin[0].name}`,
+        ),
+      );
+    });
+
+    it('should not save unknown litd implementation', () => {
+      const net = createNetwork({
+        id: 1,
+        name: 'my network',
+        description: 'network description',
+        lndNodes: 0,
+        clightningNodes: 0,
+        eclairNodes: 0,
+        bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 1,
+        repoState: defaultRepoState,
+        managedImages: testManagedImages,
+        customImages: [],
+        manualMineCount: 6,
+      });
+      net.nodes.lightning[0].implementation = 'unknown' as any;
+      dockerService.saveComposeFile(net);
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('docker-compose.yml'),
+        expect.not.stringContaining(
+          `container_name: polar-paykit-n1-${net.nodes.lightning[0].name}`,
         ),
       );
     });
 
     it('should save a list of networks to disk', () => {
       dockerService.saveNetworks({ version: '0.1.0', networks: [network], charts: {} });
-      expect(filesMock.write).toBeCalledWith(
+      expect(filesMock.write).toHaveBeenCalledWith(
         expect.stringContaining(join('networks', 'networks.json')),
         expect.stringContaining(`"name": "${network.name}"`),
       );
@@ -270,13 +396,17 @@ describe('DockerService', () => {
       const net = createNetwork({
         id: 1,
         name: 'my network',
+        description: 'network description',
         lndNodes: 2,
         clightningNodes: 1,
         eclairNodes: 0,
         bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 0,
         repoState: defaultRepoState,
         managedImages: testManagedImages,
         customImages: [],
+        manualMineCount: 6,
       });
       const chart = initChartFromNetwork(net);
       // return 'any' to suppress "The operand of a 'delete' operator must be optional.ts(2790)" error
@@ -293,7 +423,9 @@ describe('DockerService', () => {
       delete chart.nodes[name].ports['peer-right'];
       net.nodes.lightning.forEach((n: any) => {
         if (n.implementation === 'LND') {
-          (n as LndNode).paths.tlsCert = `ELECTRON_PATH[userData]/data/networks/1/volumes/lnd/${n.name}/tls.cert`;
+          (
+            n as LndNode
+          ).paths.tlsCert = `ELECTRON_PATH[userData]/data/networks/1/volumes/lnd/${n.name}/tls.cert`;
         }
       });
       return { net, chart };
@@ -330,6 +462,33 @@ describe('DockerService', () => {
       return { net, chart };
     };
 
+    const create130Network = () => {
+      const { net, chart } = createTestNetwork();
+      net.nodes.lightning.forEach((n: any) => {
+        if (n.implementation === 'c-lightning') {
+          // removed in v1.4.0
+          n.paths.tlsKey = 'dummy key';
+          // added in v1.4.0
+          delete n.paths.tlsClientCert;
+          delete n.paths.tlsClientKey;
+        }
+      });
+      return { net, chart };
+    };
+
+    const create141Network = () => {
+      const { net, chart } = createTestNetwork();
+      // added in v2.0.0
+      delete net.autoMineMode;
+      delete net.nodes.tap;
+      net.nodes.lightning.forEach((n: any) => {
+        if (n.implementation === 'LND') {
+          delete chart.nodes[n.name].ports['lndbackend'];
+        }
+      });
+      return { net, chart };
+    };
+
     const createLegacyNetworksFile = (version = '0.1.0') => {
       let res: { net: Network; chart: IChart };
 
@@ -342,6 +501,12 @@ describe('DockerService', () => {
           break;
         case '1.0.1':
           res = create101Network();
+          break;
+        case '1.3.0':
+          res = create130Network();
+          break;
+        case '1.4.1':
+          res = create141Network();
           break;
         default:
           res = createTestNetwork();
@@ -362,13 +527,17 @@ describe('DockerService', () => {
       const net = createNetwork({
         id: 1,
         name: 'my network',
+        description: 'network description',
         lndNodes: 2,
         clightningNodes: 1,
         eclairNodes: 0,
         bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 0,
         repoState: defaultRepoState,
         managedImages: testManagedImages,
         customImages: [],
+        manualMineCount: 6,
       });
       const chart = initChartFromNetwork(net);
       const fileData: NetworksFile = {
@@ -387,13 +556,21 @@ describe('DockerService', () => {
       filesMock.read.mockResolvedValue(fileData);
       const { networks } = await dockerService.loadNetworks();
       expect(networks.length).toBe(0);
-      expect(filesMock.read).toBeCalledWith(
+      expect(filesMock.read).toHaveBeenCalledWith(
         expect.stringContaining(join('networks', 'networks.json')),
       );
     });
 
     it('should return an empty list if no networks are saved', async () => {
       filesMock.exists.mockResolvedValue(false);
+      const { networks } = await dockerService.loadNetworks();
+      expect(Array.isArray(networks)).toBe(true);
+      expect(networks.length).toBe(0);
+    });
+
+    it('should return an empty list if no networks are saved', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      filesMock.read.mockResolvedValue('');
       const { networks } = await dockerService.loadNetworks();
       expect(Array.isArray(networks)).toBe(true);
       expect(networks.length).toBe(0);
@@ -467,6 +644,32 @@ describe('DockerService', () => {
       });
     });
 
+    it('should migrate network data from v1.3.0', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      filesMock.read.mockResolvedValue(createLegacyNetworksFile('1.3.0'));
+      const { networks, version } = await dockerService.loadNetworks();
+      expect(version).toEqual(APP_VERSION);
+      // added in v1.4.0
+      networks[0].nodes.lightning.forEach(n => {
+        if (n.implementation === 'c-lightning') {
+          expect((n as any).paths.tlsKey).toBeUndefined();
+          expect((n as CLightningNode).paths.tlsCert).toBeDefined();
+          expect((n as CLightningNode).paths.tlsClientCert).toBeDefined();
+          expect((n as CLightningNode).paths.tlsClientKey).toBeDefined();
+        }
+      });
+    });
+
+    it('should migrate network data from v2.0.0', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      filesMock.read.mockResolvedValue(createLegacyNetworksFile('1.4.1'));
+      const { networks, version } = await dockerService.loadNetworks();
+      expect(version).toEqual(APP_VERSION);
+      // added in v2.0.0
+      expect(networks[0].autoMineMode).toBeDefined();
+      expect(networks[0].nodes.tap).toBeDefined();
+    });
+
     it('should not run migrations in production with up to date version', async () => {
       mockProperty(process, 'env', { NODE_ENV: 'production' } as any);
       const file = createCurrentNetworksFile();
@@ -503,7 +706,7 @@ describe('DockerService', () => {
     it('should call compose.upAll when a network is started', async () => {
       composeMock.upAll.mockResolvedValue(mockResult);
       await dockerService.start(network);
-      expect(composeMock.upAll).toBeCalledWith(
+      expect(composeMock.upAll).toHaveBeenCalledWith(
         expect.objectContaining({ cwd: network.path }),
         undefined,
       );
@@ -512,13 +715,34 @@ describe('DockerService', () => {
     it('should create volume dirs when the network is started', async () => {
       composeMock.upAll.mockResolvedValue(mockResult);
       await dockerService.start(network);
-      expect(fsMock.ensureDir).toBeCalledTimes(7);
+      expect(fsMock.ensureDir).toHaveBeenCalledTimes(7);
+    });
+
+    it('should create volume dirs when the network is started', async () => {
+      const net = createNetwork({
+        id: 1,
+        name: 'my network',
+        description: 'network description',
+        lndNodes: 1,
+        clightningNodes: 1,
+        eclairNodes: 0,
+        bitcoindNodes: 1,
+        tapdNodes: 0,
+        litdNodes: 1,
+        repoState: defaultRepoState,
+        managedImages: testManagedImages,
+        customImages: [],
+        manualMineCount: 6,
+      });
+      composeMock.upAll.mockResolvedValue(mockResult);
+      await dockerService.start(net);
+      expect(fsMock.ensureDir).toHaveBeenCalledTimes(9);
     });
 
     it('should call compose.down when a network is stopped', async () => {
       composeMock.down.mockResolvedValue(mockResult);
       await dockerService.stop(network);
-      expect(composeMock.down).toBeCalledWith(
+      expect(composeMock.down).toHaveBeenCalledWith(
         expect.objectContaining({ cwd: network.path }),
         undefined,
       );
@@ -529,7 +753,7 @@ describe('DockerService', () => {
       composeMock.upOne.mockResolvedValue(mockResult);
       const node = network.nodes.lightning[0];
       await dockerService.startNode(network, node);
-      expect(composeMock.upOne).toBeCalledWith(
+      expect(composeMock.upOne).toHaveBeenCalledWith(
         node.name,
         expect.objectContaining({ cwd: network.path }),
       );
@@ -539,7 +763,7 @@ describe('DockerService', () => {
       composeMock.stopOne.mockResolvedValue(mockResult);
       const node = network.nodes.lightning[0];
       await dockerService.stopNode(network, node);
-      expect(composeMock.stopOne).toBeCalledWith(
+      expect(composeMock.stopOne).toHaveBeenCalledWith(
         node.name,
         expect.objectContaining({ cwd: network.path }),
       );
@@ -550,14 +774,75 @@ describe('DockerService', () => {
       composeMock.rm.mockResolvedValue(mockResult);
       const node = network.nodes.lightning[0];
       await dockerService.removeNode(network, node);
-      expect(composeMock.stopOne).toBeCalledWith(
+      expect(composeMock.stopOne).toHaveBeenCalledWith(
         node.name,
         expect.objectContaining({ cwd: network.path }),
       );
-      expect(composeMock.rm).toBeCalledWith(
+      expect(composeMock.rm).toHaveBeenCalledWith(
         expect.objectContaining({ cwd: network.path }),
-        undefined,
+        node.name,
       );
+    });
+
+    it('should rename a node dir', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const node = network.nodes.lightning[0];
+      await dockerService.renameNodeDir(network, node, 'new-name');
+      expect(filesMock.renameFile).toHaveBeenCalledWith(
+        join(network.path, 'volumes', 'lnd', node.name),
+        join(network.path, 'volumes', 'lnd', 'new-name'),
+      );
+      expect(filesMock.rm).toHaveBeenCalledWith(
+        join(network.path, 'volumes', 'lnd', node.name, 'tls.cert'),
+      );
+    });
+
+    it('should await the node directory rename before reporting success', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const node = network.nodes.lightning[1];
+      let completeRename!: () => void;
+      filesMock.renameFile.mockReturnValueOnce(
+        new Promise<void>(resolve => {
+          completeRename = resolve;
+        }),
+      );
+      const resolved = jest.fn();
+      const result = dockerService
+        .renameNodeDir(network, node, 'new-name')
+        .then(resolved);
+      await waitFor(() => expect(filesMock.renameFile).toHaveBeenCalled());
+      expect(resolved).not.toHaveBeenCalled();
+      completeRename();
+      await result;
+      expect(resolved).toHaveBeenCalledTimes(1);
+    });
+
+    it('should propagate a failed node directory rename', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const error = new Error('permission denied');
+      filesMock.renameFile.mockRejectedValueOnce(error);
+      await expect(
+        dockerService.renameNodeDir(network, network.nodes.lightning[1], 'new-name'),
+      ).rejects.toBe(error);
+    });
+
+    it('should not rename a node dir that doesnt exist', async () => {
+      filesMock.exists.mockResolvedValue(false);
+      const node = network.nodes.lightning[0];
+      await dockerService.renameNodeDir(network, node, 'new-name');
+      expect(filesMock.exists).toHaveBeenCalled();
+      expect(filesMock.renameFile).not.toHaveBeenCalled();
+    });
+
+    it('should not delete certs when renaming a non-LND node', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const node = network.nodes.lightning[1];
+      await dockerService.renameNodeDir(network, node, 'new-name');
+      expect(filesMock.renameFile).toHaveBeenCalledWith(
+        join(network.path, 'volumes', 'c-lightning', node.name),
+        join(network.path, 'volumes', 'c-lightning', 'new-name'),
+      );
+      expect(filesMock.rm).not.toHaveBeenCalled();
     });
 
     it('should reformat thrown exceptions', async () => {
@@ -575,11 +860,684 @@ describe('DockerService', () => {
       Object.defineProperty(electronMock.remote, 'process', { get: () => undefined });
       composeMock.upAll.mockResolvedValue(mockResult);
       await dockerService.start(network);
-      expect(composeMock.upAll).toBeCalledWith(
+      expect(composeMock.upAll).toHaveBeenCalledWith(
         expect.objectContaining({ cwd: network.path }),
         undefined,
       );
       Object.defineProperty(electronMock.remote, 'process', { get: () => ({ env: {} }) });
+    });
+  });
+
+  describe('getDocker', () => {
+    it('should detect DOCKER_HOST', async () => {
+      Object.defineProperty(electronMock.remote, 'process', {
+        get: () => ({ env: { DOCKER_HOST: '/var/run/docker.sock' } }),
+      });
+      await getDocker(false);
+      expect(mockDockerode.prototype.constructor).toHaveBeenCalledWith();
+      Object.defineProperty(electronMock.remote, 'process', { get: () => ({ env: {} }) });
+    });
+
+    it('should check paths on Mac', async () => {
+      mockOS.platform.mockReturnValue('darwin');
+      Object.defineProperty(electronMock.remote, 'process', {
+        get: () => ({ env: { HOME: '/home/user' } }),
+      });
+      filesMock.exists.mockImplementation((path: string) => {
+        return Promise.resolve(path === '/var/run/docker.sock');
+      });
+      await getDocker(false);
+      expect(filesMock.exists).toHaveBeenCalledWith('/home/user/.docker/run/docker.sock');
+      expect(filesMock.exists).toHaveBeenCalledWith('/var/run/docker.sock');
+      expect(mockDockerode.prototype.constructor).toHaveBeenCalledWith({
+        socketPath: '/var/run/docker.sock',
+      });
+      Object.defineProperty(electronMock.remote, 'process', { get: () => ({ env: {} }) });
+    });
+
+    it('should check paths on Linux', async () => {
+      mockOS.platform.mockReturnValue('linux');
+      Object.defineProperty(electronMock.remote, 'process', {
+        get: () => ({ env: { HOME: '/home/user' } }),
+      });
+      filesMock.exists.mockImplementation((path: string) => {
+        return Promise.resolve(path === '/var/run/docker.sock');
+      });
+      await getDocker(false);
+      expect(filesMock.exists).toHaveBeenCalledWith('/home/user/.docker/run/docker.sock');
+      expect(filesMock.exists).toHaveBeenCalledWith('/var/run/docker.sock');
+      expect(mockDockerode.prototype.constructor).toHaveBeenCalledWith({
+        socketPath: '/var/run/docker.sock',
+      });
+      Object.defineProperty(electronMock.remote, 'process', { get: () => ({ env: {} }) });
+    });
+
+    it('should not check paths on windows', async () => {
+      mockOS.platform.mockReturnValue('win32');
+      await getDocker(false);
+      expect(mockDockerode.prototype.constructor).toHaveBeenCalledWith();
+    });
+
+    it('should reuse a cached instance for multiple calls', async () => {
+      const docker1 = await getDocker();
+      const docker2 = await getDocker();
+      expect(docker1).toBe(docker2);
+    });
+  });
+
+  describe('simulation commands', () => {
+    const network = createNetwork({
+      id: 1,
+      name: 'my network',
+      description: 'network description',
+      lndNodes: 1,
+      clightningNodes: 1,
+      eclairNodes: 1,
+      bitcoindNodes: 1,
+      tapdNodes: 0,
+      litdNodes: 1,
+      repoState: defaultRepoState,
+      managedImages: testManagedImages,
+      customImages: [],
+      manualMineCount: 6,
+    });
+    const mockResult = { err: '', out: '', exitCode: 0 };
+    const lndNodes = network.nodes.lightning.filter(n => n.implementation === 'LND');
+    const eclairNodes = network.nodes.lightning.filter(
+      n => n.implementation === 'eclair',
+    );
+    const clightningNodes = network.nodes.lightning.filter(
+      n => n.implementation === 'c-lightning',
+    );
+    const litdNodes = network.nodes.lightning.filter(n => n.implementation === 'litd');
+    beforeEach(() => {
+      // Add simulation config to the test network
+      network.simulation = {
+        activity: [
+          {
+            id: 0,
+            source: lndNodes[0].name,
+            destination: eclairNodes[0].name,
+            intervalSecs: 60,
+            amountMsat: 1000,
+          },
+        ],
+        status: Status.Stopped,
+      };
+    });
+
+    it('should start a simulation', async () => {
+      composeMock.upOne.mockResolvedValue(mockResult);
+      await dockerService.startSimulation(network);
+
+      // Verify directories were created
+      expect(fsMock.ensureDir).toHaveBeenCalled();
+
+      // Verify sim.json was written with correct config
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('sim.json'),
+        expect.stringContaining(lndNodes[0].name),
+      );
+
+      // Verify docker compose command was called
+      expect(composeMock.upOne).toHaveBeenCalledWith(
+        'simln',
+        expect.objectContaining({ cwd: network.path }),
+      );
+    });
+
+    it('should stop a simulation', async () => {
+      composeMock.stopOne.mockResolvedValue(mockResult);
+      await dockerService.stopSimulation(network);
+
+      expect(composeMock.stopOne).toHaveBeenCalledWith(
+        'simln',
+        expect.objectContaining({ cwd: network.path }),
+      );
+    });
+
+    it('should remove a simulation', async () => {
+      composeMock.stopOne.mockResolvedValue(mockResult);
+      composeMock.rm.mockResolvedValue(mockResult);
+      await dockerService.removeSimulation(network);
+
+      // Verify stop was called first
+      expect(composeMock.stopOne).toHaveBeenCalledWith(
+        'simln',
+        expect.objectContaining({ cwd: network.path }),
+      );
+
+      // Verify remove was called after
+      expect(composeMock.rm).toHaveBeenCalledWith(
+        expect.objectContaining({ cwd: network.path }),
+        'simln',
+      );
+    });
+
+    it('should handle errors when node is not found', async () => {
+      network.simulation!.activity[0].source = 'non-existent';
+      await expect(dockerService.startSimulation(network)).rejects.toThrow(
+        'Node non-existent not found in network',
+      );
+    });
+
+    it('should return empty arrays when network has no simulation config', async () => {
+      // Create network without simulation config
+      const networkWithoutSim = getNetwork();
+      networkWithoutSim.simulation = undefined;
+
+      // Call constructSimJson directly to test the early return
+      const simJson = dockerService.constructSimJson(networkWithoutSim);
+      expect(simJson).toEqual({ nodes: [], activity: [] });
+    });
+
+    it('should add simln to the docker-compose.yml file', async () => {
+      network.simulation = {} as any;
+      dockerService.saveComposeFile(network);
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('docker-compose.yml'),
+        expect.stringContaining(`container_name: polar-paykit-n1-simln`),
+      );
+    });
+
+    // Now we should be able to use c-lightning and litd in the simulation
+    it('should add c-lightning to the docker-compose.yml file', async () => {
+      network.simulation = {
+        activity: [
+          {
+            id: 0,
+            source: clightningNodes[0].name,
+            destination: litdNodes[0].name,
+            intervalSecs: 60,
+            amountMsat: 1000,
+          },
+        ],
+        status: Status.Stopped,
+      };
+      dockerService.saveComposeFile(network);
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('docker-compose.yml'),
+        expect.stringContaining(`container_name: polar-paykit-n1-simln`),
+      );
+
+      composeMock.upOne.mockResolvedValue(mockResult);
+      await dockerService.startSimulation(network);
+
+      // Verify directories were created
+      expect(fsMock.ensureDir).toHaveBeenCalled();
+
+      // Verify sim.json was written with correct config
+      expect(filesMock.write).toHaveBeenCalledWith(
+        expect.stringContaining('sim.json'),
+        expect.stringContaining(clightningNodes[0].name),
+      );
+
+      // Verify docker compose command was called
+      expect(composeMock.upOne).toHaveBeenCalledWith(
+        'simln',
+        expect.objectContaining({ cwd: network.path }),
+      );
+    });
+
+    it('should map windows paths to posix paths', () => {
+      // Mock Windows-style absolute paths.
+      const lnd = lndNodes[0] as LndNode;
+      const windowsPath = `C:\\Users\\username\\.polar\\networks\\${network.id}\\volumes\\lnd\\${lnd.name}`;
+
+      const tlsCertPath = `${windowsPath}\\tls.cert`;
+      const macaroonPath = `${windowsPath}\\data\\chain\\bitcoin\\regtest\\admin.macaroon`;
+
+      lnd.paths.tlsCert = tlsCertPath;
+      lnd.paths.adminMacaroon = macaroonPath;
+
+      network.simulation = {
+        activity: [
+          {
+            id: 0,
+            source: lndNodes[0].name,
+            destination: eclairNodes[0].name,
+            intervalSecs: 60,
+            amountMsat: 1000,
+          },
+        ],
+        status: Status.Stopped,
+      };
+
+      const simJson = dockerService.constructSimJson(network);
+
+      const lndNode = simJson.nodes.find(n => n.id === lnd.name);
+      expect(lndNode).toBeDefined();
+      expect(lndNode?.cert).toBe(`/home/simln/.lnd/${lnd.name}/tls.cert`);
+      expect(lndNode?.macaroon).toBe(
+        `/home/simln/.lnd/${lnd.name}/data/chain/bitcoin/regtest/admin.macaroon`,
+      );
+    });
+
+    it('should handle missing c-lightning paths', () => {
+      const net = getNetwork();
+      const cln = net.nodes.lightning.filter(
+        n => n.implementation === 'c-lightning',
+      )[0] as CLightningNode;
+      cln.paths.tlsCert = undefined;
+      cln.paths.tlsClientCert = undefined;
+      cln.paths.tlsClientKey = undefined;
+      net.simulation = {
+        activity: [
+          {
+            id: 0,
+            source: cln.name,
+            destination: net.nodes.lightning[0].name,
+            intervalSecs: 60,
+            amountMsat: 1000,
+          },
+        ],
+        status: Status.Stopped,
+      };
+      const simJson = dockerService.constructSimJson(net);
+      const clnSimNode = simJson.nodes.find(n => n.id === cln.name);
+      expect(clnSimNode?.ca_cert).toBeDefined();
+      expect(clnSimNode?.client_cert).toBeDefined();
+      expect(clnSimNode?.client_key).toBeDefined();
+    });
+  });
+
+  describe('copyVolumeToHost', () => {
+    const createContainer = mockDockerode.prototype.createContainer as jest.Mock;
+    let clnNode: CLightningNode;
+    let mockContainer: {
+      start: jest.Mock;
+      wait: jest.Mock;
+      logs: jest.Mock;
+      remove: jest.Mock;
+    };
+
+    beforeEach(() => {
+      mockOS.platform.mockReturnValue('win32');
+      clnNode = network.nodes.lightning.find(
+        n => n.implementation === 'c-lightning',
+      ) as CLightningNode;
+
+      mockContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+        wait: jest.fn().mockResolvedValue({ StatusCode: 0 }),
+        logs: jest.fn().mockResolvedValue(Buffer.from('')),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+      createContainer.mockResolvedValue(mockContainer);
+    });
+
+    it('should skip on non-Windows platforms', async () => {
+      mockOS.platform.mockReturnValue('darwin');
+      await dockerService.copyVolumeToHost(clnNode);
+      expect(createContainer).not.toHaveBeenCalled();
+    });
+
+    it('should create a helper container with correct volume bindings', async () => {
+      await dockerService.copyVolumeToHost(clnNode);
+      expect(createContainer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          HostConfig: expect.objectContaining({
+            Binds: expect.arrayContaining([
+              expect.stringContaining(':/source:ro'),
+              expect.stringContaining(':/dest'),
+            ]),
+          }),
+        }),
+      );
+    });
+
+    it('should throw if the container exits with a non-zero status code', async () => {
+      mockContainer.wait.mockResolvedValue({ StatusCode: 1 });
+      mockContainer.logs.mockResolvedValue(Buffer.from('tar: error'));
+      await expect(dockerService.copyVolumeToHost(clnNode)).rejects.toThrow(
+        /Failed to copy CLN volume.*exit 1/,
+      );
+    });
+
+    it('should not throw if helper container removal fails', async () => {
+      mockContainer.remove.mockRejectedValue(new Error('remove-failed'));
+      await expect(dockerService.copyVolumeToHost(clnNode)).resolves.not.toThrow();
+    });
+
+    it('should throw and still attempt cleanup if createContainer fails', async () => {
+      createContainer.mockRejectedValue(new Error('docker-unavailable'));
+      await expect(dockerService.copyVolumeToHost(clnNode)).rejects.toThrow(
+        'docker-unavailable',
+      );
+    });
+  });
+
+  describe('removeCLNVolume', () => {
+    const getVolume = mockDockerode.prototype.getVolume as jest.Mock;
+    const mockVolume = { remove: jest.fn() };
+    let clnNode: CLightningNode;
+
+    beforeEach(() => {
+      clnNode = network.nodes.lightning.filter(
+        n => n.implementation === 'c-lightning',
+      )[0] as CLightningNode;
+      mockOS.platform.mockReturnValue('win32');
+      getVolume.mockReturnValue(mockVolume);
+      mockVolume.remove.mockResolvedValue(undefined);
+    });
+
+    it('should skip on non-Windows platforms', async () => {
+      mockOS.platform.mockReturnValue('darwin');
+      await dockerService.removeCLNVolume(clnNode);
+      expect(getVolume).not.toHaveBeenCalled();
+    });
+
+    it('should remove the named volume', async () => {
+      await dockerService.removeCLNVolume(clnNode);
+      const containerName = `polar-paykit-n${clnNode.networkId}-${clnNode.name}`;
+      const volumeName = `polar-paykit-network-${clnNode.networkId}_${containerName}`;
+      expect(getVolume).toHaveBeenCalledWith(volumeName);
+      expect(mockVolume.remove).toHaveBeenCalled();
+    });
+
+    it('should not throw if the volume does not exist', async () => {
+      mockVolume.remove.mockRejectedValue({ statusCode: 404 });
+      await expect(dockerService.removeCLNVolume(clnNode)).resolves.not.toThrow();
+    });
+
+    it('should not throw if removal fails for another reason', async () => {
+      mockVolume.remove.mockRejectedValue(new Error('permission denied'));
+      await expect(dockerService.removeCLNVolume(clnNode)).resolves.not.toThrow();
+    });
+  });
+
+  describe('renameNodeDir for CLN on Windows', () => {
+    const createContainer = mockDockerode.prototype.createContainer as jest.Mock;
+    const createVolume = mockDockerode.prototype.createVolume as jest.Mock;
+    const getVolume = mockDockerode.prototype.getVolume as jest.Mock;
+    let mockCopyContainer: { start: jest.Mock; wait: jest.Mock; remove: jest.Mock };
+    let clnNode: CLightningNode;
+
+    beforeEach(() => {
+      mockOS.platform.mockReturnValue('win32');
+      clnNode = network.nodes.lightning.find(
+        n => n.implementation === 'c-lightning',
+      ) as CLightningNode;
+
+      mockCopyContainer = {
+        start: jest.fn().mockResolvedValue(undefined),
+        wait: jest.fn().mockResolvedValue({ StatusCode: 0 }),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+      createContainer.mockResolvedValue(mockCopyContainer);
+      createVolume.mockResolvedValue(undefined);
+      getVolume.mockReturnValue({ remove: jest.fn().mockResolvedValue(undefined) });
+
+      filesMock.exists.mockResolvedValue(false);
+    });
+
+    it('should create a new volume with the correct name', async () => {
+      await dockerService.renameNodeDir(network, clnNode, 'new-bob');
+      const newContainerName = `polar-paykit-n${network.id}-new-bob`;
+      const newVolumeName = `polar-paykit-network-${network.id}_${newContainerName}`;
+      expect(createVolume).toHaveBeenCalledWith({ Name: newVolumeName });
+    });
+
+    it('should remove the copy container even if the copy fails', async () => {
+      mockCopyContainer.wait.mockResolvedValue({ StatusCode: 1 });
+      await expect(
+        dockerService.renameNodeDir(network, clnNode, 'new-bob'),
+      ).rejects.toThrow();
+      expect(mockCopyContainer.remove).toHaveBeenCalledWith({ force: true });
+    });
+
+    it('should throw if cleanup itself fails', async () => {
+      const removeNewVolume = jest.fn().mockRejectedValue(new Error('volume in use'));
+      const newContainerName = `polar-paykit-n${network.id}-new-bob`;
+      const newVolumeName = `polar-paykit-network-${network.id}_${newContainerName}`;
+
+      getVolume.mockImplementation((name: string) =>
+        name === newVolumeName
+          ? { remove: removeNewVolume }
+          : { remove: jest.fn().mockResolvedValue(undefined) },
+      );
+      mockCopyContainer.wait.mockResolvedValue({ StatusCode: 1 });
+
+      await expect(
+        dockerService.renameNodeDir(network, clnNode, 'new-bob'),
+      ).rejects.toThrow('Volume copy failed with exit code 1');
+      expect(removeNewVolume).toHaveBeenCalledTimes(1);
+    });
+
+    it('should throw if the copy container exits with a non-zero status code', async () => {
+      mockCopyContainer.wait.mockResolvedValue({ StatusCode: 1 });
+      await expect(
+        dockerService.renameNodeDir(network, clnNode, 'new-bob'),
+      ).rejects.toThrow('Volume copy failed with exit code 1');
+    });
+
+    it('should keep the original volume when the host directory rename fails', async () => {
+      const oldVolumeName = `polar-paykit-network-${network.id}_polar-paykit-n${network.id}-${clnNode.name}`;
+      const newVolumeName = `polar-paykit-network-${network.id}_polar-paykit-n${network.id}-new-bob`;
+      const removeOld = jest.fn();
+      const removeNew = jest.fn().mockResolvedValue(undefined);
+      getVolume.mockImplementation((name: string) => ({
+        remove: name === oldVolumeName ? removeOld : removeNew,
+      }));
+      filesMock.exists.mockResolvedValue(true);
+      const error = new Error('host rename denied');
+      filesMock.renameFile.mockRejectedValueOnce(error);
+
+      await expect(dockerService.renameNodeDir(network, clnNode, 'new-bob')).rejects.toBe(
+        error,
+      );
+
+      expect(getVolume).toHaveBeenCalledWith(newVolumeName);
+      expect(removeNew).toHaveBeenCalledTimes(1);
+      expect(removeOld).not.toHaveBeenCalled();
+    });
+
+    it('should retain the original volume and error if rollback cleanup also fails', async () => {
+      const oldVolumeName = `polar-paykit-network-${network.id}_polar-paykit-n${network.id}-${clnNode.name}`;
+      const newVolumeName = `polar-paykit-network-${network.id}_polar-paykit-n${network.id}-new-bob`;
+      const removeOld = jest.fn();
+      const cleanupError = new Error('new volume busy');
+      getVolume.mockImplementation((name: string) => ({
+        remove:
+          name === oldVolumeName ? removeOld : jest.fn().mockRejectedValue(cleanupError),
+      }));
+      filesMock.exists.mockResolvedValue(true);
+      const error = new Error('host rename denied');
+      filesMock.renameFile.mockRejectedValueOnce(error);
+
+      await expect(dockerService.renameNodeDir(network, clnNode, 'new-bob')).rejects.toBe(
+        error,
+      );
+
+      expect(removeOld).not.toHaveBeenCalled();
+      expect(info).toHaveBeenCalledWith(
+        `Failed to clean up new volume ${newVolumeName}: ${cleanupError}`,
+      );
+    });
+
+    it('should not move the host directory if the volume copy fails', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      mockCopyContainer.wait.mockResolvedValue({ StatusCode: 1 });
+      await expect(
+        dockerService.renameNodeDir(network, clnNode, 'new-bob'),
+      ).rejects.toThrow('Volume copy failed');
+      expect(filesMock.renameFile).not.toHaveBeenCalled();
+    });
+
+    it('should not remove the original volume until the host rename completes', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const removeVolume = jest.fn().mockResolvedValue(undefined);
+      getVolume.mockReturnValue({ remove: removeVolume });
+      let completeRename!: () => void;
+      filesMock.renameFile.mockReturnValueOnce(
+        new Promise<void>(resolve => {
+          completeRename = resolve;
+        }),
+      );
+      const result = dockerService.renameNodeDir(network, clnNode, 'new-bob');
+      await waitFor(() => expect(filesMock.renameFile).toHaveBeenCalled());
+      expect(removeVolume).not.toHaveBeenCalled();
+      completeRename();
+      await result;
+      expect(removeVolume).toHaveBeenCalledTimes(1);
+    });
+
+    it('should delete stale CLN cert files before renaming', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      await dockerService.renameNodeDir(network, clnNode, 'new-bob');
+      expect(filesMock.rm).toHaveBeenCalledWith(clnNode.paths.tlsCert);
+      expect(filesMock.rm).toHaveBeenCalledWith(clnNode.paths.tlsClientCert);
+      expect(filesMock.rm).toHaveBeenCalledWith(clnNode.paths.tlsClientKey);
+    });
+
+    it('should log and not throw if removing the old volume after rename fails', async () => {
+      filesMock.exists.mockResolvedValue(true);
+      const oldContainerName = `polar-paykit-n${network.id}-${clnNode.name}`;
+      const oldVolumeName = `polar-paykit-network-${network.id}_${oldContainerName}`;
+      const removeError = new Error('volume still in use');
+      getVolume.mockImplementation((name: string) =>
+        name === oldVolumeName
+          ? { remove: jest.fn().mockRejectedValue(removeError) }
+          : { remove: jest.fn().mockResolvedValue(undefined) },
+      );
+
+      await dockerService.renameNodeDir(network, clnNode, 'new-bob');
+
+      expect(filesMock.renameFile).toHaveBeenCalledWith(
+        join(network.path, 'volumes', 'c-lightning', clnNode.name),
+        join(network.path, 'volumes', 'c-lightning', 'new-bob'),
+      );
+      expect(info).toHaveBeenCalledWith(
+        `Failed to remove old volume ${oldVolumeName}: ${removeError}`,
+      );
+    });
+
+    it('should not run CLN volume logic for a CLN node on non-Windows', async () => {
+      mockOS.platform.mockReturnValue('darwin');
+      await dockerService.renameNodeDir(network, clnNode, 'new-bob');
+      expect(createVolume).not.toHaveBeenCalled();
+      expect(createContainer).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('copyHostToVolume', () => {
+    const getImage = mockDockerode.prototype.getImage as jest.Mock;
+    const pull = mockDockerode.prototype.pull as jest.Mock;
+    const createVolume = mockDockerode.prototype.createVolume as jest.Mock;
+    const createContainer = mockDockerode.prototype.createContainer as jest.Mock;
+    const getVolume = mockDockerode.prototype.getVolume as jest.Mock;
+    let clnNode: CLightningNode;
+    let mockHelper: {
+      start: jest.Mock;
+      wait: jest.Mock;
+      logs: jest.Mock;
+      remove: jest.Mock;
+    };
+
+    beforeEach(() => {
+      mockOS.platform.mockReturnValue('win32');
+      clnNode = network.nodes.lightning.find(
+        n => n.implementation === 'c-lightning',
+      ) as CLightningNode;
+
+      filesMock.exists.mockResolvedValue(true);
+      getImage.mockReturnValue({ inspect: jest.fn().mockResolvedValue({}) });
+      pull.mockResolvedValue({});
+      (mockDockerode.prototype as any).modem = {
+        followProgress: jest.fn((_stream: any, cb: any) => cb(null, [])),
+      };
+      createVolume.mockResolvedValue(undefined);
+      mockHelper = {
+        start: jest.fn().mockResolvedValue(undefined),
+        wait: jest.fn().mockResolvedValue({ StatusCode: 0 }),
+        logs: jest.fn().mockResolvedValue(Buffer.from('')),
+        remove: jest.fn().mockResolvedValue(undefined),
+      };
+      createContainer.mockResolvedValue(mockHelper);
+      getVolume.mockReturnValue({ remove: jest.fn().mockResolvedValue(undefined) });
+    });
+
+    it('should skip on non-Windows platforms', async () => {
+      mockOS.platform.mockReturnValue('darwin');
+      await dockerService.copyHostToVolume(clnNode);
+      expect(filesMock.exists).not.toHaveBeenCalled();
+    });
+
+    it('should skip seeding if no CLN state exists on the host', async () => {
+      filesMock.exists.mockResolvedValue(false);
+      await dockerService.copyHostToVolume(clnNode);
+      expect(createVolume).not.toHaveBeenCalled();
+    });
+
+    it('should seed the volume without pulling if the image already exists', async () => {
+      await dockerService.copyHostToVolume(clnNode);
+      const containerName = `polar-paykit-n${clnNode.networkId}-${clnNode.name}`;
+      const volumeName = `polar-paykit-network-${clnNode.networkId}_${containerName}`;
+      expect(getImage).toHaveBeenCalled();
+      expect(pull).not.toHaveBeenCalled();
+      expect(createVolume).toHaveBeenCalledWith({ Name: volumeName });
+      expect(mockHelper.start).toHaveBeenCalled();
+    });
+
+    it('should pull the image if it is not already present', async () => {
+      getImage.mockReturnValue({
+        inspect: jest.fn().mockRejectedValue(new Error('not found')),
+      });
+      await dockerService.copyHostToVolume(clnNode);
+      expect(pull).toHaveBeenCalled();
+      expect(createVolume).toHaveBeenCalled();
+    });
+
+    it('should throw if pulling the image fails', async () => {
+      getImage.mockReturnValue({
+        inspect: jest.fn().mockRejectedValue(new Error('not found')),
+      });
+      (mockDockerode.prototype as any).modem = {
+        followProgress: jest.fn((_stream: any, cb: any) =>
+          cb(new Error('pull failed'), undefined),
+        ),
+      };
+      await expect(dockerService.copyHostToVolume(clnNode)).rejects.toThrow(
+        'pull failed',
+      );
+    });
+
+    it('should throw if the helper container exits with a non-zero status code', async () => {
+      mockHelper.wait.mockResolvedValue({ StatusCode: 1 });
+      mockHelper.logs.mockResolvedValue(Buffer.from('chown: invalid user'));
+      await expect(dockerService.copyHostToVolume(clnNode)).rejects.toThrow(
+        /Failed to seed CLN volume.*exit 1/,
+      );
+    });
+
+    it('should clean up the new volume if seeding fails', async () => {
+      mockHelper.wait.mockResolvedValue({ StatusCode: 1 });
+      const removeVolume = jest.fn().mockResolvedValue(undefined);
+      getVolume.mockReturnValue({ remove: removeVolume });
+      await expect(dockerService.copyHostToVolume(clnNode)).rejects.toThrow();
+      expect(removeVolume).toHaveBeenCalled();
+    });
+
+    it('should not throw additional errors if volume cleanup also fails', async () => {
+      mockHelper.wait.mockResolvedValue({ StatusCode: 1 });
+      getVolume.mockReturnValue({
+        remove: jest.fn().mockRejectedValue(new Error('busy')),
+      });
+      await expect(dockerService.copyHostToVolume(clnNode)).rejects.toThrow(
+        /Failed to seed CLN volume/,
+      );
+    });
+
+    it('should not throw if the helper container fails to be removed', async () => {
+      mockHelper.remove.mockRejectedValue(new Error('remove-failed'));
+      await expect(dockerService.copyHostToVolume(clnNode)).resolves.not.toThrow();
+    });
+
+    it('should not remove the volume when seeding succeeds', async () => {
+      const removeVolume = jest.fn();
+      getVolume.mockReturnValue({ remove: removeVolume });
+      await dockerService.copyHostToVolume(clnNode);
+      expect(removeVolume).not.toHaveBeenCalled();
     });
   });
 });

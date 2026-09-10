@@ -1,11 +1,7 @@
-import { assertNoConsoleErrors, cleanup, getPageUrl, pageUrl } from './helpers';
+import { afterEach, getPageUrl, pageUrl } from './helpers';
 import { Home, NetworkView, NewNetwork } from './pages';
 
-fixture`Network`
-  .page(pageUrl)
-  .beforeEach(Home.clickCreateButton)
-  .afterEach(assertNoConsoleErrors)
-  .afterEach(cleanup);
+fixture`Network`.page(pageUrl).beforeEach(Home.clickCreateButton).afterEach(afterEach);
 
 test('should be on the New Network route', async t => {
   await t.expect(getPageUrl()).match(/.*#\/network$/);
@@ -19,7 +15,7 @@ test('should add a new network', async t => {
     .eql('test network');
 });
 
-test('should should view new network after adding', async t => {
+test('should view new network after adding', async t => {
   await t
     .typeText(NewNetwork.nameInput, 'test network')
     .click(NewNetwork.submitBtn)

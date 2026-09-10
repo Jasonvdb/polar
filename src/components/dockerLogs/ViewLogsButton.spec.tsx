@@ -29,7 +29,7 @@ describe('ViewLogsButton', () => {
     ipcMock.mockResolvedValue(true);
     const { getByText } = renderComponent(n => n.nodes.lightning[0]);
     fireEvent.click(getByText('View Logs'));
-    const url = '/logs/LND/polar-n1-alice';
+    const url = '/logs/LND/polar-paykit-n1-alice';
     await waitFor(() => {
       expect(ipcMock).toBeCalledWith(ipcChannels.openWindow, { url });
     });

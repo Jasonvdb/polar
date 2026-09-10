@@ -1,4 +1,5 @@
 import React, { useEffect } from 'react';
+import { useAsyncCallback } from 'react-async-hook';
 import { info } from 'electron-log';
 import styled from '@emotion/styled';
 import {
@@ -17,7 +18,6 @@ import { useTheme } from 'hooks/useTheme';
 import { useStoreActions, useStoreState } from 'store';
 import { ThemeColors } from 'theme/colors';
 import { dockerConfigs } from 'utils/constants';
-import { isWindows } from 'utils/system';
 import { HOME } from 'components/routing';
 
 const Styled = {
@@ -36,20 +36,29 @@ const Styled = {
   `,
 };
 
-const NewNetwork: React.SFC = () => {
+const NewNetwork: React.FC = () => {
   useEffect(() => info('Rendering NewNetwork component'), []);
 
   const { l } = usePrefixedTranslation('cmps.network.NewNetwork');
   const theme = useTheme();
-  const { navigateTo } = useStoreActions(s => s.app);
+  const { navigateTo, notify } = useStoreActions(s => s.app);
   const { addNetwork } = useStoreActions(s => s.network);
   const { settings } = useStoreState(s => s.app);
   const { custom: customNodes } = settings.nodeImages;
 
-  const handleSubmit = (values: any) => {
-    values.customNodes = values.customNodes || {};
-    addNetwork(values);
-  };
+  const createAsync = useAsyncCallback(async (values: any) => {
+    try {
+      values.customNodes = values.customNodes || {};
+
+      if (values.tapdNodes > values.lndNodes) {
+        throw new Error(l('tapdCountError'));
+      }
+
+      await addNetwork(values);
+    } catch (error: any) {
+      notify({ message: l('createError'), error });
+    }
+  });
 
   const initialCustomValues = customNodes.reduce((result, node) => {
     result[node.id] = 0;
@@ -67,14 +76,17 @@ const NewNetwork: React.SFC = () => {
         <Form
           layout="vertical"
           colon={false}
+          requiredMark={false}
           initialValues={{
-            lndNodes: isWindows() ? 2 : 1,
-            clightningNodes: isWindows() ? 0 : 1,
-            eclairNodes: 1,
-            bitcoindNodes: 1,
+            lndNodes: settings.newNodeCounts.LND,
+            clightningNodes: settings.newNodeCounts['c-lightning'],
+            eclairNodes: settings.newNodeCounts.eclair,
+            bitcoindNodes: settings.newNodeCounts.bitcoind,
+            tapdNodes: settings.newNodeCounts.tapd,
+            litdNodes: settings.newNodeCounts.litd,
             customNodes: initialCustomValues,
           }}
-          onFinish={handleSubmit}
+          onFinish={createAsync.execute}
         >
           <Form.Item
             name="name"
@@ -82,6 +94,13 @@ const NewNetwork: React.SFC = () => {
             rules={[{ required: true, message: l('cmps.forms.required') }]}
           >
             <Input placeholder={l('namePhldr')} />
+          </Form.Item>
+          <Form.Item
+            name="description"
+            label={l('descriptionLabel')}
+            rules={[{ max: 100, message: 'Maximum length is 100 characters' }]}
+          >
+            <Input placeholder={l('namePhlDescription')} />
           </Form.Item>
           {customNodes.length > 0 && (
             <>
@@ -116,10 +135,9 @@ const NewNetwork: React.SFC = () => {
               <Form.Item
                 name="clightningNodes"
                 label={dockerConfigs['c-lightning'].name}
-                extra={isWindows() ? l('clightningWindows') : ''}
                 rules={[{ required: true, message: l('cmps.forms.required') }]}
               >
-                <InputNumber min={0} max={10} disabled={isWindows()} />
+                <InputNumber min={0} max={10} />
               </Form.Item>
             </Col>
             <Col span={6}>
@@ -141,8 +159,28 @@ const NewNetwork: React.SFC = () => {
               </Form.Item>
             </Col>
           </Row>
+          <Row gutter={16}>
+            <Col span={6}>
+              <Form.Item
+                name="tapdNodes"
+                label={dockerConfigs.tapd.name}
+                rules={[{ required: true, message: l('cmps.forms.required') }]}
+              >
+                <InputNumber min={0} max={10} />
+              </Form.Item>
+            </Col>
+            <Col span={6}>
+              <Form.Item
+                name="litdNodes"
+                label={dockerConfigs.litd.name}
+                rules={[{ required: true, message: l('cmps.forms.required') }]}
+              >
+                <InputNumber min={0} max={10} />
+              </Form.Item>
+            </Col>
+          </Row>
           <Form.Item>
-            <Button type="primary" htmlType="submit">
+            <Button type="primary" htmlType="submit" loading={createAsync.loading}>
               {l('btnCreate')}
             </Button>
           </Form.Item>

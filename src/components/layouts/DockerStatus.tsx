@@ -24,7 +24,7 @@ const DockerStatus: React.FC = () => {
 
   return (
     <Styled.DockerStatus>
-      <span>Polar v{APP_VERSION}</span>
+      <span>Polar Paykit v{APP_VERSION}</span>
       {docker && <span>Docker v{docker}</span>}
       {compose && <span>Compose v{compose}</span>}
     </Styled.DockerStatus>

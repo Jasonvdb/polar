@@ -8,8 +8,8 @@ import { getNetwork, injections, renderWithProviders } from 'utils/tests';
 import NodeContextMenu from './NodeContextMenu';
 
 describe('NodeContextMenu', () => {
-  const renderComponent = (nodeName: string, status?: Status) => {
-    const network = getNetwork(1, 'test network', status);
+  const renderComponent = (nodeName: string, status?: Status, activeId?: number) => {
+    const network = getNetwork(1, 'test network', status, 2);
     const chart = initChartFromNetwork(network);
     if (nodeName === 'invalid') {
       chart.nodes.alice.id = 'invalid';
@@ -20,7 +20,7 @@ describe('NodeContextMenu', () => {
         networks: [network],
       },
       designer: {
-        activeId: network.id,
+        activeId: activeId || network.id,
         allCharts: {
           [network.id]: chart,
         },
@@ -36,6 +36,11 @@ describe('NodeContextMenu', () => {
     fireEvent.contextMenu(result.getByText('test-child'));
     return result;
   };
+
+  it('should not render menu with no network', () => {
+    const { queryByText } = renderComponent('alice', Status.Stopped, -1);
+    expect(queryByText('Start')).not.toBeInTheDocument();
+  });
 
   it('should display the correct options for a started lightning node', async () => {
     const { getByText } = renderComponent('alice', Status.Started);
@@ -65,6 +70,7 @@ describe('NodeContextMenu', () => {
 
   it('should display the correct options for a started bitcoin node', async () => {
     const { getByText } = renderComponent('backend1', Status.Started);
+    expect(getByText('Send to Address')).toBeInTheDocument();
     expect(getByText('Launch Terminal')).toBeInTheDocument();
     expect(getByText('Stop')).toBeInTheDocument();
     expect(getByText('View Logs')).toBeInTheDocument();
@@ -74,6 +80,30 @@ describe('NodeContextMenu', () => {
 
   it('should display the correct options for a stopped bitcoin node', async () => {
     const { getByText, queryByText } = renderComponent('backend1', Status.Stopped);
+    expect(queryByText('Send to Address')).not.toBeInTheDocument();
+    expect(queryByText('Launch Terminal')).not.toBeInTheDocument();
+    expect(queryByText('View Logs')).not.toBeInTheDocument();
+    expect(getByText('Start')).toBeInTheDocument();
+    expect(getByText('Advanced Options')).toBeInTheDocument();
+    expect(getByText('Remove')).toBeInTheDocument();
+  });
+
+  it('should display the correct options for a started tap node', async () => {
+    const { getByText } = renderComponent('alice-tap', Status.Started);
+    expect(getByText('Create Asset Address')).toBeInTheDocument();
+    expect(getByText('Mint Asset')).toBeInTheDocument();
+    expect(getByText('Launch Terminal')).toBeInTheDocument();
+    expect(getByText('Stop')).toBeInTheDocument();
+    expect(getByText('View Logs')).toBeInTheDocument();
+    expect(getByText('Advanced Options')).toBeInTheDocument();
+    expect(getByText('Remove')).toBeInTheDocument();
+    expect(getByText('Send Asset On-chain')).toBeInTheDocument();
+  });
+
+  it('should display the correct options for a stopped tap node', async () => {
+    const { getByText, queryByText } = renderComponent('alice-tap', Status.Stopped);
+    expect(queryByText('Create Asset Address')).not.toBeInTheDocument();
+    expect(queryByText('Mint')).not.toBeInTheDocument();
     expect(queryByText('Launch Terminal')).not.toBeInTheDocument();
     expect(queryByText('View Logs')).not.toBeInTheDocument();
     expect(getByText('Start')).toBeInTheDocument();
@@ -87,6 +117,7 @@ describe('NodeContextMenu', () => {
     expect(queryByText('Pay Invoice')).not.toBeInTheDocument();
     expect(queryByText('Open Outgoing Channel')).not.toBeInTheDocument();
     expect(queryByText('Open Incoming Channel')).not.toBeInTheDocument();
+    expect(queryByText('Send to Address')).not.toBeInTheDocument();
     expect(queryByText('Launch Terminal')).not.toBeInTheDocument();
     expect(queryByText('Stop')).not.toBeInTheDocument();
     expect(queryByText('View Logs')).not.toBeInTheDocument();
@@ -124,6 +155,38 @@ describe('NodeContextMenu', () => {
     expect(store.getState().modals.openChannel.to).toBe('alice');
   });
 
+  it('should show the open send coins modal', async () => {
+    const { getByText, store } = renderComponent('backend1', Status.Started);
+    expect(store.getState().modals.sendOnChain.visible).toBe(false);
+    fireEvent.click(getByText('Send to Address'));
+    expect(store.getState().modals.sendOnChain.visible).toBe(true);
+    expect(store.getState().modals.sendOnChain.backendName).toBe('backend1');
+  });
+
+  it('should show the mint asset modal', async () => {
+    const { getByText, store } = renderComponent('alice-tap', Status.Started);
+    expect(store.getState().modals.mintAsset.visible).toBe(false);
+    fireEvent.click(getByText('Mint Asset'));
+    expect(store.getState().modals.mintAsset.visible).toBe(true);
+    expect(store.getState().modals.mintAsset.nodeName).toBe('alice-tap');
+  });
+
+  it('should show the new address modal', async () => {
+    const { getByText, store } = renderComponent('alice-tap', Status.Started);
+    expect(store.getState().modals.newAddress.visible).toBe(false);
+    fireEvent.click(getByText('Create Asset Address'));
+    expect(store.getState().modals.newAddress.visible).toBe(true);
+    expect(store.getState().modals.newAddress.nodeName).toBe('alice-tap');
+  });
+
+  it('should show the send asset modal', async () => {
+    const { getByText, store } = renderComponent('alice-tap', Status.Started);
+    expect(store.getState().modals.sendAsset.visible).toBe(false);
+    fireEvent.click(getByText('Send Asset On-chain'));
+    expect(store.getState().modals.sendAsset.visible).toBe(true);
+    expect(store.getState().modals.sendAsset.nodeName).toBe('alice-tap');
+  });
+
   it('should open the terminal', async () => {
     const ipcMock = injections.ipc as jest.Mock;
     ipcMock.mockResolvedValue(true);
@@ -132,7 +195,7 @@ describe('NodeContextMenu', () => {
     await act(async () => {
       fireEvent.click(getByText('Launch Terminal'));
     });
-    const url = '/terminal/LND/polar-n1-alice';
+    const url = '/terminal/LND/polar-paykit-n1-alice';
     expect(ipcMock).toBeCalledWith(ipcChannels.openWindow, { url });
   });
 
@@ -160,7 +223,7 @@ describe('NodeContextMenu', () => {
     await act(async () => {
       fireEvent.click(getByText('View Logs'));
     });
-    const url = '/logs/LND/polar-n1-alice';
+    const url = '/logs/LND/polar-paykit-n1-alice';
     expect(ipcMock).toBeCalledWith(ipcChannels.openWindow, { url });
   });
 

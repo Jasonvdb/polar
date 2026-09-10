@@ -2,6 +2,322 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## [4.0.0](https://github.com/jamaljsr/polar/compare/v3.3.0...v4.0.0)
+
+This release introduces two new major features into Polar.
+
+1. Adds the ability to simulate realistic Lightning payments between the nodes. You can create activity rules by specifying a source, destination, amount, and time interval. Each activity will automate sending payments across the network while the simulation is running. This feature was made possible by integrating [sim-ln](https://github.com/bitcoin-dev-project/sim-ln) into Polar.
+
+2. Adds a new Model Context Protocol (MCP) server into Polar which allows AI assistants (Claude Code, Codex, Cursor, etc) to perform automated actions within Polar. They now have the ability to create networks, open channels, make payments, mint assets, and many more via 48 MCP tools. You can describe complex network scenarios in plain English and and let the AI set them up. Learn more about the MCP capabilities and how to configure it in the [README](https://github.com/jamaljsr/polar-mcp) for [@lightningpolar/mcp](https://www.npmjs.com/package/@lightningpolar/mcp) NPM package.
+
+### Features
+
+- Add [sim-ln](https://github.com/bitcoin-dev-project/sim-ln) integration to simulate realistic Lightning payments by @Abdulkbk in https://github.com/jamaljsr/polar/pull/1159
+- Retain custom block count input for "Manually Mine Blocks" by @Jem256 in https://github.com/jamaljsr/polar/pull/1300
+- Add Model Context Protocol (MCP) server for AI assistant integration by @jamaljsr in https://github.com/jamaljsr/polar/pull/1328
+
+### Bug Fixes
+
+- Fixed Core Lightning gRPC API not being accessible to host by @Abdulkbk in https://github.com/jamaljsr/polar/pull/1238
+- Use correct ports for `litd` gRPC and REST endpoints by @jcbrand in https://github.com/jamaljsr/polar/pull/1315
+- Add arm64 release builds for all platforms by @jamaljsr in https://github.com/jamaljsr/polar/pull/1349
+
+### Node Updates
+
+- Add support for LND v0.19.2-beta by @jamaljsr in https://github.com/jamaljsr/polar/pull/1248
+- Add support for Taproot Assets v0.6.1-alpha by @jamaljsr in https://github.com/jamaljsr/polar/pull/1248
+- Add support for Terminal (litd) v0.15.1-alpha by @jamaljsr in https://github.com/jamaljsr/polar/pull/1248
+- Add support for LND v0.19.3-beta by @jamaljsr in https://github.com/jamaljsr/polar/pull/1325
+- Add support for LND v0.20.0-beta by @jamaljsr in https://github.com/jamaljsr/polar/pull/1325
+- Add support for Core Lightning v25.09.3 by @jamaljsr in https://github.com/jamaljsr/polar/pull/1325
+- Add support for Terminal (litd) v0.15.3-alpha by @jamaljsr in https://github.com/jamaljsr/polar/pull/1325
+- Add support for Eclair v0.13.1 by @jamaljsr in https://github.com/jamaljsr/polar/pull/1326
+- Add support for Bitcoin Core v30.0 by @jamaljsr in https://github.com/jamaljsr/polar/pull/1326
+- Add support for Terminal (litd) v0.16.0-alpha by @jamaljsr in https://github.com/jamaljsr/polar/pull/1330
+- Add support for Core Lightning v25.12 by @jamaljsr in https://github.com/jamaljsr/polar/pull/1345
+
+## [3.3.0](https://github.com/jamaljsr/polar/compare/v3.2.0...v3.3.0)
+
+This release adds support for the final v0.15.0 version of Terminal (`litd`) which improves support for making asset payments over Lightning.
+
+All of the node implementations have also been updated to their latests versions:
+
+- LND v0.19.1-beta
+- Taproot Assets (tapd) v0.6.0-alpha
+- Terminal (litd) v0.15.0-alpha
+- Core Lightning v24.11.1
+
+### Features
+
+- Add UI to balance LN channels by @uwla in https://github.com/jamaljsr/polar/pull/859
+- Fix incorrect sats value displayed for paid invoices by @AdamuAbba in https://github.com/jamaljsr/polar/pull/1110
+- Solve crashing issue when toggling light/dark mode by @IgnacioPorte in https://github.com/jamaljsr/polar/pull/1144
+- Update the Docker detection error message by @Mshehu5 in https://github.com/jamaljsr/polar/pull/1213
+
+### Docs
+
+- Fix RPM link in README by @jamaljsr in https://github.com/jamaljsr/polar/pull/1203
+- Fix awk compatibility in setup instructions by @Fideltodayy in https://github.com/jamaljsr/polar/pull/1222
+
+### Chore
+
+- Make bitcoin implementation flexible by @Abdulkbk in https://github.com/jamaljsr/polar/pull/1092
+- Fix japanese by @Hakkadaikon in https://github.com/jamaljsr/polar/pull/1226
+
+## [3.2.0](https://github.com/jamaljsr/polar/compare/v3.1.0...v3.2.0)
+
+This release adds support for the final v0.14.0 version of Terminal (`litd`) which officially adds support for making asset payments over Lightning.
+
+All of the node implementations have also been updated to their latests versions:
+
+- LND v0.18.4-beta
+- Taproot Assets (tapd) v0.5.0-alpha
+- Terminal (litd) v0.14.0-alpha
+- Core Lightning v24.11.1
+- Eclair v0.11.0
+
+### Features
+
+- Minor updates for litd v0.14.0 by @jamaljsr in https://github.com/jamaljsr/polar/pull/1072
+- Update node implementations to their latest versions by @jamaljsr in https://github.com/jamaljsr/polar/pull/1076
+- December 20204 Node Updates by @jamaljsr in https://github.com/jamaljsr/polar/pull/1085
+
+## [3.1.0](https://github.com/jamaljsr/polar/compare/v3.0.0...v3.1.0)
+
+This minor release is needed to support the latest released versions of `litd` and `tapd`.
+
+### Features
+
+- Add Description field when creating a new network by kelvinator07 in https://github.com/jamaljsr/polar/pull/978
+- Add full support for decimal display for TAP assets by jamaljsr in https://github.com/jamaljsr/polar/pull/1040
+
+### Node Updates
+
+- Add support for tapd v0.5.0-alpha.rc1 by jamaljsr in https://github.com/jamaljsr/polar/pull/1064
+- Add support for lnd v0.18.4-beta.rc1 by jamaljsr in https://github.com/jamaljsr/polar/pull/1064
+- Add support for litd v0.14.0-alpha.rc1 by jamaljsr in https://github.com/jamaljsr/polar/pull/1039
+- add support for LND v0.18.3 by jamaljsr in https://github.com/jamaljsr/polar/pull/1023
+- add support for Core Lightning v24.08.1 by jamaljsr in https://github.com/jamaljsr/polar/pull/1023
+- add support for Bitcoin Core v28.0 by jamaljsr in https://github.com/jamaljsr/polar/pull/1023
+- add support for Terminal v0.13.995 by jamaljsr in https://github.com/jamaljsr/polar/pull/1023
+- add support for CLN v24.08 by kelvinator07 in https://github.com/jamaljsr/polar/pull/994
+- add support for litd v0.13.993-experimental by jamaljsr in https://github.com/jamaljsr/polar/pull/980
+- add support for tapd v0.4.1 and litd v0.13.991 by jamaljsr in https://github.com/jamaljsr/polar/pull/969
+
+### Bug Fixes
+
+- Fix broken bitcoin-cli bash completion link by Abdulkbk in https://github.com/jamaljsr/polar/pull/977
+- Updated deprecated husky command by kelvinator07 in https://github.com/jamaljsr/polar/pull/1013
+- Fixed error when trying to parse empty customChannelData (lnd) by kelvinator07 in https://github.com/jamaljsr/polar/pull/1013
+- Updated returned payinvoice amount to sats (eclair) by kelvinator07 in https://github.com/jamaljsr/polar/pull/1013
+- Removed obsolete version field from compose file by kelvinator07 in https://github.com/jamaljsr/polar/pull/1013
+
+## [3.0.0](https://github.com/jamaljsr/polar/compare/v2.2.0...v3.0.0)
+
+The big feature of this major release is added support for Lightning Terminal (`litd`) nodes with the ability to open Taproot Asset channels and send/receive assets across the Lightning Network. There are also a handful of new improvements developed by new contributors to the project.
+
+### Features
+
+- Shutdown Docker Containers when Closing Polar GUI by @Abdulkbk in https://github.com/jamaljsr/polar/pull/844
+- Real-time updates of channel status changes by @kelvinator07 in https://github.com/jamaljsr/polar/pull/837
+- Remember node counts when creating new networks by @jamaljsr in https://github.com/jamaljsr/polar/pull/895
+- Add custom base port for nodes by @Abdulkbk in https://github.com/jamaljsr/polar/pull/878
+- Add ability to minimize, maximize and quit polar from system tray by @AdamuAbba in https://github.com/jamaljsr/polar/pull/842
+- Add ability to rename nodes by @Jem256 in https://github.com/jamaljsr/polar/pull/841
+
+### Node Updates
+
+- Add support for LND v0.17.5 and Bitcoin Core v27.0 by @jamaljsr in https://github.com/jamaljsr/polar/pull/880
+- Add support for LND v0.18.0-beta final by @jamaljsr in https://github.com/jamaljsr/polar/pull/912
+- Add support for LND v0.18.2-beta by @jamaljsr in https://github.com/jamaljsr/polar/pull/912
+- Add support for Core Lightning v23.08.2, v24.02.2 & v24.05 by @jamaljsr in https://github.com/jamaljsr/polar/pull/879
+- Add support for Terminal (litd) v0.13.99-experimental by @jamaljsr in https://github.com/jamaljsr/polar/pull/902
+- Add support for Taproot Assets v0.4.0-alpha by @jamaljsr in https://github.com/jamaljsr/polar/pull/936
+
+### Bug Fixes
+
+- Added default value for isPrivate checkbox by @kelvinator07 in https://github.com/jamaljsr/polar/pull/852
+- Fix error when closing Core Lightning channels by @kelvinator07 in https://github.com/jamaljsr/polar/pull/934
+
+### Docs / Translations
+
+- Fix japanese by @Hakkadaikon in https://github.com/jamaljsr/polar/pull/849
+- Fix some comments by @soonsouth in https://github.com/jamaljsr/polar/pull/858
+
+## [2.2.0](https://github.com/jamaljsr/polar/compare/v2.1.0...v2.2.0)
+
+This minor release adds support for the latest LND, Eclair, and tapd nodes. It includes
+some small fixes that are necessary to support these versions, due to RPC/API changes.
+
+There are also some additional fixed listed below.
+
+### Features
+
+- **images:** Add support for LND v0.17.4-beta and Eclair v0.10.0 by @jamaljsr in https://github.com/jamaljsr/polar/pull/846
+- **app:** add xdg support by @uwla in https://github.com/jamaljsr/polar/pull/826
+- **dev:** add devcontainers support by @uwla in https://github.com/jamaljsr/polar/pull/824
+- **images:** add support for LND & Bitcoin Core latest releases by @jamaljsr in https://github.com/jamaljsr/polar/pull/813
+- **images:** add support for tapd v0.3.3-alpha by @jamaljsr in https://github.com/jamaljsr/polar/pull/806
+
+### Bug Fixes
+
+- **eclair:** Error in GUI when open channel by @kelvinator07 in https://github.com/jamaljsr/polar/pull/828
+- **app:** Added support for Node.js version 20 by @kelvinator07 in https://github.com/jamaljsr/polar/pull/827
+
+### Docs
+
+- **readme:** fix download broken links + update download links to v2.1.0 by @ramigs in https://github.com/jamaljsr/polar/pull/795
+
+## [2.1.0](https://github.com/jamaljsr/polar/compare/v2.0.0...v2.1.0)
+
+This release adds support for Taproot Assets [v0.3.0-alpha](https://github.com/lightninglabs/taproot-assets/releases/tag/v0.3.0-alpha).
+Support for `tapd` versions prior to v0.3.0-alpha has been removed due to breaking changes in the APIs.
+
+There are also some fixes and enhancements included in this release which are listed below.
+
+### Features
+
+- **docker:** Add --tlsextradomain=host.docker.internal to lnd default args by @SeverinAlexB in https://github.com/jamaljsr/polar/pull/761
+- **cln:** save Core Lightning logs to disk by @jamaljsr in https://github.com/jamaljsr/polar/pull/763
+- **images:** add support for Bitcoin Core v25.0 by @jamaljsr in https://github.com/jamaljsr/polar/pull/728
+- **images:** add support for LND v0.17.0-beta by @jamaljsr in https://github.com/jamaljsr/polar/pull/786
+- **images:** add support for tapd v0.3.0-alpha by @jamaljsr in https://github.com/jamaljsr/polar/pull/787
+- **images:** add tapd to custom images implementations by @jamaljsr in https://github.com/jamaljsr/polar/pull/787
+- **app:** remember terminal/logs window location per node by @jamaljsr https://github.com/jamaljsr/polar/pull/787
+
+### Bug Fixes
+
+- **cln:** use node hostname for P2P Internal url by @jamaljsr in https://github.com/jamaljsr/polar/pull/762
+
+## [2.0.0](https://github.com/jamaljsr/polar/compare/v1.4.1...v2.0.0)
+
+This is a major release which adds supports for [Taproot Assets Protocol Daemon](https://github.com/lightninglabs/taproot-assets) (`tapd`) nodes. You can add `tapd` nodes to your network to begin easily minting and sending assets between nodes. You also have access to the terminal to run all `tapcli` commands.
+
+There are also a few smaller improvements such and Auto Mining and Docker Compose v2 support. The full list of changes are below.
+
+### Features
+
+- tapd: add support for Taproot Assets Protocol nodes by @amovfx & @jamaljsr
+  - in #641, #656. #661, #667, #668, #669, #672, #683, #684, #685, #703
+- network: automatically mine new blocks by @Jhoyola in https://github.com/jamaljsr/polar/pull/707
+- images: add support for LND v0.16.1-beta and v0.16.2-beta by @jamaljsr in https://github.com/jamaljsr/polar/pull/709
+- docker: support docker-compose v2 + minor improvements by @jamaljsr in https://github.com/jamaljsr/polar/pull/721
+
+## [1.4.1](https://github.com/jamaljsr/polar/compare/v1.4.0...v1.4.1)
+
+### Features
+
+- **terminal:** change font size using shortcuts by @zackypick in https://github.com/jamaljsr/polar/pull/612
+- **bitcoind:** add Compact Filters support by @hsjoberg in https://github.com/jamaljsr/polar/pull/630
+- **images:** add support for Bitcoin Core v24.0 by @jamaljsr in https://github.com/jamaljsr/polar/pull/632
+- **images:** add support for Eclair v0.8.0 by @jamaljsr in https://github.com/jamaljsr/polar/pull/632
+- **images:** add support for Core Lightning v23.02.2 by @jamaljsr in https://github.com/jamaljsr/polar/pull/696
+- **images:** add support for LND v0.16.0-beta by @jamaljsr in https://github.com/jamaljsr/polar/pull/702
+- **docker** add multi-arch docker images by @NonsoAmadi10 in https://github.com/jamaljsr/polar/pull/701
+
+### Bug Fixes
+
+- **cln:** Missing address flag for announcing externally by @niteshbalusu11 in https://github.com/jamaljsr/polar/issues/608
+- **docker:** properly detect docker socket path by @jamaljsr in https://github.com/jamaljsr/polar/pull/695
+- **lnd:** fix wrong source label for pending channels by @amovfx in https://github.com/jamaljsr/polar/pull/703
+- **network:** clear RPC cache when nodes are stopped by @jamaljsr in https://github.com/jamaljsr/polar/pull/698
+
+### Docs
+
+- **custom-nodes:** update golang version of custom docker image by @hieblmi in https://github.com/jamaljsr/polar/issues/691
+- **custom-nodes:** add no-cache flag for docker build @hieblmi in https://github.com/jamaljsr/polar/issues/607
+
+## [1.4.0](https://github.com/jamaljsr/polar/compare/v1.3.0...v1.4.0)
+
+While Polar has kept up with the new node implementation releases via the out-of-band updates, it hasn't had any new features added in a long while. This release packages up all those node updates so that you don't need to manually update after the initial install. We now also have automatic updates. You can opt-in to checking for new node versions on startup, instead of having to do it manually. Links to check for updates have also been added to the start screen and footer to make it easier to get to.
+
+There are a bunch of first-time contributors in this release. They've added some great updates which you can see listed below. Thank you all for your PRs.
+
+This release is required to run Core Lightning v0.12.0 due to an API that Polar requires being deprecated.
+
+### Features
+
+- **lnd:** added LND connect URL for REST API by @NehaK745 in https://github.com/jamaljsr/polar/pull/484
+- **images:** add support for Bitcoin Core v22.0 by @cstenglein in https://github.com/jamaljsr/polar/pull/510
+- **images:** add support for LND v0.14.1-beta by @qustavo in https://github.com/jamaljsr/polar/pull/519
+- **images:** update lightning nodes, add cli completion by @jonafll in https://github.com/jamaljsr/polar/pull/541
+- **images:** add support for the latest node implementations by @jamaljsr in https://github.com/jamaljsr/polar/pull/559
+- **lightningd:** add Core Lightning GRPC info to sidebar by @jamaljsr in https://github.com/jamaljsr/polar/pull/560
+- **images:** add support for LND v0.15.0-beta by @jamaljsr in https://github.com/jamaljsr/polar/pull/563
+- **images:** add support for CLN v0.11.2 by @ktecho in https://github.com/jamaljsr/polar/pull/572
+- **app:** check for updates on startup by @jamaljsr in https://github.com/jamaljsr/polar/pull/578
+- **nodes:** better visually know what node is selected by @ktecho in https://github.com/jamaljsr/polar/pull/583
+- **images:** add support for LND v0.15.1-beta.rc1 by @jamaljsr in https://github.com/jamaljsr/polar/pull/585
+- **bitcoind:** send funds to onchain address by @jamaljsr in https://github.com/jamaljsr/polar/pull/586
+- **images:** add support for LND v0.15.1 and CLN v0.12.0 by @jamaljsr in https://github.com/jamaljsr/polar/pull/588
+- **designer:** move sync button to actions toolbar by @jamaljsr in https://github.com/jamaljsr/polar/pull/589
+
+### Bug Fixes
+
+- **home:** fix loading animation on home screen by @jamaljsr in https://github.com/jamaljsr/polar/pull/577
+- **network:** add error handling when creating a new network by @jamaljsr in https://github.com/jamaljsr/polar/pull/580
+- **lightningd:** display CA cert and distinguish it from client cert and key by @louneskmt in https://github.com/jamaljsr/polar/pull/584
+
+### Docs
+
+- removing duplicates from CONTRIBUTING file by @ktecho in https://github.com/jamaljsr/polar/pull/570
+- Update custom-nodes.md - fix typo by @git-sgmoore in https://github.com/jamaljsr/polar/pull/497
+- Update custom-nodes.md by @niteshbalusu11 in https://github.com/jamaljsr/polar/pull/550
+
+## [v1.3.0](https://github.com/jamaljsr/polar/compare/v1.2.0...v1.3.0)
+
+This is a minor release which adds a small set of improvements and fixes some bugs. All of the node implementations have been updated to their latest versions.
+
+### Features
+
+- **channels:** add private channel option ([#430](https://github.com/jamaljsr/polar/issues/430)) by [@bolatovumar](https://github.com/bolatovumar)
+- **examples**: add example of an LND TypeScript app ([#414](https://github.com/jamaljsr/polar/issues/414)) by [@murtyjones](https://github.com/murtyjones)
+- **images:** add support for Bitcoin Core v0.21.1 ([6d368ee](https://github.com/jamaljsr/polar/commit/6d368eeaeb549890887c25ea33058d9d54947674))
+- **images:** add support for c-lightning v0.10.0 ([cabf9bf](https://github.com/jamaljsr/polar/commit/cabf9bf1f45a601cefeb2f4aa2097e09c78eaa84))
+- **images:** add support for eclair v0.6.0 ([625f025](https://github.com/jamaljsr/polar/commit/625f02515c73a3bf40b2653911e19f49c8b27bbc))
+- **images:** add support for LND v0.12.1-beta ([6d368ee](https://github.com/jamaljsr/polar/commit/6d368eeaeb549890887c25ea33058d9d54947674))
+- **images:** add support for LND v0.13.0-beta.rc3 ([5667b3b](https://github.com/jamaljsr/polar/commit/5667b3be4e431151849d64b50ecbf1b574ba8042))
+- **images:** remove outdated node implementations ([2ba55ae](https://github.com/jamaljsr/polar/commit/2ba55aef637c8e400a83fe1bffe54e2bfff3745e))
+
+### Bug Fixes
+
+- **layout:** fix nav menu icon spacing ([120f4c0](https://github.com/jamaljsr/polar/commit/120f4c06a97d466c4e94d1f20e41f7dde1455780))
+- **menu:** fix context menu runtime console warning ([aee7563](https://github.com/jamaljsr/polar/commit/aee7563e49dffeb853b439cdbca9a5576f686579))
+- **network:** fix docker error when removing a started node ([a521d74](https://github.com/jamaljsr/polar/commit/a521d74e866db947e0a4af87bc3e336f972c5326))
+- **nodes:** increase node startup timeout from 60 to 120 secs ([0d052c0](https://github.com/jamaljsr/polar/commit/0d052c0d055ee97586321341daf51b61c714285e))
+
+## [v1.2.0](https://github.com/jamaljsr/polar/compare/v1.0.1...v1.2.0)
+
+This is a minor release which adds a small set of improvements and fixes some bugs. All of the node implementations have been updated to their latest versions.
+
+This release is required to run Bitcoin Core v0.21.0 nodes due to a small breaking change. The default wallet is no longer created automatically during `bitcoind` startup, so Polar must create the wallet once `bitcoind` comes online.
+
+### Features
+
+- **chart:** add zoom support to the designer ([#378](https://github.com/jamaljsr/polar/issues/378))
+- **bitcoind:** expose Bitcoin Core P2P port ([#372](https://github.com/jamaljsr/polar/issues/372)) by [@lukechilds](https://github.com/lukechilds)
+- **bitcoind:** expose REST interface by default ([#419](https://github.com/jamaljsr/polar/issues/419)) by [@valentinewallace](https://github.com/valentinewallace)
+- **lnd:** add invoice macaroon to Connect tab ([#376](https://github.com/jamaljsr/polar/issues/376))
+- **images:** add support for bitcoind v0.21.0 ([f59dd1b](https://github.com/jamaljsr/polar/commit/f59dd1be55a39fabac0cbfd9c287702295bb7729))
+- **images:** add support for c-lightning v0.9.3 ([f3c3c0d](https://github.com/jamaljsr/polar/commit/f3c3c0dade8ea74deaab8f2bbafa94683c1284d9))
+- **images:** add support for eclair v0.5.0 ([47af8c2](https://github.com/jamaljsr/polar/commit/47af8c2453796951028d4fd0380a7ed4ca794877))
+- **images:** add support for LND v0.12.0-beta ([57fc766](https://github.com/jamaljsr/polar/commit/57fc766c92289e01f1dce199a278e89ea121a313))
+
+### Bug Fixes
+
+- **bitcoind:** create default wallet when starting bitcoind v0.21.0 ([548a138](https://github.com/jamaljsr/polar/commit/548a1383a10aeb703089efcfd602c1cf4e2eb0a1))
+- **designer:** fix channels hiding when removing a node in a stopped network ([534892c](https://github.com/jamaljsr/polar/commit/534892cbbb59c369e09a61015fd9279487a42995))
+- **designer:** add hover state for node ([#406](https://github.com/jamaljsr/polar/issues/406)) by [@murtyjones](https://github.com/murtyjones)
+- **lnd:** correct REST url ([#407](https://github.com/jamaljsr/polar/issues/407)) by [@murtyjones](https://github.com/murtyjones)
+- **lnd:** fixes clipboard copy value for p2pLnUrlInternal ([#381](https://github.com/jamaljsr/polar/issues/381)) by [@Jasonvdb](https://github.com/Jasonvdb)
+- **networks:** fix error when deleting an imported network ([b53de1a](https://github.com/jamaljsr/polar/commit/b53de1afbf22908bf7734dc07b0e48963d45b878))
+- **sidebar:** remove extra space between collapsed sidebar nodes ([17643aa](https://github.com/jamaljsr/polar/commit/17643aa6ac06d2a04f8d86476566cbb32f09dc7c))
+- **chore:** update dead link in code comment ([#422](https://github.com/jamaljsr/polar/issues/422)) by [@murtyjones](https://github.com/murtyjones)
+
+### Docs
+
+- **eclair:** update custom nodes doc for eclair v0.5.0 ([#390](https://github.com/jamaljsr/polar/issues/390)) by [@halseth](https://github.com/halseth)
+
 ## [v1.0.1](https://github.com/jamaljsr/polar/compare/v1.0.0...v1.0.1)
 
 This is a small patch release which fixes a compatibility issue to support Bitcoin Core v0.20.0. There was a breaking change in this version requiring the use of `-fallbackfee` in regtest environments.

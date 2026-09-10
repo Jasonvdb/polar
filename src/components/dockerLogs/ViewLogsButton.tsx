@@ -3,13 +3,13 @@ import { useAsyncCallback } from 'react-async-hook';
 import { FileTextOutlined } from '@ant-design/icons';
 import { Button, Form, message } from 'antd';
 import { usePrefixedTranslation } from 'hooks';
-import { BitcoinNode, LightningNode } from 'shared/types';
+import { AnyNode } from 'shared/types';
 import { useStoreActions } from 'store';
 import { getContainerName } from 'utils/network';
 import { LOGS } from 'components/routing';
 
 interface Props {
-  node: LightningNode | BitcoinNode;
+  node: AnyNode;
   type?: 'button' | 'menu';
 }
 
@@ -24,10 +24,10 @@ const ViewLogsButton: React.FC<Props> = ({ node, type }) => {
   // render a menu item inside of the NodeContextMenu
   if (type === 'menu') {
     return (
-      <span onClick={openAsync.execute}>
+      <div onClick={openAsync.execute}>
         <FileTextOutlined />
         <span>{l('btn')}</span>
-      </span>
+      </div>
     );
   }
 

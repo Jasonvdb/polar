@@ -5,40 +5,54 @@ import { IChart } from '@mrblenny/react-flow-chart';
 import detectPort from 'detect-port';
 import { tmpdir } from 'os';
 import { ipcChannels } from 'shared';
+import { getNamespacedContainerName, paykitConfig } from 'shared/paykitConfig';
 import {
+  AnyNode,
   BitcoinNode,
   CLightningNode,
   CommonNode,
   EclairNode,
   LightningNode,
+  LitdNode,
   LndNode,
   NodeImplementation,
   Status,
+  TapdNode,
+  TapNode,
 } from 'shared/types';
 import { createIpcSender } from 'lib/ipc/ipcService';
+import { LightningNodeChannel } from 'lib/lightning/types';
 import {
+  AutoMineMode,
   CustomImage,
   DockerRepoImage,
   DockerRepoState,
   ManagedImage,
   Network,
+  NetworksFile,
+  NodeBasePorts,
+  Simulation,
 } from 'types';
 import { dataPath, networksPath, nodePath } from './config';
 import { BasePorts, DOCKER_REPO, dockerConfigs } from './constants';
 import { read, rm } from './files';
+import { migrateNetworksFile } from './migrations';
 import { getName } from './names';
 import { range } from './numbers';
-import { isVersionCompatible } from './strings';
+import { isVersionBelow, isVersionCompatible } from './strings';
 import { getPolarPlatform } from './system';
 import { prefixTranslation } from './translate';
 
 const { l } = prefixTranslation('utils.network');
 
 export const getContainerName = (node: CommonNode) =>
-  `polar-n${node.networkId}-${node.name}`;
+  getNamespacedContainerName(node.networkId, node.name);
+
+export const getNetworkBackendId = (node: BitcoinNode) =>
+  `${node.networkId}-${node.name}`;
 
 const groupNodes = (network: Network) => {
-  const { bitcoin, lightning } = network.nodes;
+  const { bitcoin, lightning, tap } = network.nodes;
   return {
     bitcoind: bitcoin.filter(n => n.implementation === 'bitcoind') as BitcoinNode[],
     lnd: lightning.filter(n => n.implementation === 'LND') as LndNode[],
@@ -46,7 +60,22 @@ const groupNodes = (network: Network) => {
       n => n.implementation === 'c-lightning',
     ) as CLightningNode[],
     eclair: lightning.filter(n => n.implementation === 'eclair') as EclairNode[],
+    litd: lightning.filter(n => n.implementation === 'litd') as LitdNode[],
+    tapd: tap.filter(n => n.implementation === 'tapd') as TapdNode[],
   };
+};
+
+export const getInvoicePayload = (
+  channel: LightningNodeChannel,
+  localNode: LightningNode,
+  remoteNode: LightningNode,
+  nextLocalBalance: number,
+) => {
+  const localBalance = Number(channel.localBalance);
+  const amount = Math.abs(localBalance - nextLocalBalance);
+  const source = localBalance > nextLocalBalance ? localNode : remoteNode;
+  const target = localBalance > nextLocalBalance ? remoteNode : localNode;
+  return { source, target, amount };
 };
 
 export const getImageCommand = (
@@ -68,27 +97,74 @@ export const getImageCommand = (
 // long path games
 export const getLndFilePaths = (name: string, network: Network) => {
   // returns /volumes/lnd/lnd-1
-  const lndDataPath = (name: string) => nodePath(network, 'LND', name);
+  const lndDataPath = nodePath(network, 'LND', name);
   // returns /volumes/lnd/lnd-1/tls.cert
-  const lndCertPath = (name: string) => join(lndDataPath(name), 'tls.cert');
+  const lndCertPath = join(lndDataPath, 'tls.cert');
   // returns /data/chain/bitcoin/regtest
   const macaroonPath = join('data', 'chain', 'bitcoin', 'regtest');
   // returns /volumes/lnd/lnd-1/data/chain/bitcoin/regtest/admin.macaroon
-  const lndMacaroonPath = (name: string, macaroon: string) =>
-    join(lndDataPath(name), macaroonPath, `${macaroon}.macaroon`);
+  const lndMacaroonPath = (macaroon: string) =>
+    join(lndDataPath, macaroonPath, `${macaroon}.macaroon`);
 
   return {
-    tlsCert: lndCertPath(name),
-    adminMacaroon: lndMacaroonPath(name, 'admin'),
-    invoiceMacaroon: lndMacaroonPath(name, 'invoice'),
-    readonlyMacaroon: lndMacaroonPath(name, 'readonly'),
+    tlsCert: lndCertPath,
+    adminMacaroon: lndMacaroonPath('admin'),
+    invoiceMacaroon: lndMacaroonPath('invoice'),
+    readonlyMacaroon: lndMacaroonPath('readonly'),
   };
 };
 
-export const getCLightningFilePaths = (name: string, network: Network) => {
+// long path games
+export const getLitdFilePaths = (name: string, network: Network) => {
+  // /volumes/litd/<name>
+  const basePath = nodePath(network, 'litd', name);
+  // /volumes/litd/<name>/lnd/data/chain/bitcoin/regtest
+  const macaroonPath = join(basePath, 'lnd', 'data', 'chain', 'bitcoin', 'regtest');
+
+  return {
+    // /volumes/litd/<name>/lnd/tls.cert
+    tlsCert: join(basePath, 'lnd', 'tls.cert'),
+    // /volumes/litd/<name>/lit/tls.cert
+    litTlsCert: join(basePath, 'lit', 'tls.cert'),
+    // /volumes/litd/<name>/lnd/data/chain/bitcoin/regtest/admin.macaroon
+    adminMacaroon: join(macaroonPath, 'admin.macaroon'),
+    invoiceMacaroon: join(macaroonPath, 'invoice.macaroon'),
+    readonlyMacaroon: join(macaroonPath, 'readonly.macaroon'),
+    // /volumes/litd/<name>/lit/regtest/lit.macaroon
+    litMacaroon: join(basePath, 'lit', 'regtest', 'lit.macaroon'),
+    // /volumes/litd/<name>/tapd/data/regtest/admin.macaroon
+    tapMacaroon: join(basePath, 'tapd', 'data', 'regtest', 'admin.macaroon'),
+  };
+};
+
+export const getCLightningFilePaths = (
+  name: string,
+  withTls: boolean,
+  network: Network,
+) => {
   const path = nodePath(network, 'c-lightning', name);
   return {
     macaroon: join(path, 'rest-api', 'access.macaroon'),
+    rune: join(path, 'lightningd', 'admin.rune'),
+    tlsCert: withTls ? join(path, 'lightningd', 'regtest', 'ca.pem') : undefined,
+    tlsClientCert: withTls
+      ? join(path, 'lightningd', 'regtest', 'client.pem')
+      : undefined,
+    tlsClientKey: withTls
+      ? join(path, 'lightningd', 'regtest', 'client-key.pem')
+      : undefined,
+  };
+};
+
+export const getTapdFilePaths = (name: string, network: Network) => {
+  // returns /volumes/tapd/tapd-1
+  const tapdDataPath = nodePath(network, 'tapd', name);
+
+  return {
+    // returns /volumes/tapd/tapd-1/tls.cert
+    tlsCert: join(tapdDataPath, 'tls.cert'),
+    // returns /volumes/tapd/tapd-1/data/regtest/admin.macaroon
+    adminMacaroon: join(tapdDataPath, 'data', 'regtest', 'admin.macaroon'),
   };
 };
 
@@ -118,6 +194,7 @@ export const createLndNetworkNode = (
   compatibility: DockerRepoImage['compatibility'],
   docker: CommonNode['docker'],
   status = Status.Stopped,
+  basePort = BasePorts.LND,
 ): LndNode => {
   const { bitcoin, lightning } = network.nodes;
   const implementation: LndNode['implementation'] = 'LND';
@@ -141,8 +218,8 @@ export const createLndNetworkNode = (
     backendName: backends[id % backends.length].name,
     paths: getLndFilePaths(name, network),
     ports: {
-      rest: BasePorts.LND.rest + id,
-      grpc: BasePorts.LND.grpc + id,
+      rest: basePort.rest + id,
+      grpc: basePort.grpc + id,
       p2p: BasePorts.LND.p2p + id,
     },
     docker,
@@ -155,15 +232,18 @@ export const createCLightningNetworkNode = (
   compatibility: DockerRepoImage['compatibility'],
   docker: CommonNode['docker'],
   status = Status.Stopped,
+  basePort = BasePorts['c-lightning'],
 ): CLightningNode => {
   const { bitcoin, lightning } = network.nodes;
-  const implementation: LndNode['implementation'] = 'c-lightning';
+  const implementation: LightningNode['implementation'] = 'c-lightning';
   const backends = filterCompatibleBackends(
     implementation,
     version,
     compatibility,
     bitcoin,
   );
+  // determines if GRPC is supported in a version of Core Lightning provided
+  const supportsGrpc = !isVersionCompatible(version, '0.10.2');
   const id = lightning.length ? Math.max(...lightning.map(n => n.id)) + 1 : 0;
   const name = getName(id);
   return {
@@ -176,9 +256,10 @@ export const createCLightningNetworkNode = (
     status,
     // alternate between backend nodes
     backendName: backends[id % backends.length].name,
-    paths: getCLightningFilePaths(name, network),
+    paths: getCLightningFilePaths(name, supportsGrpc, network),
     ports: {
-      rest: BasePorts['c-lightning'].rest + id,
+      rest: basePort.rest + id,
+      grpc: supportsGrpc ? basePort.grpc + id : 0,
       p2p: BasePorts['c-lightning'].p2p + id,
     },
     docker,
@@ -191,6 +272,7 @@ export const createEclairNetworkNode = (
   compatibility: DockerRepoImage['compatibility'],
   docker: CommonNode['docker'],
   status = Status.Stopped,
+  basePort = BasePorts.eclair,
 ): EclairNode => {
   const { bitcoin, lightning } = network.nodes;
   const implementation: EclairNode['implementation'] = 'eclair';
@@ -213,8 +295,47 @@ export const createEclairNetworkNode = (
     // alternate between backend nodes
     backendName: backends[id % backends.length].name,
     ports: {
-      rest: BasePorts.eclair.rest + id,
+      rest: basePort.rest + id,
       p2p: BasePorts.eclair.p2p + id,
+    },
+    docker,
+  };
+};
+
+export const createLitdNetworkNode = (
+  network: Network,
+  version: string,
+  compatibility: DockerRepoImage['compatibility'],
+  docker: CommonNode['docker'],
+  status = Status.Stopped,
+): LitdNode => {
+  const { bitcoin, lightning } = network.nodes;
+  const implementation: LitdNode['implementation'] = 'litd';
+  const backends = filterCompatibleBackends(
+    implementation,
+    version,
+    compatibility,
+    bitcoin,
+  );
+  const id = lightning.length ? Math.max(...lightning.map(n => n.id)) + 1 : 0;
+  const name = getName(id);
+  return {
+    id,
+    networkId: network.id,
+    name: name,
+    type: 'lightning',
+    implementation,
+    version,
+    status,
+    // alternate between backend nodes
+    backendName: backends[id % backends.length].name,
+    lndName: name,
+    paths: getLitdFilePaths(name, network),
+    ports: {
+      rest: BasePorts.litd.rest + id,
+      grpc: BasePorts.litd.grpc + id,
+      p2p: BasePorts.litd.p2p + id,
+      web: BasePorts.litd.web + id,
     },
     docker,
   };
@@ -225,6 +346,7 @@ export const createBitcoindNetworkNode = (
   version: string,
   docker: CommonNode['docker'],
   status = Status.Stopped,
+  basePort = BasePorts.bitcoind,
 ): BitcoinNode => {
   const { bitcoin } = network.nodes;
   const id = bitcoin.length ? Math.max(...bitcoin.map(n => n.id)) + 1 : 0;
@@ -240,7 +362,7 @@ export const createBitcoindNetworkNode = (
     peers: [],
     status,
     ports: {
-      rpc: BasePorts.bitcoind.rest + id,
+      rpc: basePort.rest + id,
       p2p: BasePorts.bitcoind.p2p + id,
       zmqBlock: BasePorts.bitcoind.zmqBlock + id,
       zmqTx: BasePorts.bitcoind.zmqTx + id,
@@ -258,28 +380,103 @@ export const createBitcoindNetworkNode = (
   return node;
 };
 
+const filterLndBackends = (
+  implementation: TapNode['implementation'],
+  version: string,
+  compatibility: DockerRepoImage['compatibility'],
+  network: Network,
+) => {
+  const { tap, lightning } = network.nodes;
+  const requiredVersion = (compatibility && compatibility[version]) || '';
+  const backendsInUse = tap
+    .filter(n => n.implementation === 'tapd')
+    .map(n => (n as TapdNode).lndName);
+  const lndBackends = lightning.filter(n => {
+    if (n.implementation !== 'LND') return false;
+    if (backendsInUse.includes(n.name)) return false;
+    if (requiredVersion) {
+      const isLowerVersion =
+        isVersionCompatible(n.version, requiredVersion) && n.version !== requiredVersion;
+      if (isLowerVersion) return false;
+    }
+    return true;
+  });
+  if (lndBackends.length === 0) {
+    throw new Error(
+      l('lndBackendCompatError', { requiredVersion, implementation, version }),
+    );
+  }
+  return lndBackends[0];
+};
+
+export const createTapdNetworkNode = (
+  network: Network,
+  version: string,
+  compatibility: DockerRepoImage['compatibility'],
+  docker: CommonNode['docker'],
+  status = Status.Stopped,
+  basePort = BasePorts.tapd,
+): TapdNode => {
+  const { tap } = network.nodes;
+  const implementation: TapdNode['implementation'] = 'tapd';
+  const lndBackend = filterLndBackends(implementation, version, compatibility, network);
+
+  const id = tap.length ? Math.max(...tap.map(n => n.id)) + 1 : 0;
+  const name = `${lndBackend.name}-tap`;
+  const node: TapdNode = {
+    id,
+    networkId: network.id,
+    name: name,
+    type: 'tap',
+    implementation,
+    version,
+    status,
+    lndName: lndBackend.name,
+    paths: getTapdFilePaths(name, network),
+    ports: {
+      rest: basePort.rest + id,
+      grpc: basePort.grpc + id,
+    },
+    docker,
+  };
+
+  return node;
+};
+
 export const createNetwork = (config: {
   id: number;
   name: string;
+  description: string;
   lndNodes: number;
   clightningNodes: number;
   eclairNodes: number;
   bitcoindNodes: number;
+  tapdNodes: number;
+  litdNodes: number;
   repoState: DockerRepoState;
   managedImages: ManagedImage[];
   customImages: { image: CustomImage; count: number }[];
   status?: Status;
+  basePorts?: NodeBasePorts;
+  manualMineCount: number;
+  simulation?: Simulation;
 }): Network => {
   const {
     id,
     name,
+    description,
     lndNodes,
     clightningNodes,
     eclairNodes,
     bitcoindNodes,
+    tapdNodes,
+    litdNodes,
     repoState,
     managedImages,
     customImages,
+    basePorts,
+    manualMineCount,
+    simulation,
   } = config;
   // need explicit undefined check because Status.Starting is 0
   const status = config.status !== undefined ? config.status : Status.Stopped;
@@ -287,12 +484,17 @@ export const createNetwork = (config: {
   const network: Network = {
     id: id,
     name,
+    description,
     status,
     path: join(networksPath, id.toString()),
     nodes: {
       bitcoin: [],
       lightning: [],
+      tap: [],
     },
+    autoMineMode: AutoMineMode.AutoOff,
+    manualMineCount,
+    simulation,
   };
 
   const { bitcoin, lightning } = network.nodes;
@@ -305,7 +507,15 @@ export const createNetwork = (config: {
       const version = repoState.images.bitcoind.latest;
       const docker = { image: i.image.dockerImage, command: i.image.command };
       range(i.count).forEach(() => {
-        bitcoin.push(createBitcoindNetworkNode(network, version, docker, status));
+        bitcoin.push(
+          createBitcoindNetworkNode(
+            network,
+            version,
+            docker,
+            status,
+            basePorts?.bitcoind,
+          ),
+        );
       });
     });
 
@@ -314,10 +524,20 @@ export const createNetwork = (config: {
     let version = repoState.images.bitcoind.latest;
     if (lndNodes > 0) {
       const compat = repoState.images.LND.compatibility as Record<string, string>;
-      version = compat[repoState.images.LND.latest];
+      const compatibleVersion = compat[repoState.images.LND.latest];
+      // If no compatibility entry exists, fall back to latest bitcoind
+      version = compatibleVersion || version;
     }
     const cmd = getImageCommand(managedImages, 'bitcoind', version);
-    bitcoin.push(createBitcoindNetworkNode(network, version, dockerWrap(cmd), status));
+    bitcoin.push(
+      createBitcoindNetworkNode(
+        network,
+        version,
+        dockerWrap(cmd),
+        status,
+        basePorts?.bitcoind,
+      ),
+    );
   });
 
   // add custom lightning nodes
@@ -332,18 +552,33 @@ export const createNetwork = (config: {
           : image.implementation === 'c-lightning'
           ? createCLightningNetworkNode
           : createEclairNetworkNode;
+      const basePort =
+        image.implementation === 'LND'
+          ? basePorts?.LND
+          : image.implementation === 'c-lightning'
+          ? basePorts?.['c-lightning']
+          : basePorts?.eclair;
       range(count).forEach(() => {
-        lightning.push(createFunc(network, latest, compatibility, docker, status));
+        lightning.push(
+          createFunc(network, latest, compatibility, docker, status, basePort),
+        );
       });
     });
 
   // add lightning nodes in an alternating pattern
-  range(Math.max(lndNodes, clightningNodes, eclairNodes)).forEach(i => {
+  range(Math.max(lndNodes, clightningNodes, eclairNodes, litdNodes)).forEach(i => {
     if (i < lndNodes) {
       const { latest, compatibility } = repoState.images.LND;
       const cmd = getImageCommand(managedImages, 'LND', latest);
       lightning.push(
-        createLndNetworkNode(network, latest, compatibility, dockerWrap(cmd), status),
+        createLndNetworkNode(
+          network,
+          latest,
+          compatibility,
+          dockerWrap(cmd),
+          status,
+          basePorts?.LND,
+        ),
       );
     }
     if (i < clightningNodes) {
@@ -356,6 +591,7 @@ export const createNetwork = (config: {
           compatibility,
           dockerWrap(cmd),
           status,
+          basePorts?.['c-lightning'],
         ),
       );
     }
@@ -363,12 +599,96 @@ export const createNetwork = (config: {
       const { latest, compatibility } = repoState.images.eclair;
       const cmd = getImageCommand(managedImages, 'eclair', latest);
       lightning.push(
-        createEclairNetworkNode(network, latest, compatibility, dockerWrap(cmd), status),
+        createEclairNetworkNode(
+          network,
+          latest,
+          compatibility,
+          dockerWrap(cmd),
+          status,
+          basePorts?.eclair,
+        ),
+      );
+    }
+    if (i < litdNodes) {
+      const { latest, compatibility } = repoState.images.litd;
+      const cmd = getImageCommand(managedImages, 'litd', latest);
+      lightning.push(
+        createLitdNetworkNode(network, latest, compatibility, dockerWrap(cmd), status),
       );
     }
   });
 
+  range(tapdNodes).forEach(() => {
+    const { latest, compatibility } = repoState.images.tapd;
+    const cmd = getImageCommand(managedImages, 'tapd', latest);
+    network.nodes.tap.push(
+      createTapdNetworkNode(network, latest, compatibility, dockerWrap(cmd), status),
+    );
+  });
+
   return network;
+};
+
+export const renameNode = async (network: Network, node: AnyNode, newName: string) => {
+  switch (node.type) {
+    case 'lightning':
+      switch (node.implementation) {
+        case 'LND':
+          const lndNode = network.nodes.lightning.find(n => n.id === node.id) as LndNode;
+          network.nodes.tap
+            .filter(n => n.implementation === 'tapd')
+            .map(n => n as TapdNode)
+            .filter(n => n.lndName === node.name)
+            .forEach(n => {
+              n.lndName = newName;
+            });
+          lndNode.name = newName;
+          lndNode.paths = getLndFilePaths(newName, network);
+          return lndNode;
+        case 'c-lightning':
+          const clnNode = network.nodes.lightning.find(
+            n => n.id === node.id,
+          ) as CLightningNode;
+          const supportsGrpc = clnNode.ports.grpc !== 0;
+          clnNode.name = newName;
+          clnNode.paths = getCLightningFilePaths(newName, supportsGrpc, network);
+          return clnNode;
+        case 'eclair':
+          const eclairNode = network.nodes.lightning.find(
+            n => n.id === node.id,
+          ) as EclairNode;
+          eclairNode.name = newName;
+          return eclairNode;
+        case 'litd':
+          const litdNode = network.nodes.lightning.find(
+            n => n.id === node.id,
+          ) as LitdNode;
+          litdNode.name = newName;
+          litdNode.paths = getLitdFilePaths(newName, network);
+          return litdNode;
+      }
+    case 'bitcoin':
+      network.nodes.lightning
+        .filter(n => n.backendName === node.name)
+        .forEach(n => {
+          n.backendName = newName;
+        });
+      network.nodes.bitcoin
+        .filter(n => n.peers.includes(node.name))
+        .forEach(n => {
+          n.peers = n.peers.map(peer => (peer === node.name ? newName : peer));
+        });
+      const btcNode = network.nodes.bitcoin.find(n => n.id === node.id) as BitcoinNode;
+      btcNode.name = newName;
+      return btcNode;
+    case 'tap':
+      const tapdNode = network.nodes.tap.find(n => n.id === node.id) as TapdNode;
+      tapdNode.name = newName;
+      tapdNode.paths = getTapdFilePaths(newName, network);
+      return tapdNode;
+    default:
+      throw new Error('Invalid node type');
+  }
 };
 
 /**
@@ -378,8 +698,8 @@ export const createNetwork = (config: {
  * @param pulled the list of images already pulled
  */
 export const getMissingImages = (network: Network, pulled: string[]): string[] => {
-  const { bitcoin, lightning } = network.nodes;
-  const neededImages = [...bitcoin, ...lightning].map(n => {
+  const { bitcoin, lightning, tap } = network.nodes;
+  const neededImages = [...bitcoin, ...lightning, ...tap].map(n => {
     // use the custom image name if specified
     if (n.docker.image) return n.docker.image;
     // convert implementation to image name: LND -> lnd, c-lightning -> clightning
@@ -396,6 +716,31 @@ export const getMissingImages = (network: Network, pulled: string[]): string[] =
 };
 
 /**
+ * Returns the default docker command for a given implementation and version. This will
+ * tweak commands for older node versions that do not support certain flags.
+ */
+export const getDefaultCommand = (
+  implementation: NodeImplementation,
+  version: string,
+) => {
+  let command = dockerConfigs[implementation].command;
+
+  // Remove the flags that are not supported in versions before v0.4.0
+  if (implementation === 'tapd' && isVersionBelow(version, '0.4.0-alpha')) {
+    command = command
+      .replace('--universe.public-access=rw', '--universe.public-access')
+      .replace('--universe.sync-all-assets', '');
+  }
+
+  // Remove the `grpc-host` flag that is not supported in older CLN versions.
+  if (implementation === 'c-lightning' && isVersionBelow(version, '24.11')) {
+    command = command.replace('--grpc-host=0.0.0.0', '');
+  }
+
+  return command;
+};
+
+/**
  * Checks a range of port numbers to see if they are open on the current operating system.
  * Returns a new array of port numbers that are confirmed available
  * @param requestedPorts the ports to check for availability. ** must be in ascending order
@@ -407,6 +752,11 @@ export const getOpenPortRange = async (requestedPorts: number[]): Promise<number
   const openPorts: number[] = [];
 
   for (let port of requestedPorts) {
+    // keep 0 port as this indicates the port isn't supported for the node
+    if (port === 0) {
+      openPorts.push(0);
+      continue;
+    }
     if (openPorts.length) {
       // adjust to check after the previous open port if necessary, since the last
       // open port may have increased
@@ -428,8 +778,17 @@ export interface OpenPorts {
     zmqBlock?: number;
     zmqTx?: number;
     p2p?: number;
+    web?: number;
   };
 }
+
+/**
+ * Returns true if the node's container is up and holding its own ports, whether
+ * fully started or waiting on user action (e.g. a locked wallet)
+ * @param status the node's current status
+ */
+export const isNodeRunning = (status: Status): boolean =>
+  status === Status.Started || status === Status.Locked;
 
 /**
  * Checks if the ports specified on the nodes are available on the host OS. If not,
@@ -439,8 +798,8 @@ export interface OpenPorts {
 export const getOpenPorts = async (network: Network): Promise<OpenPorts | undefined> => {
   const ports: OpenPorts = {};
 
-  // filter out nodes that are already started since their ports are in use by themselves
-  const bitcoin = network.nodes.bitcoin.filter(n => n.status !== Status.Started);
+  // filter out nodes that are already running since their ports are in use by themselves
+  const bitcoin = network.nodes.bitcoin.filter(n => !isNodeRunning(n.status));
   if (bitcoin.length) {
     let existingPorts = bitcoin.map(n => n.ports.rpc);
     let openPorts = await getOpenPortRange(existingPorts);
@@ -484,10 +843,10 @@ export const getOpenPorts = async (network: Network): Promise<OpenPorts | undefi
     }
   }
 
-  let { lnd, clightning, eclair } = groupNodes(network);
+  let { lnd, clightning, eclair, litd, tapd } = groupNodes(network);
 
-  // filter out nodes that are already started since their ports are in use by themselves
-  lnd = lnd.filter(n => n.status !== Status.Started);
+  // filter out nodes that are already running since their ports are in use by themselves
+  lnd = lnd.filter(n => !isNodeRunning(n.status));
   if (lnd.length) {
     let existingPorts = lnd.map(n => n.ports.grpc);
     let openPorts = await getOpenPortRange(existingPorts);
@@ -520,13 +879,21 @@ export const getOpenPorts = async (network: Network): Promise<OpenPorts | undefi
     }
   }
 
-  clightning = clightning.filter(n => n.status !== Status.Started);
+  clightning = clightning.filter(n => !isNodeRunning(n.status));
   if (clightning.length) {
     let existingPorts = clightning.map(n => n.ports.rest);
     let openPorts = await getOpenPortRange(existingPorts);
     if (openPorts.join() !== existingPorts.join()) {
       openPorts.forEach((port, index) => {
         ports[clightning[index].name] = { rest: port };
+      });
+    }
+
+    existingPorts = clightning.map(n => n.ports.grpc);
+    openPorts = await getOpenPortRange(existingPorts);
+    if (openPorts.join() !== existingPorts.join()) {
+      openPorts.forEach((port, index) => {
+        ports[clightning[index].name] = { grpc: port };
       });
     }
 
@@ -542,7 +909,7 @@ export const getOpenPorts = async (network: Network): Promise<OpenPorts | undefi
     }
   }
 
-  eclair = eclair.filter(n => n.status !== Status.Started);
+  eclair = eclair.filter(n => !isNodeRunning(n.status));
   if (eclair.length) {
     let existingPorts = eclair.map(n => n.ports.rest);
     let openPorts = await getOpenPortRange(existingPorts);
@@ -564,6 +931,68 @@ export const getOpenPorts = async (network: Network): Promise<OpenPorts | undefi
     }
   }
 
+  litd = litd.filter(n => !isNodeRunning(n.status));
+  if (litd.length) {
+    let existingPorts = litd.map(n => n.ports.rest);
+    let openPorts = await getOpenPortRange(existingPorts);
+    if (openPorts.join() !== existingPorts.join()) {
+      openPorts.forEach((port, index) => {
+        ports[litd[index].name] = { rest: port };
+      });
+    }
+
+    existingPorts = litd.map(n => n.ports.grpc);
+    openPorts = await getOpenPortRange(existingPorts);
+    if (openPorts.join() !== existingPorts.join()) {
+      openPorts.forEach((port, index) => {
+        ports[litd[index].name] = { grpc: port };
+      });
+    }
+
+    existingPorts = litd.map(n => n.ports.p2p);
+    openPorts = await getOpenPortRange(existingPorts);
+    if (openPorts.join() !== existingPorts.join()) {
+      openPorts.forEach((port, index) => {
+        ports[litd[index].name] = {
+          ...(ports[litd[index].name] || {}),
+          p2p: port,
+        };
+      });
+    }
+
+    existingPorts = litd.map(n => n.ports.web);
+    openPorts = await getOpenPortRange(existingPorts);
+    if (openPorts.join() !== existingPorts.join()) {
+      openPorts.forEach((port, index) => {
+        ports[litd[index].name] = {
+          ...(ports[litd[index].name] || {}),
+          web: port,
+        };
+      });
+    }
+  }
+
+  tapd = tapd.filter(n => !isNodeRunning(n.status));
+  if (tapd.length) {
+    let existingPorts = tapd.map(n => n.ports.grpc);
+    let openPorts = await getOpenPortRange(existingPorts);
+    if (openPorts.join() !== existingPorts.join()) {
+      openPorts.forEach((port, index) => {
+        ports[tapd[index].name] = { grpc: port };
+      });
+    }
+
+    existingPorts = tapd.map(n => n.ports.rest);
+    openPorts = await getOpenPortRange(existingPorts);
+    if (openPorts.join() !== existingPorts.join()) {
+      openPorts.forEach((port, index) => {
+        ports[tapd[index].name] = {
+          ...(ports[tapd[index].name] || {}),
+          rest: port,
+        };
+      });
+    }
+  }
   // return undefined if no ports where updated
   return Object.keys(ports).length > 0 ? ports : undefined;
 };
@@ -605,7 +1034,7 @@ export const importNetworkFromZip = async (
   id: number,
 ): Promise<[Network, IChart]> => {
   // extract zip to a temp folder first
-  const tmpDir = join(tmpdir(), 'polar', basename(zipPath, '.zip'));
+  const tmpDir = join(tmpdir(), paykitConfig.namespace, basename(zipPath, '.zip'));
   const ipc = createIpcSender('NetworkUtil', 'app');
   await ipc(ipcChannels.unzip, { filePath: zipPath, destination: tmpDir });
   debug(`Extracted '${zipPath}' to '${tmpDir}'`);
@@ -620,10 +1049,21 @@ export const importNetworkFromZip = async (
   if (!(parsed.chart && isChart(parsed.chart))) {
     throw new Error(`${exportFilePath} did not contain a valid chart`);
   }
-  const network = parsed.network as Network;
-  const chart = parsed.chart as IChart;
-  const netPath = join(dataPath, 'networks', `${id}`);
 
+  debug('Migrating the imported network:\n' + JSON.stringify(parsed));
+  const networksFile: NetworksFile = {
+    // the version is not available in the export.json file and is not needed
+    version: '',
+    networks: [parsed.network],
+    charts: {
+      [parsed.network.id]: parsed.chart,
+    },
+  };
+  const { networks, charts } = migrateNetworksFile(networksFile);
+
+  const network = networks[0];
+  const chart = charts[network.id];
+  const netPath = join(dataPath, 'networks', `${id}`);
   debug(`Updating the network path from '${network.path}' to '${netPath}'`);
   network.path = netPath;
   debug(`Updating network id to '${id}'`);
@@ -636,11 +1076,24 @@ export const importNetworkFromZip = async (
     if (ln.implementation === 'LND') {
       const lnd = ln as LndNode;
       lnd.paths = getLndFilePaths(lnd.name, network);
+    } else if (ln.implementation === 'litd') {
+      const litd = ln as LitdNode;
+      litd.paths = getLitdFilePaths(litd.name, network);
     } else if (ln.implementation === 'c-lightning') {
       const cln = ln as CLightningNode;
-      cln.paths = getCLightningFilePaths(cln.name, network);
+      const supportsGrpc = cln.ports.grpc !== 0;
+      cln.paths = getCLightningFilePaths(cln.name, supportsGrpc, network);
     } else if (ln.implementation !== 'eclair') {
       throw new Error(l('unknownImplementation', { implementation: ln.implementation }));
+    }
+  });
+  network.nodes.tap.forEach(tap => {
+    tap.networkId = id;
+    if (tap.implementation === 'tapd') {
+      const tapd = tap as TapdNode;
+      tapd.paths = getTapdFilePaths(tapd.name, network);
+    } else {
+      throw new Error(l('unknownImplementation', { implementation: tap.implementation }));
     }
   });
 
@@ -688,4 +1141,72 @@ export const zipNetwork = async (
   const ipc = createIpcSender('NetworkUtil', 'app');
   await ipc(ipcChannels.zip, { source: network.path, destination: zipPath });
   // await zip(network.path, zipPath);
+};
+
+/**
+ * Gets the LND node that is the backend for a tap or litd node
+ */
+export const getTapBackendNode = (nodeName: string, network: Network) => {
+  const { lightning, tap } = network.nodes;
+  const node = [...tap, ...lightning].find(n => n.name === nodeName);
+
+  let tapNode: TapdNode | LitdNode | undefined = undefined;
+  if (node?.type === 'tap' && (node as TapNode).implementation === 'tapd') {
+    tapNode = node as TapdNode;
+  } else if (
+    node?.type === 'lightning' &&
+    (node as LightningNode).implementation === 'litd'
+  ) {
+    tapNode = node as LitdNode;
+  }
+  if (tapNode && ['litd', 'tapd'].includes(tapNode.implementation)) {
+    return network.nodes.lightning.find(n => n.name === tapNode.lndName);
+  }
+};
+
+/**
+ * Gets the tapd nodes in the network, which includes both tapd and litd nodes
+ */
+export const getTapdNodes = (network: Network) => {
+  const { lightning, tap } = network.nodes;
+  return [...lightning, ...tap]
+    .filter(node => node.implementation === 'tapd' || node.implementation === 'litd')
+    .map(mapToTapd);
+};
+
+/**
+ * Maps a litd node to a tapd node. This is needed to reuse the TAP store and services
+ * for both implementations.
+ */
+export const mapToTapd = (node: CommonNode): TapdNode => {
+  // if the node is already a tapd node, return it
+  if (node.type === 'tap' && (node as TapNode).implementation === 'tapd') {
+    return node as TapdNode;
+  }
+  // if the node is not a litd node, throw an error
+  if (node.type !== 'lightning' || (node as LightningNode).implementation !== 'litd') {
+    throw new Error(`Node "${node.name}" is not a litd node`);
+  }
+
+  const litd = node as LitdNode;
+  const tapd: TapdNode = {
+    id: litd.id,
+    networkId: litd.networkId,
+    name: litd.name,
+    type: 'tap',
+    implementation: 'litd',
+    version: litd.version,
+    status: litd.status,
+    lndName: litd.lndName,
+    docker: litd.docker,
+    paths: {
+      tlsCert: litd.paths.litTlsCert,
+      adminMacaroon: litd.paths.tapMacaroon,
+    },
+    ports: {
+      grpc: litd.ports.web,
+      rest: litd.ports.rest,
+    },
+  };
+  return tapd;
 };

@@ -1,3 +1,7 @@
+# Polar Paykit
+
+An isolated Paykit workbench built on Polar. See [development and isolation setup](CONTRIBUTING.md#polar-paykit-isolation). Paykit features are being delivered incrementally; this foundation preserves the existing editable Bitcoin and Lightning network tools.
+
 # Polar
 
 > One-click Bitcoin Lightning networks for local app development & testing
@@ -31,44 +35,50 @@ With Polar you can:
 - View streaming logs from each node
 - Manually mine new blocks
 - Deposit regtest coins into each Lightning node
+- Mint, Send & Receive Taproot Assets
+- Create & Pay Taproot Asset invoices
 - Export and import networks, for sharing with other Lightning developers
 - Create you own docker images to use as [custom nodes](https://github.com/jamaljsr/polar/blob/master/docs/custom-nodes.md) (ex: master branch, local fork)
 
 Supported Network Node Versions:
 
-- LND v0.11.0, v0.10.3, v0.10.2, v0.10.1, v0.10.0, v0.9.1, v0.9.0, v0.8.2, v0.8.0 & v0.7.1
-- c-lightning v0.9.0, v0.8.2, v0.8.1 & v0.8.0
-- Eclair v0.3.3
-- Bitcoin Core v0.20.1, v0.20.0, v0.19.1, v0.19.0.1 & v0.18.1
+- [LND](https://github.com/lightningnetwork/lnd) - v0.20.0, v0.19.3, v0.19.2, v0.19.1, v0.18.5, v0.18.4, v0.18.3, v0.17.5, v0.16.4
+- [Core Lightning](https://github.com/ElementsProject/lightning) - v25.12, v25.09.3, v25.05, v25.02, v24.11.1, v24.08.1
+- [Eclair](https://github.com/ACINQ/eclair/) - v0.13.1, v0.12.0, v0.11.0, v0.10.0, v0.9.0
+- [Bitcoin Core](https://github.com/bitcoin/bitcoin) - v30.0, v29.0, v28.0, v27.0, v26.0
+- [Taproot Assets](https://github.com/lightninglabs/taproot-assets) - v0.7.0, v0.6.1, v0.6.0, v0.5.1, v0.5.0, v0.4.1, v0.3.3
+- [Terminal](https://github.com/lightninglabs/lightning-terminal) - v0.16.0, v0.15.3, v0.15.1, v0.15.0, v0.14.1,
+
+### MCP (Model Context Protocol)
+
+Polar includes an MCP server that enables AI agents like Claude & Cursor to programmatically control Lightning Network simulations.
+
+See the [polar-mcp](https://github.com/jamaljsr/polar-mcp) repo for installation instructions.
+
+See the [MCP Architecture Documentation](docs/mcp-architecture.md) for technical information on the architecture, API, and how to add new tools to Polar.
 
 ## Dependencies
 
 Polar requires that you have Docker installed to create the local networks
 
 - On Mac & Windows, you can just install [Docker Desktop](https://www.docker.com/products/docker-desktop)
-- On Linux, you need to install [Docker Server](https://docs.docker.com/install/#server) and [Docker Compose](https://docs.docker.com/compose/install/) separately
+- On Linux, you need to install [Docker Server](https://docs.docker.com/engine/install/#server).
 
 You will be prompted to install Docker if Polar cannot detect it automatically
 
+⚠️ **Important Docker Notes**
+
+- On Linux, Docker Desktop is currently not supported due to a significant change in how it handles file sharing between host and container (See [#636](https://github.com/jamaljsr/polar/issues/636#issuecomment-1450201391))
+
 ## Download
 
-Download Polar v1.0.1 for your OS
+Download Polar v4.0.0 for your OS
 
-- Mac ([dmg](https://github.com/jamaljsr/polar/releases/download/v1.0.1/polar-mac-v1.0.1.dmg), [zip](https://github.com/jamaljsr/polar/releases/download/v1.0.1/polar-mac-v1.0.1.zip))
-- Linux ([deb](https://github.com/jamaljsr/polar/releases/download/v1.0.1/polar-linux-amd64-v1.0.1.deb), [AppImage](https://github.com/jamaljsr/polar/releases/download/v1.0.1/polar-linux-x86_64-v1.0.1.AppImage))
-- Windows ([exe](https://github.com/jamaljsr/polar/releases/download/v1.0.1/polar-win-v1.0.1.exe))
+- Mac ([dmg](https://github.com/jamaljsr/polar/releases/download/v4.0.0/polar-mac-x64-v4.0.0.dmg))
+- Linux ([deb](https://github.com/jamaljsr/polar/releases/download/v4.0.0/polar-linux-amd64-v4.0.0.deb), [AppImage](https://github.com/jamaljsr/polar/releases/download/v4.0.0/polar-linux-x86_64-v4.0.0.AppImage), [RPM](https://github.com/jamaljsr/polar/releases/download/v4.0.0/polar-linux-x86_64-v4.0.0.rpm))
+- Windows ([exe](https://github.com/jamaljsr/polar/releases/download/v4.0.0/polar-win-x64-v4.0.0.exe))
 
 Alternative and older version binaries can be found in the [GitHub releases](https://github.com/jamaljsr/polar/releases)
-
-## Polar's Future
-
-The overall goal of Polar is to minimize the time & effort needed for a developer new to Lightning to get started building their next killer app. In addition, Polar aims to be a useful tool for experienced Lightning App developers to iterate faster on their projects. Less time setting up nodes, more time building your app.
-
-Here's a short list of ideas for features that may be beneficial to add in future releases (in no particular order):
-
-- Importing network templates from external sources (such as GitHub) to allow for community contributions. This may require a scripting system built-in.
-- Sample app projects/code in different languages (Python, Typescript/JS, Go, C#) showing how to connect to the Lightning/Bitcoin nodes from an external app.
-- Bitcoin Block Explorer & GRPC/REST API Explorers to have access to all of the node RPC API's graphically, without needing to fallback to the Terminal.
 
 ## Help Translate
 
@@ -91,6 +101,7 @@ If you would like to learn how to package Polar from source code or want to fix 
 
 ### Tech Stack
 
+- [Node.js](https://nodejs.org/en): nodejs version >= 20
 - [Electron](https://github.com/electron/electron/): cross platform desktop app framework
 - [Typescript](https://github.com/microsoft/TypeScript): increased productivity with a typed language
 - [ReactJS](https://github.com/facebook/react/): declarative UI library for JavaScript
@@ -110,11 +121,3 @@ If you would like to learn how to package Polar from source code or want to fix 
 - [Testcafe](https://github.com/DevExpress/testcafe): End-to-end is important
 - [commitlint](https://github.com/conventional-changelog/commitlint): standardize git commit messages
 - [standard-version](https://github.com/conventional-changelog/commitlint): automate release versioning and changelog generation
-
-## Recognition
-
-Huge thanks to maintainers of [Lightning Joule](https://github.com/joule-labs/joule-extension), [Zap Wallet](https://github.com/LN-Zap/zap-desktop), [LND](https://github.com/lightningnetwork/lnd), [Bitcoin Core](https://github.com/bitcoin/bitcoin), along with many others for the amazing apps & libraries that gave this project inspiration, ideas & sometimes even a little code 😊.
-
-## Contact
-
-The best place to reach me is on Twitter @jamaljsr. I also lurk in the LND Slack server, so you can msg me there as well.

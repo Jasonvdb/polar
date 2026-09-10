@@ -1,10 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
-import { LightningNode } from 'shared/types';
+import { LightningNode, OpenChannelOptions } from 'shared/types';
 import { LightningService } from 'types';
 import * as PLN from './types';
 
 /**
- * A Lightning Service class whose functionas are not yet implemented
+ * A Lightning Service class whose functions are not yet implemented
  */
 class NotImplementedService implements LightningService {
   getInfo(node: LightningNode): Promise<PLN.LightningNodeInfo> {
@@ -30,17 +30,22 @@ class NotImplementedService implements LightningService {
   connectPeers(node: LightningNode, rpcUrls: string[]): Promise<void> {
     throw new Error(`connectPeers is not implemented for ${node.implementation} nodes`);
   }
-  openChannel(
-    from: LightningNode,
-    toRpcUrl: string,
-    amount: string,
-  ): Promise<PLN.LightningNodeChannelPoint> {
+  openChannel({
+    from,
+    toRpcUrl,
+    amount,
+  }: OpenChannelOptions): Promise<PLN.LightningNodeChannelPoint> {
     throw new Error(`openChannel is not implemented for ${from.implementation} nodes`);
   }
   closeChannel(node: LightningNode, channelPoint: string): Promise<any> {
     throw new Error(`closeChannel is not implemented for ${node.implementation} nodes`);
   }
-  createInvoice(node: LightningNode, amount: number, memo?: string): Promise<string> {
+  createInvoice(
+    node: LightningNode,
+    amount: number,
+    memo?: string,
+    expiry?: number,
+  ): Promise<string> {
     throw new Error(`createInvoice is not implemented for ${node.implementation} nodes`);
   }
   payInvoice(
@@ -49,6 +54,31 @@ class NotImplementedService implements LightningService {
     amount?: number,
   ): Promise<PLN.LightningNodePayReceipt> {
     throw new Error(`payInvoice is not implemented for ${node.implementation} nodes`);
+  }
+  decodeInvoice(
+    node: LightningNode,
+    invoice: string,
+  ): Promise<PLN.LightningNodePaymentRequest> {
+    throw new Error(`decodeInvoice is not implemented for ${node.implementation} nodes`);
+  }
+
+  addListenerToNode(node: LightningNode): Promise<void> {
+    throw new Error(
+      `addListenerToNode is not implemented for ${node.implementation} nodes`,
+    );
+  }
+
+  removeListener(node: LightningNode): Promise<void> {
+    throw new Error(`removeListener is not implemented for ${node.implementation} nodes`);
+  }
+
+  subscribeChannelEvents(
+    node: LightningNode,
+    callback: (data: PLN.LightningNodeChannelEvent) => void,
+  ): Promise<void> {
+    throw new Error(
+      `subscribeChannelEvents is not implemented for ${node.implementation} nodes`,
+    );
   }
 }
 

@@ -2,11 +2,13 @@ import { routerMiddleware } from 'connected-react-router';
 import { createStore, createTypedHooks } from 'easy-peasy';
 import { createHashHistory, History } from 'history';
 import { createLogger } from 'redux-logger';
-import { bitcoindService } from 'lib/bitcoin';
+import { BitcoinFactory } from 'lib/bitcoin';
 import { dockerService, repoService } from 'lib/docker';
 import { createIpcSender } from 'lib/ipc/ipcService';
 import { LightningFactory } from 'lib/lightning';
+import { litdService } from 'lib/litd';
 import { settingsService } from 'lib/settings';
+import { TapFactory } from 'lib/tap';
 import { createModel, RootModel } from 'store/models';
 import { StoreInjections } from 'types';
 
@@ -53,17 +55,24 @@ export const createReduxStore = (options?: {
 };
 
 // using injections allows for more easily mocking of dependencies in store actions
-// see https://easy-peasy.now.sh/docs/testing/testing-components.html#mocking-calls-to-services
+// see https://easy-peasy.now.sh/docs/tutorials/testing.html#mocking-calls-to-services
 const injections: StoreInjections = {
   ipc: createIpcSender('AppModel', 'app'),
   settingsService,
   dockerService,
   repoService,
-  bitcoindService,
+  bitcoinFactory: new BitcoinFactory(),
   lightningFactory: new LightningFactory(),
+  tapFactory: new TapFactory(),
+  litdService,
 };
 
 const store = createReduxStore({ injections });
+
+// Set up MCP IPC listener after store is created
+if (process.env.NODE_ENV !== 'test') {
+  store.getActions().mcp.setupIpcListener();
+}
 
 // export hooks directly from the store to get proper type inference
 const typedHooks = createTypedHooks<RootModel>();

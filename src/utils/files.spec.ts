@@ -1,16 +1,26 @@
 import fs from 'fs-extra';
 import { join } from 'path';
 import { dataPath } from './config';
-import { exists, read, waitForFile, write } from './files';
+import { abs, exists, read, renameFile, waitForFile, write } from './files';
+import { debug, info } from 'electron-log';
 
 jest.mock('fs-extra', () => ({
   mkdirs: jest.fn(),
   outputFile: jest.fn(),
   readFile: jest.fn(() => 'test data'),
   pathExists: jest.fn(),
+  rename: jest.fn(),
+}));
+
+jest.mock('electron-log', () => ({
+  info: jest.fn(),
+  debug: jest.fn(),
 }));
 
 const mockFs = fs as jest.Mocked<typeof fs>;
+
+const mockInfo = info as jest.MockedFunction<typeof info>;
+const mockDebug = debug as jest.MockedFunction<typeof debug>;
 
 describe('Files util', () => {
   describe('read files', () => {
@@ -131,6 +141,58 @@ describe('Files util', () => {
       await expect(promise).resolves.not.toThrow();
       // confirm the spy was called
       expect(spy).toBeCalled();
+    });
+  });
+
+  describe('renameFile', () => {
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it('should rename a file successfully', async () => {
+      const oldPath = 'oldFile.txt';
+      const newPath = 'newFile.txt';
+
+      mockFs.rename.mockResolvedValueOnce(undefined);
+
+      await renameFile(oldPath, newPath);
+
+      expect(mockFs.rename).toBeCalledWith(abs(oldPath), abs(newPath));
+      expect(mockInfo).toBeCalledWith(
+        `File renamed successfully from ${oldPath} to ${newPath}`,
+      );
+      expect(mockDebug).not.toBeCalled();
+    });
+
+    it('should remain pending until the filesystem rename completes', async () => {
+      let completeRename!: () => void;
+      mockFs.rename.mockReturnValueOnce(
+        new Promise<void>(resolve => {
+          completeRename = resolve;
+        }),
+      );
+      const resolved = jest.fn();
+      const result = renameFile('oldFile.txt', 'newFile.txt').then(resolved);
+      await Promise.resolve();
+      expect(resolved).not.toHaveBeenCalled();
+      expect(mockInfo).not.toHaveBeenCalled();
+      completeRename();
+      await result;
+      expect(resolved).toHaveBeenCalledTimes(1);
+    });
+
+    it('should propagate and log an error if renaming fails', async () => {
+      const oldPath = 'oldFile.txt';
+      const newPath = 'newFile.txt';
+      const error = new Error('Rename failed');
+
+      mockFs.rename.mockRejectedValueOnce(error);
+
+      await expect(renameFile(oldPath, newPath)).rejects.toBe(error);
+
+      expect(mockFs.rename).toBeCalledWith(abs(oldPath), abs(newPath));
+      expect(mockInfo).not.toBeCalled();
+      expect(mockDebug).toBeCalledWith('Error occurred while renaming file:', error);
     });
   });
 });

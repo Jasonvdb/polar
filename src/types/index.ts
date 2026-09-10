@@ -1,25 +1,39 @@
+import * as LITD from '@lightningpolar/litd-api';
+import * as TAP from '@lightningpolar/tapd-api';
 import { IChart } from '@mrblenny/react-flow-chart';
-import { ChainInfo, WalletInfo } from 'bitcoin-core';
 import {
+  AnyNode,
   BitcoinNode,
+  CLightningNode,
   CommonNode,
   LightningNode,
+  LitdNode,
   NodeImplementation,
+  OpenChannelOptions,
   Status,
+  TapNode,
 } from 'shared/types';
 import { IpcSender } from 'lib/ipc/ipcService';
 import * as PLN from 'lib/lightning/types';
+import * as PLIT from 'lib/litd/types';
+import * as PTAP from 'lib/tap/types';
 import { PolarPlatform } from 'utils/system';
+import { ChainInfo, WalletInfoCompat } from './bitcoin-core';
 
 export interface Network {
   id: number;
   name: string;
+  description: string;
   status: Status;
   path: string;
+  autoMineMode: AutoMineMode;
   nodes: {
     bitcoin: BitcoinNode[];
     lightning: LightningNode[];
+    tap: TapNode[];
   };
+  manualMineCount: number;
+  simulation?: Simulation;
 }
 
 /**
@@ -44,15 +58,29 @@ export interface CustomImage {
   command: string;
 }
 
+/**
+ * The base ports for each implementation
+ */
+export interface NodeBasePorts {
+  LND: { rest: number; grpc: number };
+  'c-lightning': { rest: number; grpc: number };
+  eclair: { rest: number };
+  bitcoind: { rest: number };
+  tapd: { rest: number; grpc: number };
+}
+
 export interface AppSettings {
   lang: string;
   theme: 'light' | 'dark';
-  showAllNodeVersions: boolean;
+  checkForUpdatesOnStartup: boolean;
   /** lists of docker image customizations */
   nodeImages: {
     managed: ManagedImage[];
     custom: CustomImage[];
   };
+  /** The default number of each node when creating a new network */
+  newNodeCounts: Record<NodeImplementation, number>;
+  basePorts: NodeBasePorts;
 }
 
 export interface SettingsInjection {
@@ -75,6 +103,7 @@ export interface DockerConfig {
   variables: string[];
   dataDir?: string;
   apiDir?: string;
+  env?: Record<string, string>;
 }
 
 export interface DockerRepoImage {
@@ -110,6 +139,13 @@ export interface DockerLibrary {
   removeNode: (network: Network, node: CommonNode) => Promise<void>;
   saveNetworks: (networks: NetworksFile) => Promise<void>;
   loadNetworks: () => Promise<NetworksFile>;
+  renameNodeDir: (network: Network, node: AnyNode, newName: string) => Promise<void>;
+  startSimulation: (network: Network) => Promise<void>;
+  stopSimulation: (network: Network) => Promise<void>;
+  removeSimulation: (network: Network) => Promise<void>;
+  copyVolumeToHost: (node: CLightningNode) => Promise<void>;
+  removeCLNVolume: (node: CLightningNode) => Promise<void>;
+  copyHostToVolume: (node: CLightningNode) => Promise<void>;
 }
 
 export interface RepoServiceInjection {
@@ -118,10 +154,11 @@ export interface RepoServiceInjection {
   checkForUpdates: (currState: DockerRepoState) => Promise<DockerRepoUpdates>;
 }
 
-export interface BitcoindLibrary {
+export interface BitcoinService {
   waitUntilOnline: (node: BitcoinNode) => Promise<void>;
+  createDefaultWallet: (node: BitcoinNode) => Promise<void>;
   getBlockchainInfo: (node: BitcoinNode) => Promise<ChainInfo>;
-  getWalletInfo: (node: BitcoinNode) => Promise<WalletInfo>;
+  getWalletInfo: (node: BitcoinNode) => Promise<WalletInfoCompat>;
   getNewAddress: (node: BitcoinNode) => Promise<string>;
   connectPeers: (node: BitcoinNode) => Promise<void>;
   mine: (numBlocks: number, node: BitcoinNode) => Promise<string[]>;
@@ -139,22 +176,99 @@ export interface LightningService {
   getChannels: (node: LightningNode) => Promise<PLN.LightningNodeChannel[]>;
   getPeers: (node: LightningNode) => Promise<PLN.LightningNodePeer[]>;
   connectPeers: (node: LightningNode, rpcUrls: string[]) => Promise<void>;
-  openChannel: (
-    from: LightningNode,
-    toRpcUrl: string,
-    amount: string,
-  ) => Promise<PLN.LightningNodeChannelPoint>;
+  openChannel: (options: OpenChannelOptions) => Promise<PLN.LightningNodeChannelPoint>;
   closeChannel: (node: LightningNode, channelPoint: string) => Promise<any>;
-  createInvoice: (node: LightningNode, amount: number, memo?: string) => Promise<string>;
+  createInvoice: (
+    node: LightningNode,
+    amount: number,
+    memo?: string,
+    expiry?: number,
+    assetInfo?: { nodeId: string; scid: string; msats: string },
+  ) => Promise<string>;
   payInvoice: (
     node: LightningNode,
     invoice: string,
     amount?: number,
+    customRecords?: PLN.CustomRecords,
   ) => Promise<PLN.LightningNodePayReceipt>;
+  decodeInvoice: (
+    node: LightningNode,
+    invoice: string,
+  ) => Promise<PLN.LightningNodePaymentRequest>;
+  addListenerToNode: (node: LightningNode) => Promise<void>;
+  removeListener: (node: LightningNode) => Promise<void>;
+  subscribeChannelEvents: (
+    node: LightningNode,
+    callback: (event: PLN.LightningNodeChannelEvent) => void,
+  ) => Promise<void>;
+}
+
+export interface BitcoinFactoryInjection {
+  getService: (node: BitcoinNode) => BitcoinService;
 }
 
 export interface LightningFactoryInjection {
   getService: (node: LightningNode) => LightningService;
+}
+
+export interface TapService {
+  waitUntilOnline: (node: TapNode) => Promise<void>;
+  listAssets: (node: TapNode) => Promise<PTAP.TapAsset[]>;
+  listBalances: (node: TapNode) => Promise<PTAP.TapBalance[]>;
+  mintAsset: (
+    node: TapNode,
+    req: TAP.MintAssetRequestPartial,
+  ) => Promise<TAP.MintAssetResponse>;
+  finalizeBatch: (node: TapNode) => Promise<TAP.FinalizeBatchResponse>;
+  newAddress: (node: TapNode, assetId: string, amt: string) => Promise<PTAP.TapAddress>;
+  sendAsset: (
+    from: TapNode,
+    req: TAP.SendAssetRequestPartial,
+  ) => Promise<PTAP.TapSendAssetReceipt>;
+  decodeAddress: (
+    node: TapNode,
+    req: TAP.DecodeAddrRequestPartial,
+  ) => Promise<PTAP.TapAddress>;
+  assetRoots: (node: TapNode) => Promise<PTAP.TapAssetRoot[]>;
+  syncUniverse: (node: TapNode, universeHost: string) => Promise<TAP.SyncResponse>;
+  fundChannel: (
+    node: TapNode,
+    peerPubkey: string,
+    assetId: string,
+    amount: number,
+  ) => Promise<string>;
+  addInvoice: (
+    node: TapNode,
+    assetId: string,
+    amount: number,
+    memo: string,
+    expiry: number,
+  ) => Promise<string>;
+  sendPayment: (
+    node: TapNode,
+    assetId: string,
+    invoice: string,
+    feeLimitMsat: number,
+    peerPubkey?: string,
+  ) => Promise<PLN.LightningNodePayReceipt>;
+}
+
+export interface TapFactoryInjection {
+  getService: (node: TapNode) => TapService;
+}
+
+export interface LitdLibrary {
+  waitUntilOnline: (node: LitdNode) => Promise<void>;
+  status: (node: LitdNode) => Promise<LITD.SubServerStatusResp>;
+  listSessions: (node: LitdNode) => Promise<PLIT.Session[]>;
+  addSession: (
+    node: LitdNode,
+    label: string,
+    type: PLIT.Session['type'],
+    expiresAt: number,
+    mailboxServerAddr?: string,
+  ) => Promise<PLIT.Session>;
+  revokeSession: (node: LitdNode, localPublicKey: string) => Promise<void>;
 }
 
 export interface StoreInjections {
@@ -162,12 +276,70 @@ export interface StoreInjections {
   settingsService: SettingsInjection;
   dockerService: DockerLibrary;
   repoService: RepoServiceInjection;
-  bitcoindService: BitcoindLibrary;
+  bitcoinFactory: BitcoinFactoryInjection;
   lightningFactory: LightningFactoryInjection;
+  tapFactory: TapFactoryInjection;
+  litdService: LitdLibrary;
 }
 
 export interface NetworksFile {
   version: string;
   networks: Network[];
   charts: Record<number, IChart>;
+}
+
+export enum AutoMineMode {
+  AutoOff = 0,
+  Auto30s = 30,
+  Auto1m = 60,
+  Auto5m = 300,
+  Auto10m = 600,
+}
+
+export interface ChannelInfo {
+  id: string;
+  to: string;
+  from: string;
+  localBalance: string;
+  remoteBalance: string;
+  nextLocalBalance: number;
+}
+
+export interface PreInvoice {
+  channelId: string;
+  nextLocalBalance: number;
+}
+
+export interface Activity {
+  id: number;
+  source: string;
+  destination: string;
+  intervalSecs: number;
+  amountMsat: number;
+}
+
+export interface Simulation {
+  activity: Activity[];
+  status: Status;
+  errorMsg?: string;
+}
+
+export interface ActivityConfig {
+  source: string;
+  destination: string;
+  interval_secs: number;
+  amount_msat: number;
+}
+
+export interface SimulationNodeConfig {
+  id: string;
+  address?: string;
+  base_url?: string;
+  macaroon?: string;
+  cert?: string;
+  ca_cert?: string;
+  client_cert?: string;
+  client_key?: string;
+  api_username?: string;
+  api_password?: string;
 }

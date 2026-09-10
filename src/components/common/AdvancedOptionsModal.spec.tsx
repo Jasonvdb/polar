@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, waitFor, waitForElementToBeRemoved } from '@testing-library/react';
+import { fireEvent, waitFor } from '@testing-library/react';
 import { Status } from 'shared/types';
 import { initChartFromNetwork } from 'utils/chart';
 import { getNetwork, injections, renderWithProviders } from 'utils/tests';
@@ -10,6 +10,8 @@ const dockerServiceMock = injections.dockerService as jest.Mocked<
 >;
 
 describe('AdvancedOptionsModal', () => {
+  let unmount: () => void;
+
   const renderComponent = async (status?: Status, nodeName = 'alice') => {
     const network = getNetwork(1, 'test network', status);
     const initialState = {
@@ -32,11 +34,14 @@ describe('AdvancedOptionsModal', () => {
     };
     const cmp = <AdvancedOptionsModal network={network} />;
     const result = renderWithProviders(cmp, { initialState });
+    unmount = result.unmount;
     return {
       ...result,
       network,
     };
   };
+
+  afterEach(() => unmount());
 
   it('should render labels', async () => {
     const { getByText } = await renderComponent();
@@ -67,7 +72,6 @@ describe('AdvancedOptionsModal', () => {
     expect(btn).toBeInTheDocument();
     expect(btn.parentElement).toBeInstanceOf(HTMLButtonElement);
     fireEvent.click(getByText('Cancel'));
-    await waitForElementToBeRemoved(() => getByText('Cancel'));
     expect(queryByText('Cancel')).not.toBeInTheDocument();
   });
 

@@ -52,7 +52,7 @@ const DetectDockerModal: React.FC = () => {
   const checkAsync = useAsyncCallback(async () => {
     try {
       await getDockerVersions({ throwErr: true });
-    } catch (error) {
+    } catch (error: any) {
       notify({ message: l('dockerError'), error });
     }
   });
@@ -66,7 +66,7 @@ const DetectDockerModal: React.FC = () => {
 
   return (
     <Modal
-      visible={visible}
+      open={visible}
       closable={false}
       width={600}
       centered

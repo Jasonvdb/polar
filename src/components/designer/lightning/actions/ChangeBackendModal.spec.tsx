@@ -1,10 +1,5 @@
 import React from 'react';
-import {
-  act,
-  fireEvent,
-  waitFor,
-  waitForElementToBeRemoved,
-} from '@testing-library/react';
+import { act, fireEvent, waitFor } from '@testing-library/react';
 import { Status } from 'shared/types';
 import { initChartFromNetwork } from 'utils/chart';
 import { defaultRepoState } from 'utils/constants';
@@ -15,10 +10,13 @@ import {
   renderWithProviders,
   suppressConsoleErrors,
   testNodeDocker,
+  testRepoState,
 } from 'utils/tests';
 import ChangeBackendModal from './ChangeBackendModal';
 
 describe('ChangeBackendModal', () => {
+  let unmount: () => void;
+
   const renderComponent = async (
     status?: Status,
     lnName = 'alice',
@@ -61,11 +59,14 @@ describe('ChangeBackendModal', () => {
     };
     const cmp = <ChangeBackendModal network={network} />;
     const result = renderWithProviders(cmp, { initialState });
+    unmount = result.unmount;
     return {
       ...result,
       network,
     };
   };
+
+  afterEach(() => unmount());
 
   it('should render labels', async () => {
     const { getByText } = await renderComponent();
@@ -99,7 +100,6 @@ describe('ChangeBackendModal', () => {
     expect(btn).toBeInTheDocument();
     expect(btn.parentElement).toBeInstanceOf(HTMLButtonElement);
     fireEvent.click(getByText('Cancel'));
-    await waitForElementToBeRemoved(() => getByText('Cancel'));
     expect(queryByText('Cancel')).not.toBeInTheDocument();
   });
 
@@ -127,7 +127,8 @@ describe('ChangeBackendModal', () => {
   });
 
   it('should display the compatibility warning for older bitcoin node', async () => {
-    const { getByText, queryByText, changeSelect } = await renderComponent();
+    const { getByText, queryByText, changeSelect, store } = await renderComponent();
+    store.getActions().app.setRepoState(testRepoState);
     const bitcoindVersion = defaultRepoState.images.bitcoind.latest;
     const warning =
       'erin is running LND v0.7.1-beta which is compatible with Bitcoin Core v0.18.1 and older.' +
@@ -136,6 +137,8 @@ describe('ChangeBackendModal', () => {
     expect(getByText('Cancel')).toBeInTheDocument();
     changeSelect('Lightning Node', 'erin');
     expect(getByText(warning)).toBeInTheDocument();
+    changeSelect('Lightning Node', 'alice');
+    expect(queryByText(warning)).not.toBeInTheDocument();
   });
 
   it('should not display the compatibility warning', async () => {

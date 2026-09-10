@@ -3,13 +3,13 @@ import { useAsyncCallback } from 'react-async-hook';
 import { CodeOutlined } from '@ant-design/icons';
 import { Button, Form, message } from 'antd';
 import { usePrefixedTranslation } from 'hooks';
-import { BitcoinNode, LightningNode } from 'shared/types';
+import { AnyNode } from 'shared/types';
 import { useStoreActions } from 'store';
 import { getContainerName } from 'utils/network';
 import { TERMINAL } from 'components/routing';
 
 interface Props {
-  node: LightningNode | BitcoinNode;
+  node: AnyNode;
   type?: 'button' | 'menu';
 }
 
@@ -24,10 +24,10 @@ const OpenTerminalButton: React.FC<Props> = ({ node, type }) => {
   // render a menu item inside of the NodeContextMenu
   if (type === 'menu') {
     return (
-      <span onClick={openAsync.execute}>
+      <div onClick={openAsync.execute}>
         <CodeOutlined />
         <span>{l('menu')}</span>
-      </span>
+      </div>
     );
   }
 
@@ -41,6 +41,9 @@ const OpenTerminalButton: React.FC<Props> = ({ node, type }) => {
       break;
     case 'bitcoind':
       cmd = 'bitcoin-cli';
+      break;
+    case 'tapd':
+      cmd = 'tapcli';
       break;
   }
   return (

@@ -6,14 +6,7 @@ import { Status } from 'shared/types';
 import { CustomImage } from 'types';
 import { initChartFromNetwork } from 'utils/chart';
 import { defaultRepoState } from 'utils/constants';
-import {
-  defaultStateBalances,
-  defaultStateInfo,
-  getNetwork,
-  injections,
-  lightningServiceMock,
-  renderWithProviders,
-} from 'utils/tests';
+import { getNetwork, injections, renderWithProviders } from 'utils/tests';
 import DefaultSidebar from './DefaultSidebar';
 
 jest.mock('os', () => {
@@ -78,35 +71,25 @@ describe('DefaultSidebar Component', () => {
     mockOS.platform.mockReturnValue('darwin');
   });
 
-  it('should display the version toggle', () => {
-    const { getByText } = renderComponent();
-    expect(getByText('Show All Versions')).toBeInTheDocument();
-  });
-
-  it('should display old versions when the toggle is clicked', () => {
-    const { getByText, getAllByText, getByRole } = renderComponent();
-    fireEvent.click(getByRole('switch'));
-    expect(getByText(`LND v0.8.0-beta`)).toBeInTheDocument();
-    expect(getAllByText('latest')).toHaveLength(4);
+  it('should expand the list of LND nodes', async () => {
+    const { getByText, getAllByLabelText } = renderComponent();
+    expect(getByText(`LND v${lndLatest}`)).toBeInTheDocument();
+    const prevVersion = defaultRepoState.images.LND.versions[2];
+    expect(getByText(`LND v${prevVersion}`)).not.toBeVisible();
+    fireEvent.click(getAllByLabelText('down')[0]);
+    expect(getByText(`LND v${prevVersion}`)).toBeVisible();
+    fireEvent.click(getAllByLabelText('up')[0]);
+    expect(getByText(`LND v${prevVersion}`)).not.toBeVisible();
   });
 
   it('should display the Image Updates Modal', async () => {
     mockRepoService.checkForUpdates.mockResolvedValue({
       state: defaultRepoState,
     });
-    const { getByText, findByText, getByRole } = renderComponent();
-    fireEvent.click(getByRole('switch'));
+    const { getByText, store } = renderComponent();
     expect(getByText('Check for new Node Versions')).toBeInTheDocument();
     fireEvent.click(getByText('Check for new Node Versions'));
-    expect(await findByText('You are up to date!')).toBeInTheDocument();
-  });
-
-  it('should not display c-lightning nodes on Windows', () => {
-    mockOS.platform.mockReturnValue('win32');
-    const { queryByText, getAllByText, getByRole } = renderComponent();
-    expect(queryByText('c-lightning')).not.toBeInTheDocument();
-    fireEvent.click(getByRole('switch'));
-    expect(getAllByText('latest')).toHaveLength(3);
+    expect(store.getState().modals.imageUpdates.visible).toBe(true);
   });
 
   it('should display custom images', () => {
@@ -114,10 +97,13 @@ describe('DefaultSidebar Component', () => {
     expect(getByText(`My Test Image`)).toBeInTheDocument();
   });
 
-  it('should not display incompatible custom images', () => {
-    mockOS.platform.mockReturnValue('win32');
+  it('should not display nodes on unsupported platforms', () => {
+    mockOS.platform.mockReturnValue('aix' as any);
     const { queryByText } = renderComponent(Status.Stopped, customImages);
-    expect(queryByText(`My Test Image`)).not.toBeInTheDocument();
+    // managed nodes filtered out
+    expect(queryByText(`LND v${lndLatest}`)).not.toBeInTheDocument();
+    // custom nodes filtered out
+    expect(queryByText('My Test Image')).not.toBeInTheDocument();
   });
 
   it('should display a draggable LND node', () => {
@@ -138,27 +124,13 @@ describe('DefaultSidebar Component', () => {
     );
   });
 
-  describe('Sync Chart button', () => {
-    it('should display an error if syncing the chart fails', async () => {
-      lightningServiceMock.getInfo.mockRejectedValue(new Error('failed to get info'));
-      const { getByLabelText, findByText } = renderComponent(Status.Started);
-      fireEvent.click(getByLabelText('reload'));
-      expect(await findByText('failed to get info')).toBeInTheDocument();
-      expect(lightningServiceMock.getInfo).toBeCalledTimes(4);
-    });
-
-    it('should sync the chart from LND nodes', async () => {
-      lightningServiceMock.getInfo.mockResolvedValue(defaultStateInfo({}));
-      lightningServiceMock.getBalances.mockResolvedValue(defaultStateBalances({}));
-      lightningServiceMock.getChannels.mockResolvedValue([]);
-      const { getByLabelText, findByText } = renderComponent(Status.Started);
-      fireEvent.click(getByLabelText('reload'));
-      expect(
-        await findByText('The designer has been synced with the Lightning nodes'),
-      ).toBeInTheDocument();
-      expect(lightningServiceMock.getInfo).toBeCalledTimes(4);
-      expect(lightningServiceMock.getBalances).toBeCalledTimes(4);
-      expect(lightningServiceMock.getChannels).toBeCalledTimes(4);
-    });
+  it('should display the Simulation Designer Tab', () => {
+    const { getByText } = renderComponent();
+    fireEvent.click(getByText('Simulations'));
+    expect(
+      getByText(
+        'Automate Lightning payments between nodes by adding simulation activities below.',
+      ),
+    ).toBeInTheDocument();
   });
 });

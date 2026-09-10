@@ -1,7 +1,15 @@
 import React from 'react';
 import { fireEvent, waitFor } from '@testing-library/react';
 import { Status } from 'shared/types';
-import { getNetwork, injections, renderWithProviders } from 'utils/tests';
+import { initChartFromNetwork } from 'utils/chart';
+import {
+  defaultStateBalances,
+  defaultStateInfo,
+  getNetwork,
+  lightningServiceMock,
+  renderWithProviders,
+  bitcoinServiceMock,
+} from 'utils/tests';
 import NetworkActions from './NetworkActions';
 
 describe('NetworkActions Component', () => {
@@ -13,17 +21,24 @@ describe('NetworkActions Component', () => {
   const renderComponent = (status: Status) => {
     const network = getNetwork(1, 'test network', status);
     network.nodes.bitcoin.forEach(n => (n.status = status));
+    const chart = initChartFromNetwork(network);
     const initialState = {
       network: {
         networks: [network],
       },
-      bitcoind: {
+      bitcoin: {
         nodes: {
-          backend1: {
+          '1-backend1': {
             chainInfo: {
               blocks: 10,
             },
           },
+        },
+      },
+      designer: {
+        activeId: network.id,
+        allCharts: {
+          [network.id]: chart,
         },
       },
     };
@@ -108,7 +123,7 @@ describe('NetworkActions Component', () => {
   });
 
   it('should mine a block when the Mine button is clicked', async () => {
-    const mineMock = injections.bitcoindService.mine as jest.Mock;
+    const mineMock = bitcoinServiceMock.mine as jest.Mock;
     mineMock.mockResolvedValue(true);
     const { getByText, store } = renderComponent(Status.Started);
     fireEvent.click(getByText('Quick Mine'));
@@ -119,10 +134,34 @@ describe('NetworkActions Component', () => {
   });
 
   it('should display an error if mining fails', async () => {
-    const mineMock = injections.bitcoindService.mine as jest.Mock;
+    const mineMock = bitcoinServiceMock.mine as jest.Mock;
     mineMock.mockRejectedValue(new Error('connection failed'));
     const { getByText, findByText } = renderComponent(Status.Started);
     fireEvent.click(getByText('Quick Mine'));
     expect(await findByText(/connection failed/)).toBeInTheDocument();
+  });
+
+  describe('Sync Chart button', () => {
+    it('should display an error if syncing the chart fails', async () => {
+      lightningServiceMock.getInfo.mockRejectedValue(new Error('failed to get info'));
+      const { getByLabelText, findByText } = renderComponent(Status.Started);
+      fireEvent.click(getByLabelText('reload'));
+      expect(await findByText('failed to get info')).toBeInTheDocument();
+      expect(lightningServiceMock.getInfo).toBeCalledTimes(4);
+    });
+
+    it('should sync the chart from LND nodes', async () => {
+      lightningServiceMock.getInfo.mockResolvedValue(defaultStateInfo({}));
+      lightningServiceMock.getBalances.mockResolvedValue(defaultStateBalances({}));
+      lightningServiceMock.getChannels.mockResolvedValue([]);
+      const { getByLabelText, findByText } = renderComponent(Status.Started);
+      fireEvent.click(getByLabelText('reload'));
+      expect(
+        await findByText('The designer has been synced with the Lightning nodes'),
+      ).toBeInTheDocument();
+      expect(lightningServiceMock.getInfo).toBeCalledTimes(4);
+      expect(lightningServiceMock.getBalances).toBeCalledTimes(4);
+      expect(lightningServiceMock.getChannels).toBeCalledTimes(4);
+    });
   });
 });

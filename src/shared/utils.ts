@@ -1,16 +1,15 @@
-import { app, remote } from 'electron';
 import log from 'electron-log';
 import { join } from 'path';
 import http from 'http';
 import https from 'https';
+import { paykitConfig } from './paykitConfig';
 
 /**
- * setup logging to store log files in ~/.polar/logs/ dir
+ * setup logging to store log files in the Paykit data root logs/ dir
  */
 export const initLogger = () => {
   log.transports.file.resolvePath = (variables: log.PathVariables) => {
-    const ap = app || remote.app;
-    return join(ap.getPath('home'), '.polar', 'logs', variables.fileName as string);
+    return join(paykitConfig.dataPath, 'logs', variables.fileName as string);
   };
 };
 
@@ -50,4 +49,22 @@ export const httpRequest = (
     }
     req.end();
   });
+};
+
+/**
+ * Converts an object to a JSON string, but converts any Buffer arrays to hex strings
+ */
+export const toJSON = (data: any): string => {
+  return JSON.stringify(
+    data,
+    (key, value) => {
+      if (value?.type === 'Buffer') {
+        return Buffer.from(value.data).toString('hex');
+      } else if (value instanceof Uint8Array) {
+        return Buffer.from(value).toString('hex');
+      }
+      return value;
+    },
+    2,
+  );
 };

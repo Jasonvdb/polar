@@ -1,7 +1,5 @@
-import { remove } from 'fs-extra';
-import { join } from 'path';
-import { homedir } from 'os';
 import { ClientFunction } from 'testcafe';
+import { cleanupNetworks } from '../../scripts/e2e-environment';
 
 export const pageUrl = '../build/index.html';
 
@@ -14,5 +12,13 @@ export const assertNoConsoleErrors = async (t: TestController) => {
 };
 
 export const cleanup = async () => {
-  await remove(join(homedir(), '.polar', 'networks'));
+  cleanupNetworks();
+};
+
+export const afterEach = async (t: TestController) => {
+  try {
+    await assertNoConsoleErrors(t);
+  } finally {
+    await cleanup();
+  }
 };

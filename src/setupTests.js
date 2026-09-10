@@ -5,6 +5,8 @@ import './i18n';
 import '@testing-library/jest-dom/extend-expect';
 // this is needed for antd v4 components
 import 'regenerator-runtime/runtime';
+// this is needed for antd v4 components
+import 'jest-canvas-mock';
 
 // Prevent displaying some un-fixable warnings in tests
 const originalConsoleWarning = console.warn;
@@ -22,6 +24,24 @@ console.warn = (...args) => {
     return;
   }
   originalConsoleWarning(...args);
+};
+
+// Prevent displaying from un-fixable errors in tests
+const originalConsoleError = console.error;
+console.error = (...args) => {
+  // Join all args to check patterns (React warnings may use format strings)
+  const msg = args.map(String).join(' ');
+  if (
+    // antd components not unmounting properly in tests
+    /Warning.*not wrapped in act\(...\)/.test(msg) ||
+    // antd components not unmounting properly in tests
+    /Warning: Can't perform a React state update on an unmounted component./.test(msg) ||
+    // isSelected prop from @mrblenny/react-flow-chart passed to DOM
+    (/Warning: React does not recognize/.test(msg) && /isSelected/.test(msg))
+  ) {
+    return;
+  }
+  return originalConsoleError(...args);
 };
 
 // suppress antd `console.time` calls in `useForm()`

@@ -1,9 +1,11 @@
 import { Action, action, Thunk, thunk, ThunkOn, thunkOn } from 'easy-peasy';
+import { throttle } from 'lodash';
 import { LightningNode, Status } from 'shared/types';
 import * as PLN from 'lib/lightning/types';
-import { Network, StoreInjections } from 'types';
+import { ChannelInfo, Network, PreInvoice, StoreInjections } from 'types';
 import { delay } from 'utils/async';
 import { BLOCKS_TIL_CONFIRMED } from 'utils/constants';
+import { getInvoicePayload } from 'utils/network';
 import { fromSatsNumeric } from 'utils/units';
 import { RootModel } from './';
 
@@ -27,12 +29,14 @@ export interface OpenChannelPayload {
   to: LightningNode;
   sats: string;
   autoFund: boolean;
+  isPrivate: boolean;
 }
 
 export interface CreateInvoicePayload {
   node: LightningNode;
   amount: number;
   memo?: string;
+  expiry?: number;
 }
 
 export interface PayInvoicePayload {
@@ -43,6 +47,7 @@ export interface PayInvoicePayload {
 
 export interface LightningModel {
   nodes: LightningNodeMapping;
+  channelsInfo: ChannelInfo[];
   removeNode: Action<LightningModel, string>;
   clearNodes: Action<LightningModel, void>;
   setInfo: Action<LightningModel, { node: LightningNode; info: PLN.LightningNodeInfo }>;
@@ -60,7 +65,13 @@ export interface LightningModel {
   getAllInfo: Thunk<LightningModel, LightningNode, StoreInjections, RootModel>;
   connectAllPeers: Thunk<LightningModel, Network, StoreInjections, RootModel>;
   depositFunds: Thunk<LightningModel, DepositFundsPayload, StoreInjections, RootModel>;
-  openChannel: Thunk<LightningModel, OpenChannelPayload, StoreInjections, RootModel>;
+  openChannel: Thunk<
+    LightningModel,
+    OpenChannelPayload,
+    StoreInjections,
+    RootModel,
+    Promise<string>
+  >;
   closeChannel: Thunk<
     LightningModel,
     { node: LightningNode; channelPoint: string },
@@ -83,11 +94,26 @@ export interface LightningModel {
   >;
   waitForNodes: Thunk<LightningModel, LightningNode[], StoreInjections, RootModel>;
   mineListener: ThunkOn<LightningModel, StoreInjections, RootModel>;
+  addListeners: Thunk<LightningModel, Network, StoreInjections, RootModel>;
+  removeListeners: Thunk<LightningModel, Network, StoreInjections, RootModel>;
+  addChannelListeners: Thunk<LightningModel, Network, StoreInjections, RootModel>;
+  setChannelsInfo: Action<LightningModel, ChannelInfo[]>;
+  resetChannelsInfo: Thunk<LightningModel, Network, StoreInjections, RootModel>;
+  manualBalanceChannelsInfo: Action<LightningModel, { value: number; index: number }>;
+  autoBalanceChannelsInfo: Action<LightningModel>;
+  updateBalanceOfChannels: Thunk<LightningModel, Network, StoreInjections, RootModel>;
+  balanceChannels: Thunk<
+    LightningModel,
+    { id: number; toPay: PreInvoice[] },
+    StoreInjections,
+    RootModel
+  >;
 }
 
 const lightningModel: LightningModel = {
   // state properties
   nodes: {},
+  channelsInfo: [],
   // reducer actions (mutations allowed thx to immer)
   removeNode: action((state, name) => {
     if (state.nodes[name]) {
@@ -124,6 +150,7 @@ const lightningModel: LightningModel = {
     const api = injections.lightningFactory.getService(node);
     const channels = await api.getChannels(node);
     actions.setChannels({ node, channels });
+    return channels;
   }),
   getAllInfo: thunk(async (actions, node) => {
     await actions.getInfo(node);
@@ -163,8 +190,10 @@ const lightningModel: LightningModel = {
       const api = injections.lightningFactory.getService(node);
       const { address } = await api.getNewAddress(node);
       const coins = fromSatsNumeric(sats);
-      await injections.bitcoindService.sendFunds(btcNode, address, coins);
-      await getStoreActions().bitcoind.mine({
+      await injections.bitcoinFactory
+        .getService(btcNode)
+        .sendFunds(btcNode, address, coins);
+      await getStoreActions().bitcoin.mine({
         blocks: BLOCKS_TIL_CONFIRMED,
         node: btcNode,
       });
@@ -176,7 +205,7 @@ const lightningModel: LightningModel = {
   openChannel: thunk(
     async (
       actions,
-      { from, to, sats, autoFund },
+      { from, to, sats, autoFund, isPrivate },
       { injections, getStoreState, getStoreActions },
     ) => {
       // automatically deposit funds when the node doesn't have enough to open the channel
@@ -192,7 +221,12 @@ const lightningModel: LightningModel = {
         .info as PLN.LightningNodeInfo;
       // open the channel via lightning node
       const api = injections.lightningFactory.getService(from);
-      await api.openChannel(from, rpcUrl, sats);
+      const channelPoint = await api.openChannel({
+        from,
+        toRpcUrl: rpcUrl,
+        amount: sats,
+        isPrivate,
+      });
       // wait for the unconfirmed tx to be processed by the bitcoin node
       await delay(500);
       // mine some blocks to confirm the txn
@@ -200,7 +234,7 @@ const lightningModel: LightningModel = {
       const btcNode =
         network.nodes.bitcoin.find(n => n.name === from.backendName) ||
         network.nodes.bitcoin[0];
-      await getStoreActions().bitcoind.mine({
+      await getStoreActions().bitcoin.mine({
         blocks: BLOCKS_TIL_CONFIRMED,
         node: btcNode,
       });
@@ -208,6 +242,10 @@ const lightningModel: LightningModel = {
       await actions.waitForNodes([from, to]);
       // synchronize the chart with the new channel
       await getStoreActions().designer.syncChart(network);
+      // synchronize channels info
+      await actions.resetChannelsInfo(network);
+      // return the channel point
+      return `${channelPoint.txid}:${channelPoint.index}`;
     },
   ),
   closeChannel: thunk(
@@ -223,7 +261,7 @@ const lightningModel: LightningModel = {
       // mine some blocks to confirm the txn
       const network = getStoreState().network.networkById(node.networkId);
       const btcNode = network.nodes.bitcoin[0];
-      await getStoreActions().bitcoind.mine({
+      await getStoreActions().bitcoin.mine({
         blocks: BLOCKS_TIL_CONFIRMED,
         node: btcNode,
       });
@@ -231,12 +269,16 @@ const lightningModel: LightningModel = {
       await actions.waitForNodes([node]);
       // synchronize the chart with the new channel
       await getStoreActions().designer.syncChart(network);
+      // synchronize channels info
+      await actions.resetChannelsInfo(network);
     },
   ),
-  createInvoice: thunk(async (actions, { node, amount, memo }, { injections }) => {
-    const api = injections.lightningFactory.getService(node);
-    return await api.createInvoice(node, amount, memo);
-  }),
+  createInvoice: thunk(
+    async (actions, { node, amount, memo, expiry }, { injections }) => {
+      const api = injections.lightningFactory.getService(node);
+      return await api.createInvoice(node, amount, memo, expiry);
+    },
+  ),
   payInvoice: thunk(
     async (
       actions,
@@ -248,6 +290,7 @@ const lightningModel: LightningModel = {
 
       const network = getStoreState().network.networkById(node.networkId);
       // synchronize the chart with the new channel
+      await getStoreActions().lightning.waitForNodes(network.nodes.lightning);
       await getStoreActions().designer.syncChart(network);
 
       return receipt;
@@ -261,6 +304,7 @@ const lightningModel: LightningModel = {
       LND: 1,
       'c-lightning': 2,
       eclair: 2,
+      litd: 1,
     };
     // determine the highest delay of all implementations
     const longestDelay = nodes.reduce(
@@ -270,7 +314,7 @@ const lightningModel: LightningModel = {
     await delay(longestDelay * 1000);
   }),
   mineListener: thunkOn(
-    (actions, storeActions) => storeActions.bitcoind.mine,
+    (actions, storeActions) => storeActions.bitcoin.mine,
     async (actions, { payload }, { getStoreState, getStoreActions }) => {
       const { notify } = getStoreActions().app;
       // update all lightning nodes info when a block in mined
@@ -282,13 +326,172 @@ const lightningModel: LightningModel = {
           .map(async n => {
             try {
               await actions.getAllInfo(n);
-            } catch (error) {
+            } catch (error: any) {
               notify({ message: `Unable to retrieve node info from ${n.name}`, error });
             }
           }),
       );
     },
   ),
+  addListeners: thunk(async (actions, network, { injections, getStoreState }) => {
+    const { nodes } = getStoreState().network.networkById(network.id);
+    for (const node of nodes.lightning) {
+      await injections.lightningFactory.getService(node).addListenerToNode(node);
+    }
+    // subscribe to channel events
+    actions.addChannelListeners(network);
+    // TODO: subscribe to channel payment/balances
+  }),
+  removeListeners: thunk(async (actions, network, { injections, getStoreState }) => {
+    const { nodes } = getStoreState().network.networkById(network.id);
+    nodes.lightning.forEach(
+      async node =>
+        await injections.lightningFactory.getService(node).removeListener(node),
+    );
+  }),
+  addChannelListeners: thunk(
+    async (actions, network, { injections, getStoreState, getStoreActions }) => {
+      const { nodes } = getStoreState().network.networkById(network.id);
+
+      // throttle the sync to avoid too many back to back requests
+      const syncThrottled = throttle(
+        () => {
+          const net = getStoreState().network.networks.find(n => n.id === network.id);
+          if (net?.status !== Status.Started) return;
+          getStoreActions().designer.syncChart(net);
+        },
+        5 * 1000,
+        { leading: true, trailing: false },
+      );
+
+      for (const node of nodes.lightning) {
+        await injections.lightningFactory
+          .getService(node)
+          .subscribeChannelEvents(node, async (event: PLN.LightningNodeChannelEvent) => {
+            if (event.type !== 'Unknown') {
+              await actions.waitForNodes([node]);
+              syncThrottled();
+            }
+          });
+      }
+    },
+  ),
+  setChannelsInfo: action((state, payload) => {
+    state.channelsInfo = payload;
+  }),
+  resetChannelsInfo: thunk(async (actions, network, { getStoreState }) => {
+    const channels = [] as PLN.LightningNodeChannel[];
+    const { getChannels } = actions;
+    const { links } = getStoreState().designer.activeChart;
+
+    const id2Node = {} as Record<string, LightningNode>;
+    const channelsInfo = [] as ChannelInfo[];
+
+    await Promise.all(
+      network.nodes.lightning.map(async node => {
+        const nodeChannels = await getChannels(node);
+        if (nodeChannels) {
+          channels.push(...nodeChannels);
+        }
+        id2Node[node.name] = node;
+      }),
+    );
+
+    for (const channel of channels) {
+      const { uniqueId: id, localBalance, remoteBalance } = channel;
+      if (!links[id]) continue;
+      const from = links[id].from.nodeId;
+      const to = links[id].to.nodeId;
+      if (!to) continue;
+      const nextLocalBalance = Number(localBalance);
+      channelsInfo.push({
+        id,
+        to,
+        from,
+        localBalance,
+        remoteBalance,
+        nextLocalBalance,
+      });
+    }
+
+    actions.setChannelsInfo(channelsInfo);
+  }),
+  manualBalanceChannelsInfo: action((state, { value, index }) => {
+    const { channelsInfo: info } = state;
+    if (info && info[index]) {
+      info[index].nextLocalBalance = value;
+      state.channelsInfo = info;
+    }
+  }),
+  autoBalanceChannelsInfo: action(state => {
+    const { channelsInfo } = state;
+    for (let index = 0; index < channelsInfo.length; index += 1) {
+      const { localBalance, remoteBalance } = channelsInfo[index];
+      const halfAmount = Math.floor((Number(localBalance) + Number(remoteBalance)) / 2);
+      channelsInfo[index].nextLocalBalance = halfAmount;
+    }
+    state.channelsInfo = channelsInfo;
+  }),
+  updateBalanceOfChannels: thunk(
+    async (actions, network, { getStoreActions, getState }) => {
+      const { notify } = getStoreActions().app;
+      const { hideBalanceChannels } = getStoreActions().modals;
+      const { channelsInfo } = getState();
+
+      const toPay: PreInvoice[] = channelsInfo
+        .filter(c => Number(c.localBalance) !== c.nextLocalBalance)
+        .map(c => ({ channelId: c.id, nextLocalBalance: c.nextLocalBalance }));
+
+      await actions.balanceChannels({ id: network.id, toPay });
+      await hideBalanceChannels();
+      notify({ message: 'Channels balanced!' });
+    },
+  ),
+  balanceChannels: thunk(async (actions, { id, toPay }, { getStoreState }) => {
+    const { networks } = getStoreState().network;
+    const network = networks.find(n => n.id === id);
+    if (!network) throw new Error('networkByIdErr');
+    const { createInvoice, payInvoice, getChannels } = actions;
+    const lnNodes = network.nodes.lightning;
+    const channels = [] as PLN.LightningNodeChannel[];
+    const id2Node = {} as Record<string, LightningNode>;
+    const id2channel = {} as Record<string, PLN.LightningNodeChannel>;
+
+    await Promise.all(
+      lnNodes.map(async node => {
+        id2Node[node.name] = node;
+        const nodeChannels = await getChannels(node);
+        channels.push(...nodeChannels);
+      }),
+    );
+
+    channels.forEach(channel => (id2channel[channel.uniqueId] = channel));
+    const minimumSatsDifference = 50;
+    const links = getStoreState().designer.activeChart.links;
+
+    await Promise.all(
+      toPay.map(async ({ channelId, nextLocalBalance }) => {
+        const channel = id2channel[channelId];
+        const { to, from } = links[channelId];
+        if (!to.nodeId) return;
+        const fromNode = id2Node[from.nodeId];
+        const toNode = id2Node[to.nodeId];
+        const payload = getInvoicePayload(channel, fromNode, toNode, nextLocalBalance);
+
+        if (payload.amount < minimumSatsDifference) return;
+
+        const invoice = await createInvoice({
+          node: payload.target,
+          amount: payload.amount,
+        });
+
+        await payInvoice({
+          invoice,
+          node: payload.source,
+        });
+      }),
+    );
+  }),
 };
 
 export default lightningModel;
