@@ -1,7 +1,7 @@
 import { getProjectName, getNamespacedContainerName } from 'shared/paykitConfig';
 import { remote } from 'electron';
 import { debug, info } from 'electron-log';
-import { copy, ensureDir } from 'fs-extra';
+import { copy, ensureDir, readFile } from 'fs-extra';
 import { dirname, join } from 'path';
 import { v2 as compose } from 'docker-compose';
 import Dockerode from 'dockerode';
@@ -43,17 +43,53 @@ export const getDocker = async (useCached = true): Promise<Dockerode> => {
   // re-use the stored instance if available
   if (useCached && dockerInst) return dockerInst;
 
-  if (remote.process.env.DOCKER_HOST) {
-    debug('DOCKER_HOST detected. Copying DOCKER_* env vars:');
-    // copy all env vars that start with DOCKER_ to the current process env
-    Object.keys(remote.process.env)
-      .filter(key => key.startsWith('DOCKER_'))
-      .forEach(key => {
-        debug(`- ${key} = '${remote.process.env[key]}'`);
-        process.env[key] = remote.process.env[key];
-      });
-    // let Dockerode handle DOCKER_HOST parsing
-    return (dockerInst = new Dockerode());
+  const env = remote.process.env;
+  if (env.DOCKER_HOST) {
+    // Webpack substitutes process.env in dependencies independently. Passing options
+    // explicitly keeps Dockerode on the same daemon as our Compose subprocesses.
+    const address = env.DOCKER_HOST;
+    if (address.startsWith('unix://') || address.startsWith('/')) {
+      const socketPath = address.startsWith('unix://') ? address.slice(7) : address;
+      if (!socketPath) throw new Error('DOCKER_HOST requires an explicit socket path');
+      return (dockerInst = new Dockerode({ host: undefined, socketPath }));
+    }
+    if (address.startsWith('npipe://')) {
+      const socketPath = address.slice(8);
+      if (!socketPath) throw new Error('DOCKER_HOST requires an explicit pipe path');
+      return (dockerInst = new Dockerode({ host: undefined, socketPath }));
+    }
+    const url = new URL(address.includes('://') ? address : `tcp://${address}`);
+    if (!['tcp:', 'http:', 'https:', 'ssh:'].includes(url.protocol) || !url.hostname) {
+      throw new Error('Unsupported DOCKER_HOST protocol');
+    }
+    const options: Dockerode.DockerOptions & { pathPrefix: string } = {
+      host: url.hostname,
+      port: url.port ? Number(url.port) : undefined,
+      protocol:
+        env.DOCKER_TLS_VERIFY === '1' || url.port === '2376' || url.protocol === 'https:'
+          ? 'https'
+          : url.protocol === 'ssh:'
+          ? 'ssh'
+          : 'http',
+      pathPrefix: env.DOCKER_PATH_PREFIX || '/',
+    };
+    if (options.protocol === 'ssh') {
+      options.username = url.username;
+      options.sshOptions = { agent: env.SSH_AUTH_SOCK };
+    }
+    if (env.DOCKER_CERT_PATH) {
+      const directory = env.DOCKER_CERT_PATH;
+      [options.ca, options.cert, options.key] = await Promise.all(
+        ['ca.pem', 'cert.pem', 'key.pem'].map(file => readFile(join(directory, file))),
+      );
+    }
+    if (env.DOCKER_CLIENT_TIMEOUT) {
+      const timeout = Number(env.DOCKER_CLIENT_TIMEOUT);
+      if (!Number.isSafeInteger(timeout) || timeout < 0)
+        throw new Error('Invalid DOCKER_CLIENT_TIMEOUT');
+      options.timeout = timeout;
+    }
+    return (dockerInst = new Dockerode(options));
   }
   if (isLinux() || isMac()) {
     // try to detect the socket path in the default locations on linux/mac
@@ -175,6 +211,8 @@ class DockerService implements DockerLibrary {
       file.addSimln(network.id);
     }
 
+    if (network.paykit) file.addPaykit(network.id, network.paykit);
+
     const yml = yaml.dump(file.content);
     const path = join(network.path, 'docker-compose.yml');
     await write(path, yml);
@@ -188,6 +226,10 @@ class DockerService implements DockerLibrary {
   async start(network: Network) {
     const { bitcoin, lightning, tap } = network.nodes;
     await this.ensureDirs(network, [...bitcoin, ...lightning, ...tap]);
+    if (network.paykit) {
+      await ensureDir(join(network.path, 'volumes', 'paykit'));
+      await ensureDir(join(network.path, 'volumes', 'paykit-postgres'));
+    }
 
     info(`Starting docker containers for ${network.name}`);
     info(` - path: ${network.path}`);
@@ -377,6 +419,15 @@ class DockerService implements DockerLibrary {
         ...(remote && remote.process ? remote.process.env : {}),
       },
     };
+
+    // Docker CLI otherwise lets an inherited context override DOCKER_HOST, while
+    // Dockerode uses the explicit host. One configuration must select both clients.
+    if (args.env.DOCKER_HOST) delete args.env.DOCKER_CONTEXT;
+
+    if (network?.paykit) {
+      const { uid, gid } = os.userInfo();
+      args.env = { ...args.env, PAYKIT_UID: `${uid}`, PAYKIT_GID: `${gid}` };
+    }
 
     if (isLinux()) {
       const { uid, gid } = os.userInfo();

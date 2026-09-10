@@ -233,3 +233,53 @@ describe('ComposeFile', () => {
     expect(composeFile.content.volumes).toHaveProperty('polar-paykit-n1-carol');
   });
 });
+
+describe('Paykit compose isolation', () => {
+  it('publishes only the authenticated loopback API and keeps credentials outside exports', () => {
+    const file = new ComposeFile(9);
+    file.addPaykit(9, {
+      apiVersion: 1,
+      environmentId: '9b03a782-e2f3-4b7a-8ef5-429628921ee2',
+      servicePort: 30099,
+    });
+    const { paykit, 'paykit-postgres': database } = file.content.services;
+    expect(paykit.container_name).toBe('polar-paykit-n9-paykit');
+    expect(paykit.ports).toEqual(['127.0.0.1:30099:10090']);
+    expect(database.ports).toEqual([]);
+    expect(paykit.user).toBe('${PAYKIT_UID:-1000}:${PAYKIT_GID:-1000}');
+    expect(database.user).toBe(paykit.user);
+    expect(paykit.volumes).toContain('./volumes/paykit:/data');
+    expect(database.volumes).toContain('./volumes/paykit-postgres:/var/lib/postgresql');
+    expect(
+      paykit.volumes.some(
+        v => v.includes('paykit-credentials/') && v.endsWith(':/run/paykit:ro'),
+      ),
+    ).toBe(true);
+    expect(database.environment?.POSTGRES_PASSWORD_FILE).toBe(
+      '/run/paykit/postgres-password',
+    );
+    expect(database.environment?.POSTGRES_PASSWORD).toBeUndefined();
+    expect(paykit.depends_on).toEqual({
+      'paykit-postgres': { condition: 'service_healthy' },
+    });
+    const other = new ComposeFile(10);
+    other.addPaykit(10, {
+      apiVersion: 1,
+      environmentId: '95588681-99e2-46f2-8245-d042fa07a962',
+      servicePort: 30100,
+    });
+    expect(other.content.name).not.toEqual(file.content.name);
+    expect(other.content.services.paykit.container_name).not.toEqual(
+      paykit.container_name,
+    );
+    expect(other.content.services.paykit.volumes[1]).not.toEqual(paykit.volumes[1]);
+  });
+  it('refuses to overwrite an existing node with a reserved service name', () => {
+    const file = new ComposeFile(9);
+    file.content.services.paykit = { image: 'existing' } as any;
+    expect(() =>
+      file.addPaykit(9, { apiVersion: 1, environmentId: 'id', servicePort: 30099 }),
+    ).toThrow('reserved');
+    expect(file.content.services.paykit.image).toBe('existing');
+  });
+});

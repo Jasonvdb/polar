@@ -1,3 +1,4 @@
+import { PaykitEnvironment } from 'shared/paykitApi';
 import * as LITD from '@lightningpolar/litd-api';
 import * as TAP from '@lightningpolar/tapd-api';
 import { IChart } from '@mrblenny/react-flow-chart';
@@ -34,6 +35,7 @@ export interface Network {
   };
   manualMineCount: number;
   simulation?: Simulation;
+  paykit?: PaykitEnvironment;
 }
 
 /**

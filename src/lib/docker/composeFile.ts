@@ -1,3 +1,6 @@
+import { join } from 'path';
+import { PaykitEnvironment } from 'shared/paykitApi';
+import { paykitConfig } from 'shared/paykitConfig';
 import { getProjectName, getNamespacedContainerName } from 'shared/paykitConfig';
 import {
   BitcoinNode,
@@ -28,6 +31,10 @@ export interface ComposeService {
   expose: string[];
   ports: string[];
   restart?: 'always';
+  depends_on?: Record<string, { condition: string }>;
+  healthcheck?: { test: string[]; interval: string; timeout: string; retries: number };
+  init?: boolean;
+  user?: string;
   stop_grace_period?: string;
 }
 
@@ -224,6 +231,65 @@ class ComposeFile {
     const containerName = getNamespacedContainerName(networkId, 'simln');
     const svc = simln(name, containerName, imageName, command, { ...env });
     this.addService(svc);
+  }
+
+  addPaykit(networkId: number, environment: PaykitEnvironment) {
+    if (this.content.services.paykit || this.content.services['paykit-postgres']) {
+      throw new Error(
+        'Node names paykit and paykit-postgres are reserved for Paykit services',
+      );
+    }
+    const secrets = join(
+      paykitConfig.dataPath,
+      'paykit-credentials',
+      environment.environmentId,
+    ).replace(/\\/g, '/');
+    this.addService({
+      image:
+        'postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af',
+      hostname: 'paykit-postgres',
+      user: '${PAYKIT_UID:-1000}:${PAYKIT_GID:-1000}',
+      container_name: getNamespacedContainerName(networkId, 'paykit-postgres'),
+      command: 'postgres',
+      ports: [],
+      expose: [],
+      environment: {
+        POSTGRES_USER: 'pubky',
+        POSTGRES_DB: 'pubky',
+        POSTGRES_PASSWORD_FILE: '/run/paykit/postgres-password',
+        PGDATA: '/var/lib/postgresql/18/docker',
+      },
+      volumes: [
+        './volumes/paykit-postgres:/var/lib/postgresql',
+        `${secrets}/postgres-password:/run/paykit/postgres-password:ro`,
+      ],
+      healthcheck: {
+        test: ['CMD-SHELL', 'pg_isready -U pubky -d pubky'],
+        interval: '2s',
+        timeout: '3s',
+        retries: 30,
+      },
+    });
+    this.addService({
+      image: 'polar-paykit/service:pr2',
+      hostname: 'paykit',
+      user: '${PAYKIT_UID:-1000}:${PAYKIT_GID:-1000}',
+      container_name: getNamespacedContainerName(networkId, 'paykit'),
+      command: 'serve',
+      init: true,
+      ports: [`127.0.0.1:${environment.servicePort}:10090`],
+      expose: [],
+      environment: {
+        PAYKIT_ENVIRONMENT_ID: environment.environmentId,
+        PAYKIT_DATA_DIR: '/data',
+        PAYKIT_KEY_FILE: '/run/paykit/master-key',
+        PAYKIT_TOKEN_FILE: '/run/paykit/api-token',
+        PAYKIT_POSTGRES_PASSWORD_FILE: '/run/paykit/postgres-password',
+        PAYKIT_POSTGRES_HOST: 'paykit-postgres',
+      },
+      volumes: ['./volumes/paykit:/data', `${secrets}:/run/paykit:ro`],
+      depends_on: { 'paykit-postgres': { condition: 'service_healthy' } },
+    });
   }
 
   private mergeCommand(command: string, variables: Record<string, string>) {

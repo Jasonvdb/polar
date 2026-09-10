@@ -1,3 +1,4 @@
+import { paykitService } from 'lib/paykit/paykitService';
 import * as electron from 'electron';
 import * as log from 'electron-log';
 import { waitFor } from '@testing-library/react';
@@ -38,6 +39,7 @@ jest.mock('utils/files', () => ({
   rm: jest.fn(),
 }));
 jest.mock('utils/async');
+jest.mock('lib/paykit/paykitService');
 jest.mock('utils/network', () => ({
   ...jest.requireActual('utils/network'),
   zipNetwork: jest.fn().mockResolvedValue(undefined),
@@ -1537,6 +1539,64 @@ describe('Network model', () => {
       await expect(renameNode({ node, newName: 'asdf' })).rejects.toThrow(
         "Network with the id '999' was not found.",
       );
+    });
+  });
+  describe('Paykit lifecycle', () => {
+    const service = paykitService as jest.Mocked<typeof paykitService>;
+    const environment = {
+      apiVersion: 1 as const,
+      environmentId: '9b03a782-e2f3-4b7a-8ef5-429628921ee2',
+      servicePort: 30091,
+    };
+    beforeEach(() => {
+      const network = getNetwork(1, 'Paykit', Status.Stopped);
+      network.nodes = { bitcoin: [], lightning: [], tap: [] };
+      store.getActions().network.setNetworks([network]);
+      store
+        .getActions()
+        .designer.setChart({ id: 1, chart: initChartFromNetwork(network) });
+      store.getActions().designer.setActiveId(1);
+    });
+    it('enables only a stopped network and persists public config', async () => {
+      service.provision.mockResolvedValue(environment);
+      await expect(store.getActions().network.enablePaykit(1)).resolves.toEqual(
+        environment,
+      );
+      expect(firstNetwork().paykit).toEqual(environment);
+      expect(dockerServiceMock.saveNetworks).toHaveBeenCalled();
+      expect(dockerServiceMock.saveComposeFile).toHaveBeenCalledWith(
+        expect.objectContaining({ paykit: environment }),
+      );
+      store.getActions().network.setStatus({ id: 1, status: Status.Started });
+      await expect(store.getActions().network.enablePaykit(1)).rejects.toThrow('Stop');
+    });
+    it('waits for Paykit readiness even when there are no Bitcoin nodes', async () => {
+      store.getActions().network.setPaykit({ id: 1, environment });
+      service.state
+        .mockRejectedValueOnce(new Error('starting'))
+        .mockResolvedValueOnce({ ready: true } as any);
+      await store.getActions().network.start(1);
+      expect(service.checkPort).toHaveBeenCalledWith(1);
+      expect(service.state).toHaveBeenCalledTimes(2);
+      expect(firstNetwork().status).toBe(Status.Started);
+    });
+    it('cleans partially started services and reports a failed readiness gate', async () => {
+      store.getActions().network.setPaykit({ id: 1, environment });
+      service.state.mockRejectedValue(new Error('offline'));
+      await expect(store.getActions().network.start(1)).rejects.toThrow(
+        'did not become ready',
+      );
+      expect(firstNetwork().status).toBe(Status.Error);
+      expect(dockerServiceMock.stop).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 1 }),
+      );
+    });
+    it('blocks Paykit export before opening a file dialog', async () => {
+      store.getActions().network.setPaykit({ id: 1, environment });
+      await expect(store.getActions().network.exportNetwork({ id: 1 })).rejects.toThrow(
+        'Backup and Recovery',
+      );
+      expect(dialogMock.showSaveDialog).not.toHaveBeenCalled();
     });
   });
 });

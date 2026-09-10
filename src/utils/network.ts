@@ -35,7 +35,7 @@ import {
 } from 'types';
 import { dataPath, networksPath, nodePath } from './config';
 import { BasePorts, DOCKER_REPO, dockerConfigs } from './constants';
-import { read, rm } from './files';
+import { exists, read, rm } from './files';
 import { migrateNetworksFile } from './migrations';
 import { getName } from './names';
 import { range } from './numbers';
@@ -1042,6 +1042,16 @@ export const importNetworkFromZip = async (
   // read and parse the export.json file
   const exportFilePath = join(tmpDir, 'export.json');
   const parsed = JSON.parse(await read(exportFilePath));
+  if (
+    parsed.network?.paykit ||
+    (await exists(join(tmpDir, 'volumes', 'paykit'))) ||
+    (await exists(join(tmpDir, 'volumes', 'paykit-postgres')))
+  ) {
+    await rm(tmpDir);
+    throw new Error(
+      'Paykit archives require validated Backup and Recovery; importing them is not supported yet.',
+    );
+  }
   // validate the network and chart
   if (!(parsed.network && isNetwork(parsed.network))) {
     throw new Error(`${exportFilePath} did not contain a valid network`);
@@ -1134,6 +1144,10 @@ export const zipNetwork = async (
   chart: IChart,
   zipPath: string,
 ): Promise<void> => {
+  if (network.paykit)
+    throw new Error(
+      'Paykit network export requires Backup and Recovery, which is not available yet.',
+    );
   // save the network and chart to export.json in the network's folder
   const content = JSON.stringify({ network, chart });
   await writeFile(join(network.path, 'export.json'), content);

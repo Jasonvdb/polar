@@ -1,3 +1,5 @@
+import { PaykitEnvironment } from 'shared/paykitApi';
+import { paykitService } from 'lib/paykit/paykitService';
 import { ipcRenderer, remote, SaveDialogOptions } from 'electron';
 import { info } from 'electron-log';
 import { push } from 'connected-react-router';
@@ -63,6 +65,14 @@ export interface AutoMinerModel {
 
 export interface NetworkModel {
   networks: Network[];
+  setPaykit: Action<NetworkModel, { id: number; environment: PaykitEnvironment }>;
+  enablePaykit: Thunk<
+    NetworkModel,
+    number,
+    StoreInjections,
+    RootModel,
+    Promise<PaykitEnvironment>
+  >;
   networkById: Computed<NetworkModel, (id?: string | number) => Network>;
   setNetworks: Action<NetworkModel, Network[]>;
   updateNodePorts: Action<NetworkModel, { id: number; ports: OpenPorts }>;
@@ -253,6 +263,30 @@ const networkModel: NetworkModel = {
     return network;
   }),
   // reducer actions (mutations allowed thx to immer)
+  setPaykit: action((state, { id, environment }) => {
+    const network = state.networks.find(n => n.id === id);
+    if (!network) throw new Error('Unknown network');
+    network.paykit = environment;
+  }),
+  enablePaykit: thunk(async (actions, id, { getState, injections }) => {
+    const network = getState().networkById(id);
+    if (network.status !== Status.Stopped)
+      throw new Error('Stop the network before enabling Paykit');
+    if (
+      [...network.nodes.bitcoin, ...network.nodes.lightning, ...network.nodes.tap].some(
+        node => ['paykit', 'paykit-postgres'].includes(node.name),
+      )
+    ) {
+      throw new Error(
+        'Rename nodes named paykit or paykit-postgres before enabling Paykit',
+      );
+    }
+    const environment = await paykitService.provision(id);
+    actions.setPaykit({ id, environment });
+    await actions.save();
+    await injections.dockerService.saveComposeFile(getState().networkById(id));
+    return environment;
+  }),
   setNetworks: action((state, networks) => {
     state.networks = networks;
   }),
@@ -761,8 +795,31 @@ const networkModel: NetworkModel = {
           await actions.save();
           await injections.dockerService.saveComposeFile(network);
         }
+        if (network.paykit) {
+          await paykitService.checkPort(network.id);
+          // Regenerate for installed service versions and current credential locations.
+          await injections.dockerService.saveComposeFile(network);
+        }
         // start the docker containers
         await injections.dockerService.start(network);
+        if (network.paykit) {
+          let ready = false;
+          for (let attempt = 0; attempt < 60; attempt++) {
+            if (getState().networkById(network.id).status !== Status.Starting)
+              throw new Error('Paykit startup cancelled');
+            try {
+              ready = (await paykitService.state(network.id)).ready;
+            } catch {
+              /* service is still starting */
+            }
+            if (ready) break;
+            await delay(1000);
+          }
+          if (!ready)
+            throw new Error(
+              'Paykit environment did not become ready. Check the service image and logs, then retry.',
+            );
+        }
         // update the list of docker images pulled since new images may be pulled
         await getStoreActions().app.getDockerImages();
         // set the status of only the network to Started
@@ -774,6 +831,16 @@ const networkModel: NetworkModel = {
           ...network.nodes.tap,
         ]);
       } catch (e: any) {
+        if (network.paykit) {
+          try {
+            await injections.dockerService.stop(network);
+          } catch (cleanupError) {
+            info(
+              'Paykit startup cleanup failed; stop the network before retrying',
+              cleanupError,
+            );
+          }
+        }
         actions.setStatus({ id, status: Status.Error });
         info(`unable to start network '${network.name}'`, e.message);
         throw e;
@@ -806,7 +873,8 @@ const networkModel: NetworkModel = {
       n =>
         n.status === Status.Started ||
         n.status === Status.Stopping ||
-        n.status === Status.Locked,
+        n.status === Status.Locked ||
+        (!!n.paykit && n.status !== Status.Stopped),
     );
     if (networks.length === 0) {
       ipcRenderer.send('docker-shut-down');
@@ -819,7 +887,8 @@ const networkModel: NetworkModel = {
         n =>
           n.status === Status.Started ||
           n.status === Status.Stopping ||
-          n.status === Status.Locked,
+          n.status === Status.Locked ||
+          (!!n.paykit && n.status !== Status.Stopped),
       );
       if (networks.length === 0) {
         await actions.save();
@@ -999,6 +1068,7 @@ const networkModel: NetworkModel = {
       }
     }
     await rm(network.path);
+    if (network.paykit) await paykitService.remove(networkId);
     const newNetworks = networks.filter(n => n.id !== networkId);
     actions.setNetworks(newNetworks);
     getStoreActions().designer.removeChart(networkId);
@@ -1016,6 +1086,10 @@ const networkModel: NetworkModel = {
       const { networks } = getState();
       const network = networks.find(n => n.id === id);
       if (!network) throw new Error(l('networkByIdErr', { networkId: id }));
+      if (network.paykit)
+        throw new Error(
+          'Paykit network export requires Backup and Recovery, which is not available yet.',
+        );
       // only export stopped networks
       if (![Status.Error, Status.Stopped].includes(network.status)) {
         throw new Error(l('exportBadStatus'));
@@ -1138,6 +1212,12 @@ const networkModel: NetworkModel = {
   }),
   renameNode: thunk(
     async (actions, { node, newName }, { getState, injections, getStoreActions }) => {
+      if (
+        getState().networkById(node.networkId).paykit &&
+        ['paykit', 'paykit-postgres'].includes(newName)
+      ) {
+        throw new Error('This node name is reserved for Paykit services');
+      }
       const wasStarted = node.status === Status.Started || node.status === Status.Locked;
 
       if (wasStarted) {
