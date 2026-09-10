@@ -70,22 +70,44 @@ pub async fn run(mut runtime: Runtime) -> anyhow::Result<()> {
     let mut pending_input = Vec::new();
     emit(&mut stdout, &runtime, None, None, None).await?;
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+    let shutdown = crate::receiver::shutdown();
+    tokio::pin!(shutdown);
     loop {
         tokio::select! {
+            biased;
+            result = &mut shutdown => return result,
             result=read_frame_into(&mut stdin,&mut pending_input,512*1024)=>{
                 let Some(bytes)=result? else {return Ok(());};
                 let command:Command=serde_json::from_slice(&bytes)?;
                 let id=command.command_id;
-                // The outer shutdown select cancels this future. Incomplete intent remains durable.
-                let result=runtime.execute(command).await?;
-                let (value,error)=match result {Ok(v)=>(Some(v),None),Err(e)=>(None,Some(e))};
+                let (result, stopping)=complete_work(runtime.execute(command), &mut shutdown).await?;
+                let (value,error)=match result? {Ok(v)=>(Some(v),None),Err(e)=>(None,Some(e))};
                 emit(&mut stdout,&runtime,Some(id),value,error).await?;
+                if stopping { return Ok(()); }
             }
             _=interval.tick()=>{
                 let before=runtime.view();
-                runtime.background().await?;
+                let (result, stopping)=complete_work(runtime.background(), &mut shutdown).await?;
+                result?;
                 if before != runtime.view() {emit(&mut stdout,&runtime,None,None,None).await?;}
+                if stopping { return Ok(()); }
             }
+        }
+    }
+}
+// Never drop an SDK operation at a planned stop: its awaited completion releases
+// persisted peer leases and commits the command's final result before process exit.
+async fn complete_work<T>(
+    work: impl std::future::Future<Output = T>,
+    shutdown: &mut (impl std::future::Future<Output = anyhow::Result<()>> + Unpin),
+) -> anyhow::Result<(T, bool)> {
+    tokio::pin!(work);
+    tokio::select! {
+        result = &mut work => Ok((result, false)),
+        stopped = shutdown => {
+            let result = work.await;
+            stopped?;
+            Ok((result, true))
         }
     }
 }
@@ -112,6 +134,111 @@ async fn emit<W: AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn shutdown_drains_inflight_work_before_releasing_receiver_storage() {
+        use crate::storage::{ReceiverStorage, Vault};
+        use paykit_sdk::storage::StorageAdapter;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(
+            ReceiverStorage::open(Vault::new(dir.path().into(), [9; 32], "drain".into()).unwrap())
+                .unwrap(),
+        );
+        let owner =
+            paykit_sdk::PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = paykit_sdk::PaykitReceiverPath::new("peer/wallet").unwrap();
+        let lease = storage
+            .transaction(|tx| {
+                Ok(tx
+                    .claim_peer_link_operation(
+                        &owner,
+                        &path,
+                        chrono::Utc::now(),
+                        chrono::Utc::now() + chrono::Duration::seconds(60),
+                    )
+                    .unwrap())
+            })
+            .await
+            .unwrap();
+        let (release, held) = tokio::sync::oneshot::channel::<()>();
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let (observed_stop, stop_observed) = tokio::sync::oneshot::channel::<()>();
+        let releases = Arc::new(AtomicUsize::new(0));
+        let release_count = releases.clone();
+        let sdk_storage = storage.clone();
+        let work = async move {
+            held.await.unwrap();
+            sdk_storage
+                .transaction(|tx| {
+                    tx.release_peer_link_operation(
+                        &lease.counterparty,
+                        &lease.counterparty_receiver_path,
+                        lease.lease_id,
+                    );
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            release_count.fetch_add(1, Ordering::SeqCst);
+            "committed result"
+        };
+        let task = tokio::spawn(async move {
+            let shutdown = async {
+                stopped.await.unwrap();
+                observed_stop.send(()).unwrap();
+                Ok(())
+            };
+            tokio::pin!(shutdown);
+            complete_work(work, &mut shutdown).await.unwrap()
+        });
+        stop.send(()).unwrap();
+        // The stop signal must not finish the worker or release its persistent
+        // lease while the awaited transport/commit is still held.
+        stop_observed.await.unwrap();
+        assert!(!task.is_finished());
+        assert!(storage
+            .transaction(|tx| Ok(tx.peer_link_operation_lease(&owner, &path).is_some()))
+            .await
+            .unwrap());
+        release.send(()).unwrap();
+        assert_eq!(task.await.unwrap(), ("committed result", true));
+        assert_eq!(releases.load(Ordering::SeqCst), 1);
+        drop(storage);
+        let reopened =
+            ReceiverStorage::open(Vault::new(dir.path().into(), [9; 32], "drain".into()).unwrap())
+                .unwrap();
+        assert!(reopened
+            .transaction(|tx| Ok(tx.peer_link_operation_lease(&owner, &path).is_none()))
+            .await
+            .unwrap());
+    }
+    #[tokio::test]
+    async fn completed_work_keeps_shutdown_listener_for_the_next_operation() {
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let shutdown = async {
+            stopped.await.unwrap();
+            Ok(())
+        };
+        tokio::pin!(shutdown);
+        assert_eq!(
+            complete_work(async { 1 }, &mut shutdown).await.unwrap(),
+            (1, false)
+        );
+        stop.send(()).unwrap();
+        let result = complete_work(
+            async {
+                tokio::task::yield_now().await;
+                2
+            },
+            &mut shutdown,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, (2, true));
+    }
     #[test]
     fn stdio_child_shutdown_probe() {
         if std::env::var("PAYKIT_STDIO_SHUTDOWN_PROBE").as_deref() != Ok("1") {

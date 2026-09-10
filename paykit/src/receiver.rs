@@ -17,6 +17,17 @@ use std::{
 use uuid::Uuid;
 
 pub const CLIENT_ID: &str = "polar-paykit.local";
+/// Bound individual HTTP requests inside SDK operations so their cleanup can finish.
+pub(crate) fn pubky_client() -> pubky::Result<pubky::Pubky> {
+    Ok(pubky::Pubky::with_client(pubky_transport()?))
+}
+fn pubky_transport() -> pubky::Result<pubky::PubkyHttpClient> {
+    Ok(pubky::PubkyHttpClient::builder()
+        .testnet()
+        .request_timeout(std::time::Duration::from_secs(15))
+        .build()?)
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ReceiverSecrets {
     pub owner: [u8; 32],
@@ -43,7 +54,7 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
         paykit_sdk::PublicContactSharingPolicy::ConfiguredPublicNamespace;
     let receiver_path = sdk_config.receiver_path.clone();
     let noise_public_key = ReceiverNoiseSecretKey::new(secrets.noise).public_key();
-    let bootstrap = PubkySessionBootstrap::with_pubky(pubky::Pubky::testnet()?, CLIENT_ID)?
+    let bootstrap = PubkySessionBootstrap::with_pubky(pubky_client()?, CLIENT_ID)?
         .with_auth_relay("http://127.0.0.1:15412/inbox")?;
     let owner = PubkyLocalSecretKey::new(secrets.owner);
     let noise = ReceiverNoiseSecretKey::new(secrets.noise);
@@ -117,7 +128,7 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
     runtime.refresh().await?;
     println!("{}", serde_json::json!({"ready":true,"receiverId":id}));
     std::io::stdout().flush()?;
-    tokio::select! {result=crate::receiver_ipc::run(runtime)=>result, result=shutdown()=>result}
+    crate::receiver_ipc::run(runtime).await
 }
 pub async fn shutdown() -> anyhow::Result<()> {
     #[cfg(unix)]
@@ -142,7 +153,7 @@ impl PubkySessionProvider for SessionProvider {
     }
     async fn load_public_storage(&self) -> paykit_sdk::Result<Option<pubky::PublicStorage>> {
         Ok(Some(
-            pubky::Pubky::testnet()
+            pubky_client()
                 .map_err(|_| session_error())?
                 .public_storage(),
         ))
@@ -182,7 +193,7 @@ fn session_error() -> paykit_sdk::PaykitSdkError {
 pub async fn inspect_marker(owner: &str, path: &str) -> anyhow::Result<serde_json::Value> {
     let owner = paykit_sdk::PubkyPublicKey::new(owner)?;
     let path = PaykitReceiverPath::new(path)?;
-    let client = pubky::Pubky::testnet()?;
+    let client = pubky_client()?;
     let marker = paykit_lib::get_paykit_receiver_marker(
         &client.public_storage(),
         &owner.to_public_key()?,
@@ -211,13 +222,13 @@ pub async fn diagnose_session(config: Config, id: Uuid) -> anyhow::Result<serde_
     let noise = ReceiverNoiseSecretKey::new(secrets.noise);
     let capabilities = PaykitSdkConfig::new(PaykitReceiverPath::new(secrets.path)?)
         .required_session_capabilities();
-    let bootstrap = PubkySessionBootstrap::with_pubky(pubky::Pubky::testnet()?, CLIENT_ID)?;
+    let bootstrap = PubkySessionBootstrap::with_pubky(pubky_client()?, CLIENT_ID)?;
     let valid = bootstrap
         .import_session(secret, Some(owner.clone()), noise.clone(), &capabilities)
         .await?;
     anyhow::ensure!(valid.public_key == owner.public_key(), "owner mismatch");
     let wrong_client =
-        PubkySessionBootstrap::with_pubky(pubky::Pubky::testnet()?, "other.polar-paykit.local")?;
+        PubkySessionBootstrap::with_pubky(pubky_client()?, "other.polar-paykit.local")?;
     anyhow::ensure!(
         wrong_client
             .import_session(secret, Some(owner.clone()), noise.clone(), &capabilities)
@@ -285,7 +296,7 @@ pub async fn inspect_contact(
     let peer = paykit_sdk::PubkyPublicKey::new(peer)?;
     let peer_path = PaykitReceiverPath::new(peer_path)?;
     let path = config.public_contact_path(&peer, &peer_path);
-    let storage = pubky::Pubky::testnet()?.public_storage();
+    let storage = pubky_client()?.public_storage();
     let resource = format!("pubky://{owner}{path}");
     if !storage.exists(resource.as_str()).await? {
         return Ok(serde_json::json!({"exists":false}));
@@ -331,7 +342,7 @@ pub async fn inspect_avatar(
         "invalid blob name"
     );
     let uri = format!("pubky://{owner}/pub/paykit/v0/{path}/blobs/{blob_name}");
-    let storage = pubky::Pubky::testnet()?.public_storage();
+    let storage = pubky_client()?.public_storage();
     if !storage.exists(uri.as_str()).await? {
         return Ok(serde_json::json!({"exists":false}));
     }
@@ -352,7 +363,7 @@ pub async fn inspect_payment_endpoints(
 ) -> anyhow::Result<serde_json::Value> {
     let owner = paykit_sdk::PubkyPublicKey::new(owner)?.to_public_key()?;
     let path = PaykitReceiverPath::new(path)?;
-    let storage = pubky::Pubky::testnet()?.public_storage();
+    let storage = pubky_client()?.public_storage();
     let mut endpoints = vec![];
     for method in [crate::payment_model::ONCHAIN, crate::payment_model::BOLT11] {
         if let Some(payload) = paykit_lib::get_payment_endpoint(
@@ -367,4 +378,53 @@ pub async fn inspect_payment_endpoints(
         }
     }
     Ok(serde_json::json!({"paymentEndpoints":endpoints}))
+}
+
+#[cfg(test)]
+mod transport_tests {
+    #[tokio::test]
+    async fn configured_pubky_transport_times_out_an_actual_blocked_http_request() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                axum::Router::new().route(
+                    "/inbox/test",
+                    axum::routing::post(move || {
+                        let observed = observed.clone();
+                        async move {
+                            observed.fetch_add(1, Ordering::SeqCst);
+                            std::future::pending::<String>().await
+                        }
+                    }),
+                ),
+            )
+            .await
+            .unwrap();
+        });
+        let channel = pubky::HttpRelayInboxChannel::new(
+            format!("http://{address}/inbox").parse().unwrap(),
+            "test".into(),
+        )
+        .unwrap();
+        let client = super::pubky_transport().unwrap();
+        let before = std::time::Instant::now();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            channel.produce(&client, b"test"),
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+        assert!(outcome.is_ok_and(|result| result.is_err()));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(before.elapsed() >= std::time::Duration::from_secs(14));
+    }
 }

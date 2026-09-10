@@ -123,16 +123,9 @@ impl Runtime {
             },
         );
         self.save()?; // Intent reaches durable receiver storage before any SDK side effect.
-        let timed =
-            tokio::time::timeout(std::time::Duration::from_secs(60), self.dispatch(&command)).await;
-        let uncertain = timed.is_err();
-        let result = timed.unwrap_or_else(|_| Err(anyhow::anyhow!("receiver operation timed out")));
-        if uncertain && command.command.starts_with("link.") {
-            let peer: PeerInput = serde_json::from_value(command.input.clone())?;
-            self.state
-                .uncertain_peers
-                .push((peer.peer_public_key, peer.peer_receiver_path));
-        }
+
+        // Transport deadlines return through the SDK, allowing durable lease cleanup.
+        let result = self.dispatch(&command).await;
         self.refresh().await?;
         let public = result.map_err(|error| {
             error
@@ -527,11 +520,7 @@ impl Runtime {
     }
     pub async fn background(&mut self) -> anyhow::Result<()> {
         let before = self.state.view.clone();
-        let result =
-            match tokio::time::timeout(std::time::Duration::from_secs(30), self.sync()).await {
-                Ok(result) => result,
-                Err(_) => Err(anyhow::anyhow!("background sync timed out")),
-            };
+        let result = self.sync().await;
         self.state.view.last_error = result.err().map(|_| FAILURE.into());
         self.refresh().await?;
         if self.state.view != before {
@@ -728,7 +717,7 @@ fn ensure_marker_path(
 
 /// Stream the public blob with a hard allocation bound; no arbitrary HTTP or local path.
 pub(crate) async fn fetch_avatar(uri: &str) -> anyhow::Result<Option<Vec<u8>>> {
-    let storage = pubky::Pubky::testnet()?.public_storage();
+    let storage = crate::receiver::pubky_client()?.public_storage();
     let mut response = storage.get(uri).await?;
     if response.status().as_u16() == 404 {
         return Ok(None);

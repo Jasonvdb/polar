@@ -210,19 +210,16 @@ impl Supervisor {
             .ok_or_else(|| anyhow::anyhow!("receiver is stopped"))?;
         anyhow::ensure!(child.child.try_wait()?.is_none(), "receiver exited");
         crate::receiver_ipc::write_frame(&mut child.input, command).await?;
-        let frame = tokio::time::timeout(Duration::from_secs(90), async {
-            loop {
-                let response = child
-                    .responses
-                    .recv()
-                    .await
-                    .ok_or_else(|| anyhow::anyhow!("receiver IPC closed"))?;
-                if response.command_id == Some(command.command_id) {
-                    return Ok::<_, anyhow::Error>(response);
-                }
+        let frame = loop {
+            let response = child
+                .responses
+                .recv()
+                .await
+                .ok_or_else(|| anyhow::anyhow!("receiver IPC closed"))?;
+            if response.command_id == Some(command.command_id) {
+                break response;
             }
-        })
-        .await??;
+        };
         if let Some(error) = frame.error {
             return Err(PublicError::new("receiver_operation_failed", &error).into());
         }
@@ -473,7 +470,7 @@ impl Supervisor {
                     anyhow::bail!("receiver termination failed");
                 }
             }
-            tokio::time::timeout(Duration::from_secs(10), child.child.wait()).await??;
+            child.child.wait().await?;
             if let Some(child) = self.children.remove(&id) {
                 child.reader.abort();
             }
