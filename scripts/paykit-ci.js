@@ -96,7 +96,9 @@ function assertRunningReceivers(receivers) {
 }
 
 const PRIVATE_DIAGNOSTIC_BYTES = 64 * 1024;
-function captureFailureDiagnostics({ root, runId, resources, inspect, stderr }) {
+const PRIVATE_RECEIVER_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;
+const PRIVATE_RECEIVER_DIAGNOSTIC_NAME = 'receiver-diagnostics.json';
+function captureFailureDiagnostics({ root, runId, resources, inspect, stderr, receiverDiagnostics }) {
   const directory = path.join(root, 'private-diagnostics');
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   fs.chmodSync(directory, 0o700);
@@ -115,8 +117,20 @@ function captureFailureDiagnostics({ root, runId, resources, inspect, stderr }) 
     const file = `${environment.suffix}-service-stderr.log`;
     const destination = path.join(directory, file);
     fs.writeFileSync(destination, retained, { mode: 0o600 }); fs.chmodSync(destination, 0o600);
+    let receiver = { available: false };
+    if (receiverDiagnostics) {
+      try {
+        const diagnosticBytes = Buffer.from(receiverDiagnostics(id));
+        const diagnosticRetained = diagnosticBytes.subarray(Math.max(0, diagnosticBytes.length - PRIVATE_RECEIVER_DIAGNOSTIC_BYTES));
+        const diagnosticFile = `${environment.suffix}-${PRIVATE_RECEIVER_DIAGNOSTIC_NAME}`;
+        const diagnosticDestination = path.join(directory, diagnosticFile);
+        fs.writeFileSync(diagnosticDestination, diagnosticRetained, { mode: 0o600 }); fs.chmodSync(diagnosticDestination, 0o600);
+        receiver = { available: true, file: diagnosticFile, bytes: diagnosticRetained.length,
+          truncated: diagnosticBytes.length > diagnosticRetained.length, sha256: createHash('sha256').update(diagnosticRetained).digest('hex') };
+      } catch (_) {}
+    }
     return { suffix: environment.suffix, containerId: id, state, stderr: { file, bytes: retained.length,
-      truncated: bytes.length > retained.length, sha256: createHash('sha256').update(retained).digest('hex') } };
+      truncated: bytes.length > retained.length, sha256: createHash('sha256').update(retained).digest('hex') }, receiver };
   });
 }
 function captureFailureDiagnosticsSafely(options) {
@@ -189,6 +203,7 @@ function start() {
     const service = docker('run', '-d', '--init', '--name', `${prefix}-service`, '--label', label, '--network', prefix, '--user', uid,
       '-p', '127.0.0.1::10090', '-v', `${secrets}:/run/paykit:ro`, '-v', `${path.join(data, 'state')}:/data`,
       '-e', `PAYKIT_ENVIRONMENT_ID=${environmentId}`, '-e', 'PAYKIT_DATA_DIR=/data', '-e', 'PAYKIT_KEY_FILE=/run/paykit/master-key',
+      '-e', `PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS=${PRIVATE_RECEIVER_DIAGNOSTIC_NAME}`,
       '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', '-e', 'PAYKIT_WALLET_CONFIG_FILE=/run/paykit/wallet-config.json', image).trim();
     entry.service = service; recordContainer(service);
     const receiptFixture = createReceiptFixture({ data, secrets, environmentId, runId, uid, docker,
@@ -229,6 +244,11 @@ function start() {
             const result = spawnSync('docker', ['logs', '--tail', '400', id], { encoding: null, timeout: 10000, killSignal: 'SIGTERM', maxBuffer: 256 * 1024, stdio: ['ignore', 'ignore', 'pipe'] });
             if (result.error || result.status !== 0) throw new Error('Service stderr capture failed');
             return result.stderr || Buffer.alloc(0);
+          },
+          receiverDiagnostics: id => {
+            const result = spawnSync('docker', ['exec', id, 'cat', `/data/${PRIVATE_RECEIVER_DIAGNOSTIC_NAME}`], { encoding: null, timeout: 10000, killSignal: 'SIGTERM', maxBuffer: PRIVATE_RECEIVER_DIAGNOSTIC_BYTES + 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+            if (result.error || result.status !== 0) throw new Error('Receiver diagnostic capture failed');
+            return result.stdout || Buffer.alloc(0);
           } });
       throw error;
     }
@@ -305,7 +325,7 @@ function start() {
     },
   });
 }
-module.exports = { validateReport, requiredStages, redactedReceiverStatuses, assertRunningReceivers, captureFailureDiagnostics, captureFailureDiagnosticsSafely, PRIVATE_DIAGNOSTIC_BYTES };
+module.exports = { validateReport, requiredStages, redactedReceiverStatuses, assertRunningReceivers, captureFailureDiagnostics, captureFailureDiagnosticsSafely, PRIVATE_DIAGNOSTIC_BYTES, PRIVATE_RECEIVER_DIAGNOSTIC_BYTES, PRIVATE_RECEIVER_DIAGNOSTIC_NAME };
 if (require.main === module) {
   if (process.argv[2] === '--verify-report') {
     try { validateReport(process.argv[3]); console.log('Required Paykit completion report verified.'); }

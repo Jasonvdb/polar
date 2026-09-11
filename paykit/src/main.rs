@@ -10,13 +10,22 @@ use std::{sync::Arc, time::Duration};
 
 #[tokio::main]
 async fn main() {
-    if run().await.is_err() {
+    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if let Err(error) = run(&args).await {
+        if private_receiver_error_enabled(&args, |name| std::env::var(name).ok()) {
+            eprintln!("Receiver private diagnostic: {error:#}");
+        }
         eprintln!("Polar Paykit operation failed. Check service readiness and persistent state.");
         std::process::exit(1);
     }
 }
-async fn run() -> anyhow::Result<()> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+fn private_receiver_error_enabled(args: &[String], env: impl Fn(&str) -> Option<String>) -> bool {
+    args.first().map(String::as_str) == Some("receiver")
+        && env("PAYKIT_PRIVATE_RECEIVER_CHILD").as_deref() == Some("1")
+        && env("PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS").as_deref()
+            == Some("receiver-diagnostics.json")
+}
+async fn run(args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("serve") => serve().await,
         Some("diagnose-session") => {
@@ -82,13 +91,14 @@ async fn run() -> anyhow::Result<()> {
             )
             .await
         }
-        Some("state") | Some("command") | Some("operation") | Some("health") => cli(&args).await,
+        Some("state") | Some("command") | Some("operation") | Some("health") => cli(args).await,
         _ => {
             eprintln!("Usage: polar-paykit serve | state | health | operation UUID | command NAME JSON [COMMAND_UUID]\nCLI: PAYKIT_API_URL and PAYKIT_TOKEN_FILE; operations wait up to 120 seconds.");
             Ok(())
         }
     }
 }
+
 async fn serve() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     Config::bind_database()?;
@@ -131,6 +141,7 @@ async fn serve() -> anyhow::Result<()> {
     drop(testnet);
     Ok(())
 }
+
 async fn cli(args: &[String]) -> anyhow::Result<()> {
     let base = std::env::var("PAYKIT_API_URL")?;
     let url = reqwest::Url::parse(&base)?;
@@ -216,5 +227,37 @@ async fn cli(args: &[String]) -> anyhow::Result<()> {
             "operation wait timed out; poll the existing operation"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::private_receiver_error_enabled;
+
+    #[test]
+    fn detailed_receiver_error_requires_exact_private_child_contract() {
+        let receiver = vec!["receiver".to_string(), uuid::Uuid::nil().to_string()];
+        let enabled = |name: &str| match name {
+            "PAYKIT_PRIVATE_RECEIVER_CHILD" => Some("1".into()),
+            "PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS" => Some("receiver-diagnostics.json".into()),
+            _ => None,
+        };
+        assert!(private_receiver_error_enabled(&receiver, enabled));
+        assert!(!private_receiver_error_enabled(&["serve".into()], enabled));
+        assert!(!private_receiver_error_enabled(
+            &receiver,
+            |name| match name {
+                "PAYKIT_PRIVATE_RECEIVER_CHILD" => Some("1".into()),
+                "PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS" => Some("application.cbor".into()),
+                _ => None,
+            }
+        ));
+        assert!(!private_receiver_error_enabled(
+            &receiver,
+            |name| match name {
+                "PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS" => Some("receiver-diagnostics.json".into()),
+                _ => None,
+            }
+        ));
     }
 }
