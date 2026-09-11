@@ -101,14 +101,14 @@ Receiver processes now own a bounded stdin/stdout command channel. The superviso
 
 The v1 workspace commands are:
 
-| Commands                                                                                           | Input                                                      |
-| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Commands                                                                                                                   | Input                                                      |
+| -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `link.prepareRecovery`, `link.initiate`, `link.accept`, `link.advance`, `link.block`, `link.unblock`, `link.sendEmptyList` | `{receiverId,peerPublicKey,peerReceiverPath}`              |
-| `delivery.pause`, `delivery.resume`, `delivery.sync`, `profile.delete`                             | `{receiverId}`                                             |
-| `profile.publish`                                                                                  | `{receiverId,displayName,about,avatarBase64?,avatarMime?}` |
-| `profile.fetch`, `contact.publish`, `contact.unpublish`                                            | `{receiverId,peerPublicKey,peerReceiverPath}`              |
-| `contact.save`                                                                                     | `{receiverId,peerPublicKey,label,receiverPaths}`           |
-| `contact.remove`, `contact.discover`                                                               | `{receiverId,peerPublicKey}`                               |
+| `delivery.pause`, `delivery.resume`, `delivery.sync`, `profile.delete`                                                     | `{receiverId}`                                             |
+| `profile.publish`                                                                                                          | `{receiverId,displayName,about,avatarBase64?,avatarMime?}` |
+| `profile.fetch`, `contact.publish`, `contact.unpublish`                                                                    | `{receiverId,peerPublicKey,peerReceiverPath}`              |
+| `contact.save`                                                                                                             | `{receiverId,peerPublicKey,label,receiverPaths}`           |
+| `contact.remove`, `contact.discover`                                                                                       | `{receiverId,peerPublicKey}`                               |
 
 Peer keys must be canonical Pubky z-base32 public keys. Receiver paths follow the pinned SDK grammar: a 1–64 character lowercase ASCII letter/digit/hyphen app segment other than `private`, followed by `/wallet` or `/server`. Discovery only lists real public receiver markers; it never saves contacts or accepts a link. Same-owner encrypted links are rejected.
 
