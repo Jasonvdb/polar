@@ -28,6 +28,16 @@ test('two receiver losses retain distinct rollback copies', t => {
   assert.equal(rollbacks.length, 2); assert.equal(new Set(rollbacks).size, 2);
   assert.deepEqual(events.map(value => value.active), [true, false, true, false]);
 });
+test('receiver state loss accepts canonical UUIDv5 IDs and rejects malformed paths', t => {
+  const data = temporary(t); const stateRoot = path.join(data, 'state');
+  const receiverId = '0d05e0e2-35d6-52ec-bc56-538421b258d3';
+  const source = path.join(stateRoot, 'receivers', receiverId); fs.mkdirSync(source, { recursive: true });
+  const complete = receiverStateLoss({ stateRoot, data, receiverId, recordStorage: () => {} });
+  fs.mkdirSync(source); complete();
+  for (const malformed of ['not-a-uuid', '../receivers/123e4567-e89b-42d3-a456-426614174000', '123e4567-e89b-62d3-a456-426614174000']) {
+    assert.throws(() => receiverStateLoss({ stateRoot, data, receiverId: malformed, recordStorage: () => {} }));
+  }
+});
 test('exact payment commit failure leaves SDK and original ciphertext untouched and restores in finally', t => {
   const root = temporary(t); const receiverId = randomUUID();
   const directory = path.join(root, 'receivers', receiverId); fs.mkdirSync(directory, { recursive: true });

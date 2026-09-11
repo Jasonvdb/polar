@@ -461,7 +461,7 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
 }
 
 function receiverStateLoss({ stateRoot, data, receiverId, recordStorage }) {
-  assert.match(receiverId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.match(receiverId, uuid);
   const parent = path.join(stateRoot, 'receivers'); const source = path.join(parent, receiverId);
   const rollbackRoot = path.join(data, 'backup-fixture-rollbacks'); mkdir(rollbackRoot);
   const rollback = path.join(rollbackRoot, `${receiverId}-${randomUUID()}`);
