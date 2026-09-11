@@ -187,6 +187,7 @@ struct ReceiverBackupV1 {
     sdk: paykit_sdk::SdkBackupState,
     workspace: ciborium::Value,
     payment_adapter_state: ciborium::Value,
+    request_state: ciborium::Value,
     subscriptions: ciborium::Value,
     application_clock: ciborium::Value,
     wallet: WalletBackup,
@@ -282,6 +283,8 @@ pub async fn export_receiver(
             .map_err(|_| export_failure("workspace_state"))?,
         payment_adapter_state: ciborium::Value::serialized(&payment_state)
             .map_err(|_| export_failure("payment_state_encode"))?,
+        request_state: crate::workspace::requests::backup_request_state(&vault)
+            .map_err(|_| export_failure("request_state"))?,
         subscriptions: load_value(&vault, "subscriptions.cbor")
             .map_err(|_| export_failure("subscription_state"))?,
         application_clock: load_value(&vault, "clock.cbor")
@@ -941,6 +944,8 @@ pub async fn restore_receiver(
         .map_err(|_| backup_invalid())?;
     staging_vault
         .save("payments.cbor", &backup.payment_adapter_state)
+        .map_err(|_| backup_invalid())?;
+    crate::workspace::requests::restore_request_state(&staging_vault, &backup.request_state)
         .map_err(|_| backup_invalid())?;
     staging_vault
         .save("subscriptions.cbor", &backup.subscriptions)
@@ -1937,6 +1942,72 @@ mod tests {
             decrypt(&encrypted, b"wrong password").unwrap_err().code,
             "backup_invalid"
         );
+    }
+
+    #[test]
+    fn archive_rejects_missing_request_state() {
+        let owner = pubky::Keypair::random();
+        let noise = pubky::Keypair::random();
+        let receiver_id = Uuid::new_v4();
+        let request_state = ciborium::Value::serialized(&serde_json::json!({
+            "claims": {}, "proposals": {}, "transitions": {}, "settlements": []
+        }))
+        .unwrap();
+        let archive = ReceiverBackupV1 {
+            version: 1,
+            environment_id: Uuid::new_v4(),
+            participant_id: Uuid::new_v4(),
+            receiver_id,
+            owner_public_key: owner.public_key().z32(),
+            receiver_path: "receiver/wallet".into(),
+            noise_public_key: noise.public_key().z32(),
+            created_at: chrono::Utc::now(),
+            session: crate::receiver::ReceiverSecrets {
+                owner: owner.secret(),
+                noise: noise.secret(),
+                path: "receiver/wallet".into(),
+                session: None,
+            },
+            sdk: paykit_sdk::SdkBackupState {
+                version: paykit_sdk::SDK_BACKUP_VERSION,
+                local_receiver_path: paykit_sdk::PaykitReceiverPath::new("receiver/wallet")
+                    .unwrap(),
+                identity_state: None,
+                linked_peers: vec![],
+                contact_records: vec![],
+                public_endpoint_records: vec![],
+                payment_endpoint_reservations: vec![],
+                encrypted_link_states: vec![],
+                outbound_private_messages: vec![],
+                private_stream_items: vec![],
+                event_dedup_records: vec![],
+                receipt_access_records: vec![],
+                receipt_records: vec![],
+                receipt_issuance_records: vec![],
+                next_outbound_private_message_id: 0,
+                next_receive_batch_id: 0,
+                next_private_stream_item_id: 0,
+            },
+            workspace: ciborium::Value::Map(vec![]),
+            payment_adapter_state: ciborium::Value::Map(vec![]),
+            request_state,
+            subscriptions: ciborium::Value::Map(vec![]),
+            application_clock: ciborium::Value::Map(vec![]),
+            wallet: WalletBackup {
+                receiver_executions: vec![],
+                settlements: Default::default(),
+                anchors: vec![],
+            },
+        };
+        let mut value = ciborium::Value::serialized(&archive).unwrap();
+        let ciborium::Value::Map(fields) = &mut value else {
+            panic!("archive must serialize as a map");
+        };
+        fields.retain(|(key, _)| key.as_text() != Some("request_state"));
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&value, &mut encoded).unwrap();
+
+        assert!(ciborium::from_reader::<ReceiverBackupV1, _>(encoded.as_slice()).is_err());
     }
 
     #[test]

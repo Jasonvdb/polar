@@ -2471,7 +2471,7 @@ mod tests {
 mod payments;
 
 #[path = "request_workflow.rs"]
-mod requests;
+pub(crate) mod requests;
 
 #[path = "receipt_workflow.rs"]
 mod receipts;
