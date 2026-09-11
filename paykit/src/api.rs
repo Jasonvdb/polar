@@ -259,6 +259,67 @@ mod tests {
         assert!(!String::from_utf8_lossy(&body).contains("secret-do-not-echo"));
     }
     #[tokio::test]
+    async fn state_summarizes_large_operations_while_detail_retains_the_result() {
+        let (_dir, app, repo, _shutdown) = fixture();
+        let id = Uuid::new_v4();
+        let large = "x".repeat(4 * 1024 * 1024);
+        repo.update(|state| {
+            state.operations.push(crate::model::OperationRecord {
+                public: crate::model::Operation {
+                    id,
+                    command: "clock.set".into(),
+                    status: crate::model::OperationStatus::Succeeded,
+                    result: Some(json!({"workspace":large.clone()})),
+                    error: None,
+                },
+                request: Command {
+                    command_id: id,
+                    command: "clock.set".into(),
+                    input: json!({}),
+                },
+            });
+            Ok(())
+        })
+        .unwrap();
+
+        let state_response = app
+            .clone()
+            .oneshot(authenticated_get("/v1/state"))
+            .await
+            .unwrap();
+        assert_eq!(state_response.status(), StatusCode::OK);
+        let state_body = to_bytes(state_response.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let state: serde_json::Value = serde_json::from_slice(&state_body).unwrap();
+        assert_eq!(state["operations"][0]["id"], id.to_string());
+        assert_eq!(state["operations"][0]["command"], "clock.set");
+        assert_eq!(state["operations"][0]["status"], "succeeded");
+        assert!(state["operations"][0].get("result").is_none());
+
+        let detail_response = app
+            .oneshot(authenticated_get(&format!("/v1/operations/{id}")))
+            .await
+            .unwrap();
+        assert_eq!(detail_response.status(), StatusCode::OK);
+        let detail_body = to_bytes(detail_response.into_body(), 5 * 1024 * 1024)
+            .await
+            .unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&detail_body).unwrap();
+        assert_eq!(detail["result"]["workspace"].as_str(), Some(large.as_str()));
+        assert!(repo.snapshot().unwrap().operations[0]
+            .public
+            .result
+            .is_some());
+    }
+
+    fn authenticated_get(path: &str) -> Request<Body> {
+        Request::get(path)
+            .header("authorization", format!("Bearer {}", "a".repeat(64)))
+            .body(Body::empty())
+            .unwrap()
+    }
+    #[tokio::test]
     async fn event_replay_returns_persisted_sequence() {
         let (_dir, app, repo, _shutdown) = fixture();
         repo.update(|s| {

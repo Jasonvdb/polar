@@ -4,13 +4,13 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { randomUUID, randomBytes } = require('crypto');
-const { execFileSync } = require('child_process');
+const { randomUUID, randomBytes, createHash } = require('crypto');
+const { execFileSync, spawnSync } = require('child_process');
 const { run } = require('./paykit-scenarios');
 const { createWalletFixture } = require('./paykit-wallet-fixture');
 const { createReceiptFixture, validateReceiptEvidence } = require('./paykit-receipt-fixture');
 const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
-const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, 'complete'];
+const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, ...require('./paykit-recurring-scenarios').stages, 'complete'];
 
 function validateReport(root) {
   const report = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));
@@ -63,7 +63,16 @@ function validateReport(root) {
       assert(blocked >= 0 && restored > blocked, 'Missing confirmed guest ledger boundaries');
     }
     assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active));
+    assert.deepEqual(wallets.coreLifecycle.map(e => e.action), ['stopIntent','stopped','startIntent','started','stopIntent','stopped','startIntent','started']);
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const events = wallets.coreLifecycle.slice(cycle * 4, cycle * 4 + 4);
+      for (const event of events) { assert.equal(event.identity.id, wallets.coreContainer); assert.equal(event.identity.labels['polar-paykit.test-run'], ledger.runId); }
+      assert.deepEqual(events[0].identity, events[1].identity); assert.deepEqual(events[1].identity, events[2].identity);
+      assert.notEqual(events[2].identity.startedAt, events[3].identity.startedAt);
+      assert.deepEqual({ ...events[3].identity, startedAt: events[2].identity.startedAt }, events[2].identity);
+    }
     validateReceiptEvidence(owned.receiptEvidence, { runId: ledger.runId, environmentId: environment.environmentId });
+    require('./paykit-recurring-scenarios').validateEvidence(environment.recurringEvidence);
     assert.deepEqual(environment.stages, requiredStages);
     assert.equal(new Set(environment.participantKeys).size, 3);
     assert.equal(new Set(environment.receiverNoiseKeys).size, 4);
@@ -86,6 +95,49 @@ function assertRunningReceivers(receivers) {
   assert(statuses.length > 0 && statuses.every(r => r.status === 'running'), `Survivor receivers unavailable: ${JSON.stringify(statuses)}`);
 }
 
+const PRIVATE_DIAGNOSTIC_BYTES = 64 * 1024;
+const PRIVATE_RECEIVER_DIAGNOSTIC_BYTES = 2 * 1024 * 1024;
+const PRIVATE_RECEIVER_DIAGNOSTIC_NAME = 'receiver-diagnostics.json';
+function captureFailureDiagnostics({ root, runId, resources, inspect, stderr, receiverDiagnostics }) {
+  const directory = path.join(root, 'private-diagnostics');
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(directory, 0o700);
+  return resources.environments.filter(environment => environment.service).map(environment => {
+    const id = environment.service;
+    const recorded = resources.containers.includes(id) && resources.containerDetails.some(container => container.id === id && container.owner === runId);
+    if (!recorded || !/^[a-f0-9]{64}$/.test(id)) throw new Error('Refusing diagnostics for an unowned service container');
+    const rawState = inspect(id);
+    if (rawState.owner !== runId || rawState.id !== id) throw new Error('Service diagnostic ownership mismatch');
+    const state = { status: rawState.status, running: rawState.running === true, paused: rawState.paused === true,
+      restarting: rawState.restarting === true, oomKilled: rawState.oomKilled === true, dead: rawState.dead === true,
+      exitCode: Number.isSafeInteger(rawState.exitCode) ? rawState.exitCode : null,
+      startedAt: rawState.startedAt, finishedAt: rawState.finishedAt };
+    const bytes = Buffer.from(stderr(id));
+    const retained = bytes.subarray(Math.max(0, bytes.length - PRIVATE_DIAGNOSTIC_BYTES));
+    const file = `${environment.suffix}-service-stderr.log`;
+    const destination = path.join(directory, file);
+    fs.writeFileSync(destination, retained, { mode: 0o600 }); fs.chmodSync(destination, 0o600);
+    let receiver = { available: false };
+    if (receiverDiagnostics) {
+      try {
+        const diagnosticBytes = Buffer.from(receiverDiagnostics(id));
+        const diagnosticRetained = diagnosticBytes.subarray(Math.max(0, diagnosticBytes.length - PRIVATE_RECEIVER_DIAGNOSTIC_BYTES));
+        const diagnosticFile = `${environment.suffix}-${PRIVATE_RECEIVER_DIAGNOSTIC_NAME}`;
+        const diagnosticDestination = path.join(directory, diagnosticFile);
+        fs.writeFileSync(diagnosticDestination, diagnosticRetained, { mode: 0o600 }); fs.chmodSync(diagnosticDestination, 0o600);
+        receiver = { available: true, file: diagnosticFile, bytes: diagnosticRetained.length,
+          truncated: diagnosticBytes.length > diagnosticRetained.length, sha256: createHash('sha256').update(diagnosticRetained).digest('hex') };
+      } catch (_) {}
+    }
+    return { suffix: environment.suffix, containerId: id, state, stderr: { file, bytes: retained.length,
+      truncated: bytes.length > retained.length, sha256: createHash('sha256').update(retained).digest('hex') }, receiver };
+  });
+}
+function captureFailureDiagnosticsSafely(options) {
+  try { return captureFailureDiagnostics(options); }
+  catch (_) { return [{ captureError: 'capture_failed' }]; }
+}
+
 function start() {
   const root = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'polar-paykit-ci-'));
   const runId = randomUUID();
@@ -96,6 +148,7 @@ function start() {
   const walletFixtures = [];
   const receiptFixtures = [];
   let lastScenarioStage = 'run:started';
+  let failureDiagnostics = [];
   const image = process.env.PAYKIT_TEST_IMAGE || 'polar-paykit/service:pr2';
   const postgres = 'postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af';
   const record = () => fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(resources, null, 2));
@@ -150,6 +203,7 @@ function start() {
     const service = docker('run', '-d', '--init', '--name', `${prefix}-service`, '--label', label, '--network', prefix, '--user', uid,
       '-p', '127.0.0.1::10090', '-v', `${secrets}:/run/paykit:ro`, '-v', `${path.join(data, 'state')}:/data`,
       '-e', `PAYKIT_ENVIRONMENT_ID=${environmentId}`, '-e', 'PAYKIT_DATA_DIR=/data', '-e', 'PAYKIT_KEY_FILE=/run/paykit/master-key',
+      '-e', `PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS=${PRIVATE_RECEIVER_DIAGNOSTIC_NAME}`,
       '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', '-e', 'PAYKIT_WALLET_CONFIG_FILE=/run/paykit/wallet-config.json', image).trim();
     entry.service = service; recordContainer(service);
     const receiptFixture = createReceiptFixture({ data, secrets, environmentId, runId, uid, docker,
@@ -163,25 +217,41 @@ function start() {
     return { base, tokenFile: path.join(secrets, 'api-token'), serviceContainer: service, postgresContainer: database, walletFixture, receiptFixture };
   }
   async function work(signal) {
-    const a = await environment('a', signal);
-    const b = await environment('b', signal);
-    const reportB = await run({ ...b, signal, progress: stage => progress(`b:${stage}`) });
-    const walletSurvivorBefore = b.walletFixture.walletSnapshot();
-    const reportA = await run({ ...a, signal, progress: stage => progress(`a:${stage}`) });
-    progress('isolation:survivor-check');
-    signal.throwIfAborted();
-    const survivorBase = serviceBase(b.serviceContainer, docker);
-    progress(`isolation:survivor-endpoint:${survivorBase}`);
-    const survivor = await requestJson(`${survivorBase}/v1/state`, { headers: { authorization: `Bearer ${fs.readFileSync(b.tokenFile, 'utf8').trim()}` } }, signal);
-    assert.equal(survivor.status, 200);
-    assert.deepEqual(survivor.data.participants.map(p => p.publicKey), reportB.participantKeys);
-    try { assertRunningReceivers(survivor.data.receivers); }
-    catch (error) {
-      fs.writeFileSync(path.join(root, 'survivor-receiver-statuses.json'), JSON.stringify(redactedReceiverStatuses(survivor.data.receivers), null, 2));
+    try {
+      const a = await environment('a', signal);
+      const b = await environment('b', signal);
+      const reportB = await run({ ...b, signal, progress: stage => progress(`b:${stage}`) });
+      const walletSurvivorBefore = b.walletFixture.walletSnapshot();
+      const reportA = await run({ ...a, signal, progress: stage => progress(`a:${stage}`) });
+      progress('isolation:survivor-check');
+      signal.throwIfAborted();
+      const survivorBase = serviceBase(b.serviceContainer, docker);
+      progress(`isolation:survivor-endpoint:${survivorBase}`);
+      const survivor = await requestJson(`${survivorBase}/v1/state`, { headers: { authorization: `Bearer ${fs.readFileSync(b.tokenFile, 'utf8').trim()}` } }, signal);
+      assert.equal(survivor.status, 200);
+      assert.deepEqual(survivor.data.participants.map(p => p.publicKey), reportB.participantKeys);
+      try { assertRunningReceivers(survivor.data.receivers); }
+      catch (error) {
+        fs.writeFileSync(path.join(root, 'survivor-receiver-statuses.json'), JSON.stringify(redactedReceiverStatuses(survivor.data.receivers), null, 2));
+        throw error;
+      }
+      assert.deepEqual(b.walletFixture.walletSnapshot(), walletSurvivorBefore, 'Environment B wallets changed while A ran');
+      return { environments: [reportA, reportB], survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true };
+    } catch (error) {
+      failureDiagnostics = captureFailureDiagnosticsSafely({ root, runId, resources,
+          inspect: id => JSON.parse(docker('inspect', '--format', '{"id":{{json .Id}},"owner":{{json (index .Config.Labels "polar-paykit.test-run")}},"status":{{json .State.Status}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},"oomKilled":{{json .State.OOMKilled}},"dead":{{json .State.Dead}},"exitCode":{{json .State.ExitCode}},"startedAt":{{json .State.StartedAt}},"finishedAt":{{json .State.FinishedAt}}}', id)),
+          stderr: id => {
+            const result = spawnSync('docker', ['logs', '--tail', '400', id], { encoding: null, timeout: 10000, killSignal: 'SIGTERM', maxBuffer: 256 * 1024, stdio: ['ignore', 'ignore', 'pipe'] });
+            if (result.error || result.status !== 0) throw new Error('Service stderr capture failed');
+            return result.stderr || Buffer.alloc(0);
+          },
+          receiverDiagnostics: id => {
+            const result = spawnSync('docker', ['exec', id, 'cat', `/data/${PRIVATE_RECEIVER_DIAGNOSTIC_NAME}`], { encoding: null, timeout: 10000, killSignal: 'SIGTERM', maxBuffer: PRIVATE_RECEIVER_DIAGNOSTIC_BYTES + 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+            if (result.error || result.status !== 0) throw new Error('Receiver diagnostic capture failed');
+            return result.stdout || Buffer.alloc(0);
+          } });
       throw error;
     }
-    assert.deepEqual(b.walletFixture.walletSnapshot(), walletSurvivorBefore, 'Environment B wallets changed while A ran');
-    return { environments: [reportA, reportB], survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true };
   }
   function cleanup() {
     progress('cleanup:started');
@@ -240,6 +310,8 @@ function start() {
   console.log(`Paykit CI artifact root: ${root}; Node ${process.version}`);
   if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `artifact-root=${root}\n`);
   runCli(work, {
+    // Two sequential 72-stage environments exceed the former 20-minute allowance.
+    timeoutMs: 2160000,
     cleanup,
     complete(result, cleaned) {
       const report = { schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: true, cleanup: cleaned, ...result };
@@ -249,11 +321,11 @@ function start() {
       console.log('Both persistent Paykit environment scenarios passed.');
     },
     fail(error, cleaned) {
-      fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify({ schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: false, cleanup: cleaned, error: error.message, lastStage: lastScenarioStage }, null, 2));
+      fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify({ schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: false, cleanup: cleaned, error: error.message, lastStage: lastScenarioStage, failureDiagnostics }, null, 2));
     },
   });
 }
-module.exports = { validateReport, requiredStages, redactedReceiverStatuses, assertRunningReceivers };
+module.exports = { validateReport, requiredStages, redactedReceiverStatuses, assertRunningReceivers, captureFailureDiagnostics, captureFailureDiagnosticsSafely, PRIVATE_DIAGNOSTIC_BYTES, PRIVATE_RECEIVER_DIAGNOSTIC_BYTES, PRIVATE_RECEIVER_DIAGNOSTIC_NAME };
 if (require.main === module) {
   if (process.argv[2] === '--verify-report') {
     try { validateReport(process.argv[3]); console.log('Required Paykit completion report verified.'); }

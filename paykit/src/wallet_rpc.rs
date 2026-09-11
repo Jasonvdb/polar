@@ -135,6 +135,27 @@ impl Wallet {
         }
         Ok(name)
     }
+    /// Reconciliation may load the recorded wallet but must never replace missing wallet state.
+    pub async fn load_existing_core_wallet(&self, name: &str, owner: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            name == format!("paykit-{owner}"),
+            "persisted execution wallet identity mismatch"
+        );
+        let loaded = self.core(None, "listwallets", json!([])).await?;
+        if !loaded
+            .as_array()
+            .is_some_and(|items| items.iter().any(|v| v == name))
+        {
+            // A concurrent load may win; getwalletinfo below still verifies the exact wallet.
+            let _ = self.core(None, "loadwallet", json!([name])).await;
+        }
+        let info = self.core(Some(name), "getwalletinfo", json!([])).await?;
+        anyhow::ensure!(
+            info["walletname"] == name,
+            "loaded wallet differs from persisted execution wallet"
+        );
+        Ok(())
+    }
     pub async fn address(&self, owner: &str, label: &str) -> anyhow::Result<String> {
         let name = self.ensure_core_wallet(owner).await?;
         let result = self

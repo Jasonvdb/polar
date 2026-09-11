@@ -299,3 +299,25 @@ the receipt action submits a fresh command ID with the original receipt identity
 Receipt controls remain disabled until the accepted receipt operation finishes.
 No command accepts receipt keys, ciphertext, arbitrary URLs or replacement payment
 terms.
+
+## Subscriptions and recurring requests
+
+Choose a participant and receiver, then use **Subscriptions and billing periods** to compose recurring terms. Enter the payer’s exact receiver, satoshis per period, accepted methods, recurrence interval/unit, and a UTC start/anchor such as `2026-09-11T12:00:00Z`. An optional end must be a full period boundary. Minute, hour, day, week, month and year units use full anchored UTC periods; month/year dates clamp to the last available day and there is no proration. Fresh endpoints are prepared separately for each period after the payer accepts the terms.
+
+As the payee, select the subscription and a started period, explicitly choose public or private endpoints, and select **Prepare period endpoints**. This uses the receiving wallet and methods configured in Payment methods and reservations. The encrypted period offer authorizes those immutable endpoints only for that period. It is not an additional payment request to accept or pay.
+
+As the payer, select the same subscription and period, spending wallet, endpoint source and method (or your saved method preference for manual payment). **Pay selected period manually** also supports missed periods. Enter a period’s zero-based index if it is outside the displayed history; preparing it makes its recorded offer visible. An existing execution blocks another payment for that period, including after failure or an uncertain result. Inspect and reconcile the original execution in Requests and payments.
+
+Autopay is off by default. **Enable autopay for this request** explicitly authorizes its selected wallet, source and method. It attempts only the current period when the payee’s offer arrives and submits the successful execution’s proof. It never collects missed-period backlog. Failed and uncertain attempts require manual attention; re-enabling authorization does not clear an execution. **Disable autopay for this request** leaves the subscription manually payable. **Cancel subscription** stops future authorization, while an already started wallet execution remains reconcilable.
+
+A period’s payment, proof delivery, independently verified settlement, and receipt issuance are separate states. Use Proofs and settlement to submit or verify a period proof, then Receipts and access to prepare, process and retrieve its receipt. The proof selector, execution history and receipt history show the relevant billing-period dates.
+
+### Receiver application time
+
+The receiver clock controls affect only the selected receiver’s SDK/application schedule and persist across receiver restart. Enter canonical UTC second precision and use **Set receiver application time** to freeze or advance time. Set both peers’ clocks as needed for a demonstration; changing one receiver does not change another. Advancing time can trigger autopay already authorized for the new current period. Bitcoin time and real wallet invoice expiry remain independent, so a logically current period can still need a fresh real-time invoice.
+
+Time cannot move backward. Returning to system time is blocked while real time is behind the receiver’s effective time. The UI displays this condition and the backend enforces it. For a two-period/missed-period demonstration, pay the first period, advance and pay the second, advance past a period without preparing its offer, then prepare and pay that older index manually. Restart the receiver, verify the same execution history, cancel, and confirm no later payment occurs.
+
+The MCP `paykit` tool and CLI use the same versioned operations: optional `request.create.recurrence`, `subscription.prepare`, `subscription.authorize`, `subscription.disable`, `payment.execute.periodIndex`, `proof.submit.periodIndex`, `clock.set`, and `clock.reset`. Commands return an operation ID immediately. Retry uncertain acceptance with the original command ID; observe the operation’s terminal status before another action. Raw recurring proofs require a period index; execution-backed proofs derive it. Session, Noise and receipt keys remain outside the renderer and public API.
+
+Period offers use compact SHA-256 endpoint commitments so BOLT11 invoices fit the SDK’s encrypted message limit. A payer initially sees the endpoint’s hash, source, method and reservation identity. Payment resolves the real endpoint and verifies that it matches the accepted commitment before any wallet side effect; the resolved endpoint then appears in period/execution history. Public/private selection remains explicit. Previously validated full-endpoint offers remain supported.

@@ -91,11 +91,13 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
         config.environment_id,
         owner.public_key().to_string(),
     )?;
-    let sdk = PaykitSdk::new(
+    let clock = storage.sdk_clock(payments.clock())?;
+    let sdk = PaykitSdk::try_with_clock(
         storage.clone(),
         provider.clone(),
         payments.clone(),
         sdk_config,
+        clock.clone(),
     )?;
     anyhow::ensure!(
         sdk.initialize().await?.identity.live_session_available,

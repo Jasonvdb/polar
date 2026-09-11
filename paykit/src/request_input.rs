@@ -9,6 +9,7 @@ use uuid::Uuid;
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Create {
+    pub recurrence: Option<crate::recurrence::Recurrence>,
     pub receiver_id: Uuid,
     pub peer_public_key: String,
     pub peer_receiver_path: String,
@@ -26,6 +27,7 @@ pub struct Request {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Execute {
+    pub period_index: Option<u32>,
     pub receiver_id: Uuid,
     pub request_id: Uuid,
     pub wallet_id: String,
@@ -41,6 +43,7 @@ pub struct Reconcile {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Submit {
+    pub period_index: Option<u32>,
     pub receiver_id: Uuid,
     pub request_id: Uuid,
     pub execution_id: Option<Uuid>,
@@ -90,6 +93,9 @@ fn validate_inner(c: &Command) -> anyhow::Result<()> {
     match c.command.as_str() {
         "request.create" => {
             let i: Create = parse(c)?;
+            if let Some(r) = &i.recurrence {
+                r.validate()?;
+            }
             id(i.receiver_id)?;
             crate::commands::public_key(&i.peer_public_key)?;
             paykit_sdk::PaykitReceiverPath::new(i.peer_receiver_path)?;
@@ -110,6 +116,11 @@ fn validate_inner(c: &Command) -> anyhow::Result<()> {
         }
         "payment.execute" => {
             let i: Execute = parse(c)?;
+            anyhow::ensure!(
+                i.period_index
+                    .is_none_or(|n| n <= crate::recurrence::MAX_PERIOD),
+                "invalid period"
+            );
             id(i.receiver_id)?;
             id(i.request_id)?;
             anyhow::ensure!(
@@ -129,6 +140,11 @@ fn validate_inner(c: &Command) -> anyhow::Result<()> {
         }
         "proof.submit" => {
             let i: Submit = parse(c)?;
+            anyhow::ensure!(
+                i.period_index
+                    .is_none_or(|n| n <= crate::recurrence::MAX_PERIOD),
+                "invalid period"
+            );
             id(i.receiver_id)?;
             id(i.request_id)?;
             anyhow::ensure!(

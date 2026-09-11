@@ -24,11 +24,19 @@ import { useStoreActions } from 'store';
 import { Network } from 'types';
 import { paykitService } from 'lib/paykit/paykitService';
 import PaykitRequests from './PaykitRequests';
+import PaykitSubscriptions from './PaykitSubscriptions';
 import PaykitProofs from './PaykitProofs';
 import PaykitReceipts from './PaykitReceipts';
 import PaykitPaymentMethods from './PaykitPaymentMethods';
 import PaykitLinks from './PaykitLinks';
 import PaykitProfilesContacts from './PaykitProfilesContacts';
+
+const guardedCommand = (name: string) =>
+  name.startsWith('subscription.') ||
+  name.startsWith('clock.') ||
+  ['payment.execute', 'request.create', 'request.accept', 'request.cancel'].includes(
+    name,
+  );
 
 const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const { enablePaykit, stop } = useStoreActions(s => s.network);
@@ -43,6 +51,7 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const [kind, setKind] = useState<'wallet' | 'server'>('wallet');
   const [retry, setRetry] = useState<PaykitCommandRequest>();
   const [operationId, setOperationId] = useState('');
+  const [guardedOperationId, setGuardedOperationId] = useState('');
   const [receiptOperationId, setReceiptOperationId] = useState('');
   const active = !!network.paykit && network.status === Status.Started;
 
@@ -51,6 +60,7 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
     let timer: ReturnType<typeof setTimeout>;
     setState(undefined);
     setReceiptOperationId('');
+    setGuardedOperationId('');
     setConnectionError('');
     const poll = async () => {
       try {
@@ -88,6 +98,7 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
     try {
       const result = await paykitService.command(network.id, request);
       setOperationId(result.operationId);
+      if (guardedCommand(request.command)) setGuardedOperationId(result.operationId);
       if (request.command.startsWith('receipt.'))
         setReceiptOperationId(result.operationId);
       setRetry(undefined);
@@ -106,7 +117,17 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const participant = state?.participants.find(p => p.id === participantId);
   const receivers = state?.receivers.filter(r => r.participantId === participantId) || [];
   const receiver = receivers.find(r => r.id === receiverId);
-  const disabled = busy || !state?.ready || !!retry || !!connectionError;
+  const guardedPending =
+    (!!guardedOperationId &&
+      !state?.operations.some(
+        item =>
+          item.id === guardedOperationId && ['succeeded', 'failed'].includes(item.status),
+      )) ||
+    state?.operations.some(
+      item => guardedCommand(item.command) && ['queued', 'running'].includes(item.status),
+    );
+  const disabled =
+    busy || !state?.ready || !!retry || !!connectionError || !!guardedPending;
   const receiptPending =
     (!!receiptOperationId &&
       !state?.operations.some(
@@ -415,6 +436,15 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
             command={command}
           />
           <PaykitRequests
+            receiverId={receiver.id}
+            workspace={state.receiverWorkspaces?.find(
+              item => item.receiverId === receiver.id,
+            )}
+            state={state}
+            disabled={disabled || receiver.status !== 'running'}
+            command={command}
+          />
+          <PaykitSubscriptions
             receiverId={receiver.id}
             workspace={state.receiverWorkspaces?.find(
               item => item.receiverId === receiver.id,

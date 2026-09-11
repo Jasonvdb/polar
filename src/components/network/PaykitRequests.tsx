@@ -31,7 +31,7 @@ const PaykitRequests: React.FC<PaykitReceiverPanelProps & { state: PaykitState }
   const [walletId, setWallet] = useState('');
   const [source, setSource] = useState<'public' | 'private'>();
   const [method, setMethod] = useState<PaykitMethod>();
-  const requests = workspace?.requests || [];
+  const requests = (workspace?.requests || []).filter(item => !item.recurrence);
   const selected = requests.find(item => item.id === requestId);
   const executions = workspace?.executions || [];
   const hasExecution = executions.some(item => item.requestId === requestId);
@@ -53,7 +53,8 @@ const PaykitRequests: React.FC<PaykitReceiverPanelProps & { state: PaykitState }
       item.status === 'active' &&
       item.amountSats === amountSats &&
       !!item.endpoint &&
-      Date.parse(item.expiresAt) > Date.now() &&
+      Date.parse(item.expiresAt) >
+        Date.parse(workspace?.applicationClock?.now || new Date().toISOString()) &&
       !claimed.has(item.id) &&
       (item.source === 'public' ||
         (item.peerPublicKey === peerPublicKey.trim() &&
@@ -73,7 +74,7 @@ const PaykitRequests: React.FC<PaykitReceiverPanelProps & { state: PaykitState }
       <Typography.Paragraph>
         Create a request as the payee. The payer accepts its terms, selects an endpoint
         and sends a payment explicitly. Proof delivery and settlement verification are
-        separate steps.
+        separate steps. Recurring requests use Subscriptions and billing periods below.
       </Typography.Paragraph>
       <Alert
         type="info"
@@ -385,6 +386,12 @@ const PaykitRequests: React.FC<PaykitReceiverPanelProps & { state: PaykitState }
                 <Descriptions size="small" column={1}>
                   <Descriptions.Item label="Execution">{item.id}</Descriptions.Item>
                   <Descriptions.Item label="Request">{item.requestId}</Descriptions.Item>
+                  {item.billingPeriod && (
+                    <Descriptions.Item label="Billing period">
+                      Period {item.periodIndex}: {item.billingPeriod.startsAt} →{' '}
+                      {item.billingPeriod.endsAt}
+                    </Descriptions.Item>
+                  )}
                   <Descriptions.Item label="Payment execution">
                     <Tag>{item.status}</Tag>
                   </Descriptions.Item>

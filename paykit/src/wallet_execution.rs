@@ -48,15 +48,37 @@ impl SpendState {
             .ok_or_else(|| anyhow::anyhow!("execution missing"))
     }
     pub fn existing(&self, receiver: Uuid, request: &str) -> Option<&Execution> {
-        self.executions
-            .iter()
-            .find(|e| e.receiver_id == receiver && e.view.request_id == request)
+        self.existing_period(receiver, request, None)
+    }
+    pub fn existing_period(
+        &self,
+        receiver: Uuid,
+        request: &str,
+        period: Option<u32>,
+    ) -> Option<&Execution> {
+        self.executions.iter().find(|e| {
+            e.receiver_id == receiver
+                && e.view.request_id == request
+                && e.view.period_index == period
+        })
     }
     pub fn reserve(&mut self, vault: &Vault, execution: Execution) -> anyhow::Result<()> {
         anyhow::ensure!(
-            self.existing(execution.receiver_id, &execution.view.request_id)
-                .is_none(),
+            self.existing_period(
+                execution.receiver_id,
+                &execution.view.request_id,
+                execution.view.period_index
+            )
+            .is_none(),
             "request already has an execution"
+        );
+        anyhow::ensure!(
+            execution.view.period_index.is_none()
+                || !self
+                    .executions
+                    .iter()
+                    .any(|e| e.view.endpoint == execution.view.endpoint),
+            "Recurring periods cannot reuse an already selected payment endpoint"
         );
         anyhow::ensure!(
             !self.executions.iter().any(|e| same_wallet(e, &execution)
@@ -65,6 +87,14 @@ impl SpendState {
         );
         self.executions.push(execution);
         self.save(vault)
+    }
+    pub(crate) fn settlement_conflicts(&self, proof: &str, binding: &str) -> bool {
+        self.settlements
+            .iter()
+            .any(|(claimed_proof, claimed_binding)| {
+                (claimed_proof == proof && claimed_binding != binding)
+                    || (claimed_binding == binding && claimed_proof != proof)
+            })
     }
     pub fn project(&self, receiver: Uuid) -> Vec<ExecutionView> {
         self.executions
@@ -122,6 +152,8 @@ pub(crate) fn new_execution(
     let now = chrono::Utc::now().to_rfc3339();
     Ok(Execution {
         view: ExecutionView {
+            period_index: None,
+            billing_period: None,
             id: resolution.id,
             request_id,
             wallet_id: wallet.id.clone(),

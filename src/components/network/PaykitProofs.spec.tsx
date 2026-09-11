@@ -283,3 +283,39 @@ it('offers only successful accepted-rail executions and submits the prepared pro
     executionId: correctId,
   });
 });
+
+it('submits a raw recurring proof for an explicitly entered billing period', () => {
+  const view = setup({
+    ...workspace,
+    requests: [
+      {
+        ...workspace.requests![0],
+        lifecycle: 'activeRecurring',
+        recurrence: {
+          every: 1,
+          unit: 'month',
+          startsAt: '2099-01-31T00:00:00Z',
+          anchor: '2099-01-31T00:00:00Z',
+          endsAt: null,
+        },
+      },
+    ],
+  });
+  fireEvent.mouseDown(view.getByRole('combobox', { name: 'Proof request' }));
+  fireEvent.click(view.getByText('A meal · 1000 sats'));
+  fireEvent.mouseDown(view.getByRole('combobox', { name: 'Proof source' }));
+  fireEvent.click(view.getByText('Enter proof manually'));
+  fireEvent.change(view.getByLabelText('Proof billing period index'), {
+    target: { value: '2' },
+  });
+  fireEvent.change(view.getByLabelText('Proof transaction ID'), {
+    target: { value: 'a'.repeat(64) },
+  });
+  fireEvent.click(view.getByText('Submit payment proof'));
+  expect(view.command).toHaveBeenCalledWith('proof.submit', {
+    receiverId,
+    requestId,
+    periodIndex: 2,
+    proof: { method: 'btc-onchain', txid: 'a'.repeat(64), outputIndex: 0 },
+  });
+});

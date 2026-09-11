@@ -1,4 +1,6 @@
 import { promises as fs } from 'fs';
+import { EventEmitter } from 'events';
+import { request as httpRequest } from 'http';
 import { join, resolve, sep } from 'path';
 import {
   paykitProxy,
@@ -7,6 +9,7 @@ import {
   walletBindings,
   fundingWalletIds,
   refreshWalletConfig,
+  callService,
 } from '../../electron/paykitProxy';
 import { bakePaykitMacaroon } from '../../electron/paykitWalletAuth';
 jest.mock('../../electron/paykitWalletAuth', () => ({
@@ -37,9 +40,11 @@ jest.mock('net', () => ({
     close: (callback: () => void) => callback(),
   }),
 }));
+jest.mock('http', () => ({ request: jest.fn() }));
 const envId = '9b03a782-e2f3-4b7a-8ef5-429628921ee2';
-const binding = { apiVersion: 1, environmentId: envId, servicePort: 30091 };
+const binding = { apiVersion: 1 as const, environmentId: envId, servicePort: 30091 };
 const fsMock = fs as jest.Mocked<typeof fs>;
+const httpRequestMock = httpRequest as jest.MockedFunction<typeof httpRequest>;
 const network = () => ({
   id: 1,
   path: join(paykitConfig.dataPath, 'networks', '1'),
@@ -154,6 +159,73 @@ describe('Main process Paykit boundary', () => {
       expect(flags).toBe('wx');
       expect(mode).toBe(0o600);
     }
+  });
+});
+
+describe('Paykit local request failures', () => {
+  beforeEach(() => {
+    fsMock.readFile.mockResolvedValue('a'.repeat(64));
+    httpRequestMock.mockReset();
+  });
+
+  it('reports its local response-size rejection before destroying the request', async () => {
+    const response = new EventEmitter() as any;
+    response.statusCode = 200;
+    const request = new EventEmitter() as any;
+    request.destroy = jest.fn(() => {
+      response.emit('error', new Error('aborted'));
+      request.emit('close');
+    });
+    request.end = jest.fn(() => {
+      response.emit('data', Buffer.alloc(4 * 1024 * 1024 + 1));
+    });
+    httpRequestMock.mockImplementation(((_options: any, callback: any) => {
+      callback(response);
+      return request;
+    }) as any);
+
+    await expect(callService(binding, '/v1/state')).rejects.toThrow(
+      'Paykit response exceeded size limit',
+    );
+    expect(request.destroy).toHaveBeenCalledWith();
+  });
+
+  it('reports its local timeout before destroying the request', async () => {
+    jest.useFakeTimers();
+    const request = new EventEmitter() as any;
+    request.destroy = jest.fn(() => {
+      request.emit('error', new Error('aborted'));
+      request.emit('close');
+    });
+    request.end = jest.fn();
+    httpRequestMock.mockReturnValue(request);
+
+    const pending = callService(binding, '/v1/state');
+    while (!httpRequestMock.mock.calls.length) await Promise.resolve();
+    jest.runOnlyPendingTimers();
+    await expect(pending).rejects.toThrow('Paykit service request timed out');
+    expect(request.destroy).toHaveBeenCalledWith();
+    jest.useRealTimers();
+  });
+
+  it('keeps actual request socket errors generic without exposing details', async () => {
+    const request = new EventEmitter() as any;
+    request.destroy = jest.fn();
+    request.end = jest.fn(() => {
+      request.emit(
+        'error',
+        Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:30091'), {
+          code: 'ECONNREFUSED',
+          syscall: 'connect',
+        }),
+      );
+      request.emit('close');
+    });
+    httpRequestMock.mockReturnValue(request);
+
+    await expect(callService(binding, '/v1/state')).rejects.toThrow(
+      'Paykit service is unavailable. Start the network or check its service logs.',
+    );
   });
 });
 
@@ -708,4 +780,168 @@ it('projects exact receipt DTOs in state and operation results without SDK recor
     'receiptId',
   );
   expect(JSON.stringify(result)).not.toContain('hidden');
+});
+
+it('projects recurring state through state and operation results without nested SDK secrets', () => {
+  const hidden = {
+    session: 'hidden-secret',
+    noiseKey: 'hidden-secret',
+    receiptKey: 'hidden-secret',
+  };
+  const billingPeriod = {
+    startsAt: '2099-01-31T00:00:00Z',
+    endsAt: '2099-02-28T00:00:00Z',
+  };
+  const binding = {
+    source: 'private',
+    method: 'btc-onchain',
+    endpoint: 'bcrt1period',
+    reservationId: envId,
+  };
+  const recurrence = {
+    every: 1,
+    unit: 'month',
+    startsAt: billingPeriod.startsAt,
+    anchor: billingPeriod.startsAt,
+    endsAt: null,
+  };
+  const workspace = {
+    receiverId: envId,
+    applicationClock: { mode: 'controlled', now: billingPeriod.endsAt, ...hidden },
+    requests: [
+      {
+        id: envId,
+        recurrence: { ...recurrence, ...hidden },
+        acceptedMethods: ['btc-onchain'],
+        endpointBindings: [],
+      },
+    ],
+    subscriptions: [
+      {
+        requestId: envId,
+        currentPeriodIndex: 1,
+        ...hidden,
+        autopay: {
+          enabled: true,
+          walletId: 'wallet',
+          source: 'private',
+          method: 'btc-onchain',
+          status: 'waiting',
+          lastError: null,
+          ...hidden,
+        },
+        periods: [
+          {
+            index: 0,
+            ...billingPeriod,
+            status: 'prepared',
+            offerId: envId,
+            executionId: null,
+            proofId: null,
+            lastError: null,
+            endpointBindings: [binding, { ...binding, ...hidden }],
+            offer: hidden,
+            encryptedOffer: hidden,
+          },
+        ],
+      },
+    ],
+    executions: [
+      { id: envId, periodIndex: 0, billingPeriod: { ...billingPeriod, ...hidden } },
+    ],
+    proofs: [
+      {
+        id: envId,
+        periodIndex: 0,
+        billingPeriod: { ...billingPeriod, ...hidden },
+        proof: { method: 'btc-onchain', txid: 'a'.repeat(64), outputIndex: 0 },
+      },
+    ],
+    settlements: [{ periodIndex: 0, billingPeriod: { ...billingPeriod, ...hidden } }],
+    receiptIssuances: [{ id: envId, billingPeriod: { ...billingPeriod, ...hidden } }],
+    receiptAccess: [{ receiptId: envId, billingPeriod: { ...billingPeriod, ...hidden } }],
+    receipts: [{ id: envId, billingPeriod: { ...billingPeriod, ...hidden } }],
+  };
+  const state = publicState(
+    {
+      apiVersion: 1,
+      environmentId: envId,
+      participants: [],
+      receivers: [],
+      operations: [],
+      receiverWorkspaces: [workspace],
+    },
+    envId,
+  );
+  const operation = publicOperation({ result: { workspace } });
+  for (const projected of [state.receiverWorkspaces[0], operation.result!.workspace!]) {
+    expect(JSON.stringify(projected)).not.toContain('hidden-secret');
+    expect(projected.applicationClock).toEqual({
+      mode: 'controlled',
+      now: billingPeriod.endsAt,
+    });
+    expect(projected.requests[0].recurrence).toEqual(recurrence);
+    expect(projected.subscriptions[0].periods[0].endpointBindings).toEqual([binding]);
+    expect(projected.subscriptions[0].autopay.enabled).toBe(true);
+    for (const key of [
+      'executions',
+      'proofs',
+      'settlements',
+      'receiptIssuances',
+      'receiptAccess',
+      'receipts',
+    ] as const)
+      expect(projected[key][0].billingPeriod).toEqual(billingPeriod);
+    expect(projected.proofs[0].periodIndex).toBe(0);
+  }
+  const malformed = publicOperation({
+    result: {
+      workspace: {
+        applicationClock: { mode: 'controlled', now: hidden },
+        subscriptions: [
+          { autopay: { walletId: hidden }, periods: [{ endpointBindings: [hidden] }] },
+        ],
+        receipts: [{ billingPeriod: { startsAt: hidden, endsAt: hidden } }],
+      },
+    },
+  }).result!.workspace!;
+  expect(malformed).not.toHaveProperty('applicationClock');
+  expect(malformed.receipts[0].billingPeriod).toBeNull();
+  expect(malformed.subscriptions[0].periods[0].endpointBindings).toEqual([]);
+  expect(JSON.stringify(malformed)).not.toContain('hidden-secret');
+});
+
+it('projects only valid compact endpoint commitments and preserves absent versus invalid fields', () => {
+  const commitment = {
+    source: 'private',
+    method: 'btc-lightning-bolt11',
+    reservationId: envId,
+    endpointHash: 'a'.repeat(64),
+  };
+  const hidden = { sessionKey: 'hidden-secret', receiptKey: 'hidden-secret' };
+  const periods = [
+    {
+      endpointBindings: [],
+      endpointCommitments: [
+        commitment,
+        { ...commitment, ...hidden },
+        { ...commitment, endpointHash: 'A'.repeat(64) },
+        { ...commitment, endpointHash: 'a'.repeat(63) },
+        { ...commitment, endpointHash: hidden },
+        { ...commitment, reservationId: hidden },
+      ],
+    },
+    { endpointBindings: [], endpointCommitments: hidden },
+    { endpointBindings: [] },
+  ];
+  const workspace = {
+    receiverId: envId,
+    subscriptions: [{ requestId: envId, autopay: {}, periods }],
+  };
+  const projected = publicOperation({ result: { workspace } }).result!.workspace!
+    .subscriptions[0].periods;
+  expect(projected[0].endpointCommitments).toEqual([commitment]);
+  expect(projected[1].endpointCommitments).toEqual([]);
+  expect(projected[2]).not.toHaveProperty('endpointCommitments');
+  expect(JSON.stringify(projected)).not.toContain('hidden-secret');
 });

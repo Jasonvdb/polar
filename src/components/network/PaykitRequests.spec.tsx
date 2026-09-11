@@ -236,3 +236,24 @@ it('prevents accepting a request whose immutable metadata is missing while prese
   expect(view.getByText('Accept request').closest('button')).toBeDisabled();
   expect(view.getByText('Reject request').closest('button')).not.toBeDisabled();
 });
+
+it('routes recurring requests to period controls without offering an unscoped payment', () => {
+  const view = setup({
+    ...workspace,
+    requests: [
+      {
+        ...workspace.requests![0],
+        lifecycle: 'activeRecurring',
+        recurrence: {
+          every: 1,
+          unit: 'month',
+          startsAt: '2099-01-31T00:00:00Z',
+          anchor: '2099-01-31T00:00:00Z',
+          endsAt: null,
+        },
+      },
+    ],
+  });
+  expect(view.queryByText('A meal')).not.toBeInTheDocument();
+  expect(view.getByText('Pay accepted request').closest('button')).toBeDisabled();
+});

@@ -200,7 +200,7 @@ function readGuestExecutionLedger(docker, serviceContainer, receiverId) {
 }
 function gateControls(controlDir, signal) {
   function arm(channel, action = 'drop', operation) {
-    assert(operation === undefined || (channel === 'core' && operation === 'sendrawtransaction') || (channel === 'lnd' && ['sendpayment', 'openchannel'].includes(operation)));
+    assert(operation === undefined || (channel === 'core' && ['sendrawtransaction', 'signrawtransactionwithwallet'].includes(operation)) || (channel === 'lnd' && ['sendpayment', 'openchannel'].includes(operation)));
     assert(['core', 'lnd'].includes(channel) && ['drop', 'hold'].includes(action));
     const file = path.join(controlDir, `${channel}.arm.json`);
     assert(!fs.existsSync(file), 'A gate control is already armed');
@@ -215,8 +215,9 @@ function gateControls(controlDir, signal) {
   async function waitReady(channel, nonce) {
     return waitFor(() => {
       const result = JSON.parse(fs.readFileSync(controlPath(channel, nonce, 'ready')));
-      assert(result.successfulIssuance === true || result.successfulExecution === true || result.successfulChannel === true);
+      assert(result.successfulIssuance === true || result.successfulExecution === true || result.successfulSigning === true || result.successfulChannel === true);
       assert.equal(result.nonce, nonce);
+      if (result.successfulSigning) { assert.equal(channel, 'core'); assert.equal(result.operation, 'signrawtransactionwithwallet'); assert.match(result.signedTransactionDigest, /^[a-f0-9]{64}$/); }
       if (result.successfulChannel) {
         assert.equal(channel, 'lnd');
         assert.equal(result.operation, 'openchannel');
@@ -241,6 +242,32 @@ function gateControls(controlDir, signal) {
     return result;
   }
   return { arm, waitReady, release, counts, controlDir };
+}
+
+function coreLifecycle({ docker, coreContainer, runId, core, signal, record }) {
+  const inspect = () => JSON.parse(docker('inspect', coreContainer))[0];
+  const identity = value => ({ id: value.Id, name: value.Name, image: value.Image, labels: value.Config.Labels, mounts: [...value.Mounts].sort((a, b) => a.Destination.localeCompare(b.Destination)), startedAt: value.State.StartedAt });
+  let expected = identity(inspect());
+  assert.equal(expected.labels['polar-paykit.test-run'], runId);
+  const verify = () => { const actual = inspect(); assert.deepEqual(identity(actual), expected, 'Owned Core identity changed'); return actual; };
+  return {
+    stopCore: async () => {
+      const actual = verify(); assert(actual.State.Running && !actual.State.Paused);
+      record({ action: 'stopIntent', identity: expected });
+      docker('stop', '--timeout', '-1', coreContainer);
+      assert.equal(verify().State.Running, false); record({ action: 'stopped', identity: expected });
+    },
+    startCore: async () => {
+      assert.equal(verify().State.Running, false);
+      record({ action: 'startIntent', identity: expected });
+      docker('start', coreContainer);
+      const started = inspect(); const refreshed = identity(started);
+      assert.deepEqual({ ...refreshed, startedAt: expected.startedAt }, expected, 'Core restart changed ownership');
+      assert(started.State.Running && !started.State.Paused); assert.notEqual(refreshed.startedAt, expected.startedAt);
+      expected = refreshed; record({ action: 'started', identity: expected });
+      await waitFor(() => core('getblockchaininfo').chain === 'regtest', signal, 'Bitcoin Core restart readiness');
+    },
+  };
 }
 
 async function createWalletFixture({ data, secrets, prefix, environmentId, uid, runId, docker, recordContainer, recordWallets, signal, setupGate = false }) {
@@ -355,6 +382,8 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
   privateWrite(path.join(secrets, 'wallet-config.json'), JSON.stringify({ apiVersion: 1, environmentId, wallets }));
   const details = { coreContainer, lndContainers, gateContainer, walletIds, readiness, coreVersion: core('getnetworkinfo').version, images };
   recordWallets(details);
+  const coreLifecycleJournal = [];
+  const lifecycle = coreLifecycle({ docker, coreContainer, runId, core, signal, record: event => { coreLifecycleJournal.push({ ...event, at: new Date().toISOString() }); recordWallets({ ...details, coreLifecycle: coreLifecycleJournal }); } });
   const storageJournal = [];
   const recordStorage = entry => { storageJournal.push(entry); recordWallets({ ...details, storageFaults: storageJournal }); };
   const faults = storageFaults(stateRoot, recordStorage);
@@ -381,7 +410,7 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
   const controls = gateControls(controlDir, signal);
   function evidence() {
     const events = fs.readFileSync(path.join(controlDir, 'events.ndjson'), 'utf8').split('\n').slice(0, -1).map(line => JSON.parse(line));
-    return { ...details, gateCounts: controls.counts(), gateEvents: events, storageFaults: storageJournal };
+    return { ...details, gateCounts: controls.counts(), gateEvents: events, storageFaults: storageJournal, coreLifecycle: coreLifecycleJournal };
   }
   function walletSnapshot() {
     return {
@@ -392,7 +421,7 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
       }),
     };
   }
-  return { ...details, core, lnd, stateRoot, stopLnd, startLnd, walletSnapshot, evidence, ...controls, ...faults,
+  return { ...details, ...lifecycle, core, lnd, stateRoot, stopLnd, startLnd, walletSnapshot, evidence, ...controls, ...faults,
     restoreFaults: () => {
       const failures = [];
       for (const fault of [faults, executionFaults, requestFaults, workspaceFaults]) {
@@ -418,4 +447,4 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
     } };
 
 }
-module.exports = { createWalletFixture, storageFaults, executionCommitFaults, visibleStorageFaults, readGuestLedger, readGuestExecutionLedger, gateControls, atomicJson, images, paymentPermissions, setupPermissions };
+module.exports = { coreLifecycle, createWalletFixture, storageFaults, executionCommitFaults, visibleStorageFaults, readGuestLedger, readGuestExecutionLedger, gateControls, atomicJson, images, paymentPermissions, setupPermissions };

@@ -255,3 +255,23 @@ test('shared commit fault fails closed if guest can still write and restores its
   assert(!journal.some(event => event.phase === 'guest' && event.active));
   assert(journal.some(event => event.phase === 'guest' && !event.active && event.writable));
 });
+
+
+test('Core restart requires exact identity and records only normal stop then changed start identity', async () => {
+  const { coreLifecycle } = require('./paykit-wallet-fixture');
+  const current = { Id:'owned-core',Name:'/owned',Image:'sha256:fixture',Config:{Labels:{'polar-paykit.test-run':'run'}},Mounts:[{Destination:'/b',Source:'/owned/b'},{Destination:'/a',Source:'/owned/a'}],State:{StartedAt:'first',Running:true,Paused:false} };
+  const calls=[],events=[];
+  const docker=(...args)=>{calls.push(args);if(args[0]==='inspect')return JSON.stringify([current]);if(args[0]==='stop'){current.State.Running=false;return 'owned-core';}if(args[0]==='start'){current.State.Running=true;current.State.StartedAt='second';return 'owned-core';}assert.fail('Unexpected Docker action');};
+  const lifecycle=coreLifecycle({docker,coreContainer:'owned-core',runId:'run',core:()=>({chain:'regtest'}),record:e=>events.push(e)});
+  await lifecycle.stopCore();await lifecycle.startCore();
+  assert.deepEqual(calls.filter(c=>c[0]!=='inspect'),[['stop','--timeout','-1','owned-core'],['start','owned-core']]);
+  assert.deepEqual(events.map(e=>e.action),['stopIntent','stopped','startIntent','started']);
+  assert.equal(events[3].identity.startedAt,'second');assert.deepEqual(events[0].identity.mounts.map(m=>m.Destination),['/a','/b']);
+  current.Mounts[0].Source='/another';await assert.rejects(lifecycle.stopCore(),/identity changed/);
+  assert.equal(calls.filter(c=>c[0]==='stop').length,1);
+});
+
+test('Core lifecycle refuses foreign ownership before accepting actions', () => {
+  const { coreLifecycle } = require('./paykit-wallet-fixture');
+  assert.throws(()=>coreLifecycle({docker:()=>JSON.stringify([{Id:'core',Name:'/core',Image:'image',Config:{Labels:{'polar-paykit.test-run':'other'}},Mounts:[],State:{StartedAt:'time'}}]),coreContainer:'core',runId:'run'}));
+});

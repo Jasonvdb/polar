@@ -5,6 +5,22 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const helper = require.resolve('./paykit-harness');
+function recurringEvidence() {
+  const { randomUUID } = require('node:crypto');
+  const hash = 'a'.repeat(64);
+  return {
+    version: 1,
+    regressions: { oversizedRejected: true, rawProofHold: { requestId: randomUUID(), proofId: randomUUID(), externalTxid: hash, heldSends: 1, payablePeriodTxid: 'b'.repeat(64), sendsAfter: 2, walletBefore: hash, walletAfter: hash, resolverBefore: hash, resolverAfter: hash }, oldOfferIndex: 0, oldCurrentIndex: 128, oldManual: true, coreRestarts: ['unsigned','broadcast'].map((phase,index)=>({phase,executionId:randomUUID(),txid:String(index).repeat(64),transactionDigest:hash,originalDigest:hash,walletWasUnloaded:true,walletDirectoryBefore:['paykit-fixture'],walletDirectoryAfter:['paykit-fixture'],sendsBefore:index,sendsAfter:index+1})) },
+    rails: ['btc-onchain', 'btc-lightning-bolt11'].map(method => ({
+      requestId: randomUUID(), method, source: method === 'btc-onchain' ? 'public' : 'private', amountSats: '701', receiptId: randomUUID(), canceled: true,
+      periods: [0, 1, 2].map(index => ({ index, startsAt: `2030-01-01T00:0${index}:00Z`, endsAt: `2030-01-01T00:0${index + 1}:00Z`, executionId: randomUUID(), proofId: randomUUID(), paymentReference: String(index).repeat(64), mode: index === 1 ? 'automatic' : 'manual', verified: true })),
+      missedBefore: hash, missedAfter: hash, duplicateBefore: hash, duplicateAfter: hash,
+    })),
+    persistence: { before: hash, after: hash, clocksRetained: true, receiverIsolated: true },
+    failures: { insufficientFunds: true, expiredInvoice: true, uncertainReconciled: true, uncertainPaymentReference: hash, uncertainBefore: hash, uncertainAfter: hash },
+    clock: { blockBefore: hash, blockAfter: hash, invoiceTimestamp: 1700000000, invoiceExpiry: 600, applicationNow: '2030-01-01T00:00:00Z', invoicePaid: true, resetRejected: true },
+  };
+}
 function receiptEvidence(environmentId) {
   const { randomUUID } = require('node:crypto');
   return ['delete', 'corrupt', 'wrong-key'].flatMap(action => {
@@ -20,6 +36,7 @@ function walletEvidence(environment) {
     readiness: [0, 1, 2].map(i => ({ syncedToChain: true, publicKey: `${environment}-wallet-${i}`, version: '0.20.0' })),
     gateCounts: { core: { issuanceSuccess: 2, executionSuccess: 1 }, lnd: { issuanceSuccess: 1, executionSuccess: 1 } },
     gateEvents: [completed('core', 1), dropped('core', 1), completed('lnd', 2), dropped('lnd', 2), completed('core', 3), { event: 'hold.finished', channel: 'core', id: 3, nonce: 'nonce-3', action: 'relay', reason: 'control' }, { ...completed('core', 4), successfulIssuance: false, successfulExecution: true }, dropped('core', 4), { ...completed('lnd', 5), successfulIssuance: false, successfulExecution: true }, dropped('lnd', 5)],
+    coreLifecycle: [0, 1].flatMap(cycle => ['stopIntent','stopped','startIntent','started'].map((action,index)=>({action,identity:{id:`${environment}-core`,startedAt:String(cycle+(index===3?1:0)),labels:{'polar-paykit.test-run':'current'},mounts:[]}}))),
     storageFaults: ['payments', 'workspace', 'requests', 'executions'].flatMap(ledger => [
       { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'host', active: true },
       { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'guest', active: true, observed: ledger === 'executions' ? 'readableCommitBlocked' : 'directory', ...(ledger === 'executions' ? { uid: 1001, writable: false } : {}) },
@@ -28,7 +45,7 @@ function walletEvidence(environment) {
     ]),
   };
 }
-const { validateReport, requiredStages } = require('./paykit-ci');
+const { validateReport, requiredStages, captureFailureDiagnostics, captureFailureDiagnosticsSafely, PRIVATE_DIAGNOSTIC_BYTES, PRIVATE_RECEIVER_DIAGNOSTIC_BYTES } = require('./paykit-ci');
 
 function child(code) {
   const result = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8', timeout: 3000 });
@@ -93,12 +110,13 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
   const ledger = { runId: 'current', cleanup, environments: ['a', 'b'].map(environmentId => ({ environmentId, wallets: walletEvidence(environmentId), receiptEvidence: receiptEvidence(environmentId) })) };
   fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(ledger));
   assert.throws(() => validateReport(root));
-  const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
+  const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, recurringEvidence: recurringEvidence(), participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
   const write = value => fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(value));
   write(report); assert.equal(validateReport(root).passed, true);
-  assert.equal(requiredStages.length, 60);
+  assert.equal(requiredStages.length, 73);
+  assert.equal(new Set(requiredStages).size, 73);
   write({ ...report, survivingWalletEnvironmentVerified: false }); assert.throws(() => validateReport(root));
-  for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery']) {
+  for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery', 'recurring-raw-proof-hold', 'recurring-onchain-manual', 'recurring-lightning-autopay', 'recurring-failure-safety', 'recurring-core-unsigned-restart', 'recurring-core-broadcast-restart']) {
     write({ ...report, environments: report.environments.map(environment => ({ ...environment, stages: environment.stages.filter(stage => stage !== missing) })) });
     assert.throws(() => validateReport(root));
   }
@@ -159,4 +177,52 @@ test('survivor assertion preserves strict running gate and emits only redacted r
   assert.throws(() => assertRunningReceivers(records), error => error.message.includes('receiver-id') && error.message.includes('crashed') && !error.message.includes('private-session') && !error.message.includes('sensitive detail'));
   assertRunningReceivers([{ id: 'receiver-id', status: 'running', generation: 4 }]);
   assert.throws(() => assertRunningReceivers([]));
+});
+
+test('failure diagnostics capture only owned service files privately and expose bounded metadata', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-private-diagnostic-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runId = 'owned-run'; const id = 'a'.repeat(64); const secret = 'secret-like-receiver-stderr';
+  const resources = { containers: [id], containerDetails: [{ id, owner: runId }], environments: [{ suffix: 'b', service: id }] };
+  const receiverSecret = 'private-receiver-child-detail';
+  const result = captureFailureDiagnostics({ root, runId, resources,
+    inspect: owned => ({ id: owned, owner: runId, status: 'running', running: true, paused: false, restarting: false, oomKilled: false, dead: false, exitCode: 0, startedAt: 'start', finishedAt: 'finish', error: secret }),
+    stderr: owned => { assert.equal(owned, id); return Buffer.from(`${'x'.repeat(PRIVATE_DIAGNOSTIC_BYTES)}${secret}`); },
+    receiverDiagnostics: owned => { assert.equal(owned, id); return Buffer.from(`${'y'.repeat(PRIVATE_RECEIVER_DIAGNOSTIC_BYTES)}${receiverSecret}`); } });
+  const directory = path.join(root, 'private-diagnostics'); const file = path.join(directory, 'b-service-stderr.log');
+  assert.equal(fs.statSync(directory).mode & 0o777, 0o700); assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(file).size, PRIVATE_DIAGNOSTIC_BYTES); assert(fs.readFileSync(file, 'utf8').includes(secret));
+  const receiverFile = path.join(directory, 'b-receiver-diagnostics.json');
+  assert.equal(fs.statSync(receiverFile).mode & 0o777, 0o600); assert.equal(fs.statSync(receiverFile).size, PRIVATE_RECEIVER_DIAGNOSTIC_BYTES); assert(fs.readFileSync(receiverFile, 'utf8').includes(receiverSecret));
+  assert.deepEqual(Object.keys(result[0]), ['suffix', 'containerId', 'state', 'stderr', 'receiver']);
+  assert.deepEqual(Object.keys(result[0].stderr), ['file', 'bytes', 'truncated', 'sha256']);
+  assert.equal(result[0].stderr.file, 'b-service-stderr.log'); assert.equal(result[0].stderr.truncated, true);
+  assert.deepEqual(Object.keys(result[0].receiver), ['available', 'file', 'bytes', 'truncated', 'sha256']);
+  assert.equal(result[0].receiver.truncated, true);
+  assert.match(result[0].stderr.sha256, /^[a-f0-9]{64}$/); assert.match(result[0].receiver.sha256, /^[a-f0-9]{64}$/);
+  assert(!JSON.stringify(result).includes(secret)); assert(!JSON.stringify(result).includes(receiverSecret));
+});
+
+test('missing receiver diagnostic does not discard owned container evidence or alter failure control', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-missing-receiver-diagnostic-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runId = 'owned-run'; const id = 'b'.repeat(64);
+  const resources = { containers: [id], containerDetails: [{ id, owner: runId }], environments: [{ suffix: 'a', service: id }] };
+  const result = captureFailureDiagnostics({ root, runId, resources,
+    inspect: () => ({ id, owner: runId, status: 'running', running: true, exitCode: 0 }), stderr: () => Buffer.from('service'),
+    receiverDiagnostics: () => { throw new Error('private child detail'); } });
+  assert.equal(result[0].receiver.available, false); assert.equal(result[0].stderr.bytes, 7);
+  assert(!JSON.stringify(result).includes('private child detail'));
+});
+
+test('failure diagnostic rejection stays private and returns control for cleanup', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-private-diagnostic-failure-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const attempted = [];
+  const result = captureFailureDiagnosticsSafely({ root, runId: 'owned-run',
+    resources: { containers: [], containerDetails: [], environments: [{ suffix: 'b', service: 'f'.repeat(64) }] },
+    inspect: id => { attempted.push(id); throw new Error('secret inspect failure'); }, stderr: () => { throw new Error('must not run'); } });
+  assert.deepEqual(result, [{ captureError: 'capture_failed' }]); assert.deepEqual(attempted, []);
+  let cleaned = false; try { throw new Error('original scenario failure'); } catch (_) { cleaned = true; }
+  assert.equal(cleaned, true); assert(!JSON.stringify(result).includes('secret'));
 });

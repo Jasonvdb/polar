@@ -19,6 +19,7 @@ pub(crate) type Sdk = PaykitSdk<
     Arc<ReceiverStorage>,
     crate::receiver::SessionProvider,
     crate::wallet_adapter::WalletAdapter,
+    crate::clock::SdkEventClock,
 >;
 const FAILURE: &str = "The receiver operation failed. Check peer state and local services. An interrupted command requires reconciliation before another attempt.";
 #[derive(Clone, Serialize, Deserialize)]
@@ -37,6 +38,7 @@ struct LocalState {
     owned_avatars: Vec<String>,
 }
 pub struct Runtime {
+    clock: crate::clock::ApplicationClock,
     sdk: Sdk,
     storage: Arc<ReceiverStorage>,
     vault: Arc<Vault>,
@@ -55,6 +57,7 @@ impl Runtime {
         sessions: crate::receiver::SessionProvider,
         payments: crate::wallet_adapter::WalletAdapter,
     ) -> anyhow::Result<Self> {
+        let clock = payments.clock();
         let mut state: LocalState = vault.load("workspace.cbor")?.unwrap_or_else(|| LocalState {
             view: Workspace {
                 receiver_id: id,
@@ -82,6 +85,7 @@ impl Runtime {
         }
         vault.save("workspace.cbor", &state)?;
         Ok(Self {
+            clock,
             sdk,
             storage,
             vault,
@@ -147,6 +151,9 @@ impl Runtime {
     }
     async fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let name = command.command.as_str();
+        if crate::subscription_input::is_command(name) {
+            return self.subscription_command(command).await;
+        }
         if crate::receipt_input::is_command(name) {
             return self.receipt_command(command).await;
         }
@@ -527,6 +534,9 @@ impl Runtime {
     pub async fn background(&mut self) -> anyhow::Result<()> {
         let before = self.state.view.clone();
         let result = self.sync().await;
+        if result.is_ok() {
+            self.subscription_background().await?;
+        }
         self.state.view.last_error = result.err().map(|_| FAILURE.into());
         self.refresh().await?;
         if self.state.view != before {
@@ -575,6 +585,8 @@ impl Runtime {
     pub async fn refresh(&mut self) -> anyhow::Result<()> {
         self.project_receipts().await?;
         self.project_requests().await?;
+        self.project_subscriptions().await?;
+        self.state.view.application_clock = Some(self.clock.view());
         self.payments.project(&mut self.state.view)?;
         let peers = self.sdk.linked_peers().await?;
         self.state.view.links = self
@@ -768,11 +780,13 @@ mod tests {
         let payments =
             crate::wallet_adapter::WalletAdapter::open(vault.clone(), receiver, "test".into())
                 .unwrap();
-        let sdk = PaykitSdk::new(
+        let clock = storage.sdk_clock(payments.clock()).unwrap();
+        let sdk = PaykitSdk::try_with_clock(
             storage.clone(),
             provider.clone(),
             payments.clone(),
             paykit_sdk::PaykitSdkConfig::new(PaykitReceiverPath::new("test/wallet").unwrap()),
+            clock.clone(),
         )
         .unwrap();
         Runtime::new(
@@ -1122,3 +1136,6 @@ mod requests;
 
 #[path = "receipt_workflow.rs"]
 mod receipts;
+
+#[path = "subscription_workflow.rs"]
+mod subscription_workflow;

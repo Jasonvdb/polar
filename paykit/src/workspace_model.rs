@@ -4,6 +4,10 @@ use uuid::Uuid;
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workspace {
+    #[serde(default)]
+    pub application_clock: Option<crate::clock::ClockView>,
+    #[serde(default)]
+    pub subscriptions: Vec<crate::subscription_model::SubscriptionView>,
     pub receiver_id: Uuid,
     #[serde(default)]
     pub receipt_issuances: Vec<crate::receipt_model::ReceiptIssuanceView>,

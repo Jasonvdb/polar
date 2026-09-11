@@ -80,6 +80,11 @@ export const paykitCommands = [
   'request.accept',
   'request.reject',
   'request.cancel',
+  'subscription.prepare',
+  'subscription.authorize',
+  'subscription.disable',
+  'clock.set',
+  'clock.reset',
   'payment.execute',
   'payment.reconcile',
   'proof.submit',
@@ -108,7 +113,7 @@ export const isUuid = (value: unknown): value is string =>
   );
 export type PaykitInput = Record<
   string,
-  string | string[] | number | PaykitProofMaterial
+  string | string[] | number | PaykitProofMaterial | PaykitRecurrence | null
 >;
 export interface PaykitLink {
   peerPublicKey: string;
@@ -236,7 +241,78 @@ export const isPaykitRequestEndpointBinding = (
     isUuid(binding.reservationId)
   );
 };
+export interface PaykitEndpointCommitment {
+  source: 'public' | 'private';
+  method: PaykitMethod;
+  reservationId: string;
+  endpointHash: string;
+}
+export const isPaykitEndpointCommitment = (
+  value: unknown,
+): value is PaykitEndpointCommitment => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const commitment = value as Record<string, unknown>;
+  return (
+    Object.keys(commitment).length === 4 &&
+    (commitment.source === 'public' || commitment.source === 'private') &&
+    paykitMethods.includes(commitment.method as PaykitMethod) &&
+    isUuid(commitment.reservationId) &&
+    commitment.reservationId === commitment.reservationId.toLowerCase() &&
+    typeof commitment.endpointHash === 'string' &&
+    /^[0-9a-f]{64}$/.test(commitment.endpointHash)
+  );
+};
+export const paykitRecurrenceUnits = [
+  'minute',
+  'hour',
+  'day',
+  'week',
+  'month',
+  'year',
+] as const;
+export interface PaykitBillingPeriod {
+  startsAt: string;
+  endsAt: string;
+}
+export interface PaykitRecurrence {
+  every: number;
+  unit: (typeof paykitRecurrenceUnits)[number];
+  startsAt: string;
+  anchor: string;
+  endsAt: string | null;
+}
+export interface PaykitSubscriptionPeriod extends PaykitBillingPeriod {
+  endpointCommitments?: PaykitEndpointCommitment[];
+  index: number;
+  status:
+    | 'future'
+    | 'due'
+    | 'missed'
+    | 'prepared'
+    | 'executed'
+    | 'proofSubmitted'
+    | 'verified';
+  offerId: string | null;
+  endpointBindings: PaykitRequestEndpointBinding[];
+  executionId: string | null;
+  proofId: string | null;
+  lastError: string | null;
+}
+export interface PaykitSubscription {
+  requestId: string;
+  currentPeriodIndex: number | null;
+  autopay: {
+    enabled: boolean;
+    walletId: string | null;
+    source: string | null;
+    method: string | null;
+    status: 'disabled' | 'waiting' | 'ready' | 'attempted' | 'blocked';
+    lastError: string | null;
+  };
+  periods: PaykitSubscriptionPeriod[];
+}
 export interface PaykitPaymentRequest {
+  recurrence?: PaykitRecurrence | null;
   id: string;
   peerPublicKey: string;
   peerReceiverPath: string;
@@ -245,6 +321,7 @@ export interface PaykitPaymentRequest {
     | 'proposed'
     | 'proposalExpired'
     | 'accepted'
+    | 'activeRecurring'
     | 'rejected'
     | 'canceled'
     | 'proofSubmitted'
@@ -260,6 +337,8 @@ export interface PaykitPaymentRequest {
   createdAt: string;
 }
 export interface PaykitExecution {
+  billingPeriod?: PaykitBillingPeriod | null;
+  periodIndex?: number | null;
   id: string;
   requestId: string;
   walletId: string;
@@ -283,6 +362,8 @@ export interface PaykitExecution {
   lastError: string | null;
 }
 export interface PaykitProof {
+  billingPeriod?: PaykitBillingPeriod | null;
+  periodIndex?: number | null;
   id: string;
   requestId: string;
   method: string;
@@ -291,6 +372,8 @@ export interface PaykitProof {
   recordedAt: string;
 }
 export interface PaykitSettlement {
+  billingPeriod?: PaykitBillingPeriod | null;
+  periodIndex?: number | null;
   proofId: string;
   requestId: string;
   status: 'pending' | 'verified' | 'invalid' | 'failed';
@@ -300,6 +383,7 @@ export interface PaykitSettlement {
   lastError: string | null;
 }
 export interface PaykitReceiptIssuance {
+  billingPeriod?: PaykitBillingPeriod | null;
   id: string;
   requestId: string;
   proofId: string;
@@ -330,6 +414,7 @@ export interface PaykitReceiptIssuance {
   lastError: string | null;
 }
 export interface PaykitReceiptAccess {
+  billingPeriod?: PaykitBillingPeriod | null;
   receiptId: string;
   peerPublicKey: string;
   peerReceiverPath: string;
@@ -343,6 +428,7 @@ export interface PaykitReceiptAccess {
   lastError: string | null;
 }
 export interface PaykitDecryptedReceipt {
+  billingPeriod?: PaykitBillingPeriod | null;
   id: string;
   issuerPublicKey: string;
   issuerReceiverPath: string;
@@ -388,6 +474,8 @@ export interface PaykitOperationResult {
   resolution?: PaykitResolution;
 }
 export interface PaykitReceiverWorkspace {
+  applicationClock?: { mode: 'system' | 'controlled'; now: string };
+  subscriptions?: PaykitSubscription[];
   receiverId: string;
   deliveryPaused: boolean;
   links: PaykitLink[];
@@ -453,13 +541,32 @@ export const paykitCommandFields: Record<PaykitCommand, string[]> = {
     'description',
     'expirySeconds',
     'acceptedMethods',
+    'recurrence',
   ],
   'request.accept': ['receiverId', 'requestId'],
   'request.reject': ['receiverId', 'requestId'],
   'request.cancel': ['receiverId', 'requestId'],
-  'payment.execute': ['receiverId', 'requestId', 'walletId', 'source', 'method'],
+  'subscription.prepare': [
+    'receiverId',
+    'requestId',
+    'periodIndex',
+    'source',
+    'expirySeconds',
+  ],
+  'subscription.authorize': ['receiverId', 'requestId', 'walletId', 'source', 'method'],
+  'subscription.disable': ['receiverId', 'requestId'],
+  'clock.set': ['receiverId', 'now'],
+  'clock.reset': ['receiverId'],
+  'payment.execute': [
+    'receiverId',
+    'requestId',
+    'walletId',
+    'source',
+    'method',
+    'periodIndex',
+  ],
   'payment.reconcile': ['receiverId', 'executionId'],
-  'proof.submit': ['receiverId', 'requestId', 'executionId', 'proof'],
+  'proof.submit': ['receiverId', 'requestId', 'executionId', 'proof', 'periodIndex'],
   'proof.verify': ['receiverId', 'requestId', 'proofId', 'requiredConfirmations'],
   'receipt.prepare': ['receiverId', 'requestId', 'proofId', 'note'],
   'receipt.process': ['receiverId', 'receiptId'],
@@ -517,6 +624,37 @@ export const validatePaykitProof = (value: unknown): void => {
   if (!valid) throw new Error('Invalid Paykit proof');
 };
 
+export const isPaykitUtcInstant = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  /^20[2-9][0-9]-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$|^2100-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$/.test(
+    value,
+  ) &&
+  Number.isFinite(Date.parse(value)) &&
+  new Date(value).toISOString() === value.replace('Z', '.000Z');
+
+const validatePaykitRecurrence = (value: unknown) => {
+  const recurrence = value as PaykitRecurrence;
+  if (
+    !recurrence ||
+    typeof recurrence !== 'object' ||
+    Array.isArray(recurrence) ||
+    Object.keys(recurrence).some(
+      key => !['every', 'unit', 'startsAt', 'anchor', 'endsAt'].includes(key),
+    ) ||
+    !Number.isInteger(recurrence.every) ||
+    recurrence.every < 1 ||
+    recurrence.every > 1000 ||
+    !paykitRecurrenceUnits.includes(recurrence.unit) ||
+    !isPaykitUtcInstant(recurrence.startsAt) ||
+    recurrence.anchor !== recurrence.startsAt ||
+    (recurrence.endsAt !== null &&
+      (!isPaykitUtcInstant(recurrence.endsAt) ||
+        recurrence.endsAt <= recurrence.startsAt))
+  )
+    throw new Error('Invalid Paykit recurrence');
+  // The backend validates anchored calendar boundaries, including clamped month/year dates.
+};
+
 export const validatePaykitCommand = (request: PaykitCommandRequest) => {
   if (!request || !isUuid(request.commandId) || !paykitCommands.includes(request.command))
     throw new Error('Invalid Paykit command or command ID');
@@ -532,13 +670,33 @@ export const validatePaykitCommand = (request: PaykitCommandRequest) => {
     const value = request.input[field];
     if (
       (field === 'note' ||
-        field === 'method' ||
+        field === 'recurrence' ||
+        (field === 'periodIndex' && request.command !== 'subscription.prepare') ||
+        (field === 'method' && request.command !== 'subscription.authorize') ||
         field === 'requiredConfirmations' ||
         (request.command === 'proof.submit' &&
           ['executionId', 'proof'].includes(field))) &&
       value === undefined
     )
       continue;
+    if (field === 'recurrence') {
+      if (value !== null) validatePaykitRecurrence(value);
+      continue;
+    }
+    if (field === 'now') {
+      if (!isPaykitUtcInstant(value)) throw new Error('Invalid Paykit UTC time');
+      continue;
+    }
+    if (field === 'periodIndex') {
+      if (
+        typeof value !== 'number' ||
+        !Number.isInteger(value) ||
+        value < 0 ||
+        value > 10000
+      )
+        throw new Error('Invalid Paykit periodIndex');
+      continue;
+    }
     if (field === 'note') {
       if (
         typeof value !== 'string' ||

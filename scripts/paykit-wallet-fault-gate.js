@@ -74,6 +74,19 @@ function loadConfig() {
   value.gateKey = privateFile(value.lnd.gateKeyFile);
   return value;
 }
+function signingEvidence(result) {
+  if (result.status !== 200) return undefined;
+  try {
+    const response = JSON.parse(result.body);
+    if (response.error || response.result?.complete !== true || !/^(?:[a-f0-9]{2})+$/.test(response.result.hex)) return undefined;
+    return { signedTransactionDigest: require('crypto').createHash('sha256').update(Buffer.from(response.result.hex, 'hex')).digest('hex') };
+  } catch (_) { return undefined; }
+}
+function broadcastEvidence(result) {
+  if (!executionSucceeded('core', result)) return undefined;
+  const transactionId = JSON.parse(result.body).result;
+  return /^[a-f0-9]{64}$/.test(transactionId) ? { transactionId } : undefined;
+}
 function safeRoute(channel, request, body) {
   const pathname = request.url.split('?')[0];
   if (!request.url.startsWith('/') || request.url.startsWith('//') || request.url.includes('#')) throw new Error('Invalid request path');
@@ -82,6 +95,7 @@ function safeRoute(channel, request, body) {
     let rpc;
     try { rpc = JSON.parse(body); } catch (_) { throw new Error('Invalid Core JSON'); }
     if (!rpc || Array.isArray(rpc) || typeof rpc.method !== 'string') throw new Error('Expected single Core RPC');
+    if (rpc.method === 'signrawtransactionwithwallet') return { operation: 'signrawtransactionwithwallet', issuance: false, signing: true };
     if (rpc.method === 'sendrawtransaction') return { operation: 'sendrawtransaction', issuance: false, execution: true };
     return { operation: rpc.method === 'getnewaddress' ? 'getnewaddress' : 'other-rpc', issuance: rpc.method === 'getnewaddress' };
   }
@@ -91,7 +105,7 @@ function safeRoute(channel, request, body) {
   return { operation: request.method === 'POST' && pathname === '/v1/invoices' ? 'addinvoice' : 'other-rest', issuance: request.method === 'POST' && pathname === '/v1/invoices' };
 }
 function claim(channel, route) {
-  if (!route.issuance && !route.execution && !route.channel) return undefined;
+  if (!route.issuance && !route.execution && !route.signing && !route.channel) return undefined;
   const file = path.join(config.controlDir, `${channel}.arm.json`);
   let arm;
   try { arm = JSON.parse(privateFile(file)); }
@@ -99,7 +113,7 @@ function claim(channel, route) {
   if (!arm || !UUID.test(arm.nonce) || !['hold', 'drop'].includes(arm.action) || Object.keys(arm).some(k => !['nonce', 'action', 'operation'].includes(k))) {
     throw new Error('Invalid arm control');
   }
-  if (arm.operation !== undefined && !(channel === 'core' ? ['sendrawtransaction'] : ['sendpayment', 'openchannel']).includes(arm.operation)) throw new Error('Invalid arm operation');
+  if (arm.operation !== undefined && !(channel === 'core' ? ['sendrawtransaction', 'signrawtransactionwithwallet'] : ['sendpayment', 'openchannel']).includes(arm.operation)) throw new Error('Invalid arm operation');
   if (arm.operation ? arm.operation !== route.operation : !route.issuance) return undefined;
   const prefix = path.join(config.controlDir, `${channel}.${arm.nonce}`);
   if (fs.existsSync(`${prefix}.claimed.json`)) throw new Error('Nonce already claimed');
@@ -261,18 +275,21 @@ async function handle(channel, req, res) {
     const successfulIssuance = route.issuance && issuanceSucceeded(channel, result);
     if (successfulIssuance) counts[channel].issuanceSuccess++;
     const successfulExecution = !!route.execution && executionSucceeded(channel, result);
+    const broadcast = channel === 'core' && route.operation === 'sendrawtransaction' ? broadcastEvidence(result) : undefined;
     if (successfulExecution) counts[channel].executionSuccess++;
+    const signing = route.signing ? signingEvidence(result) : undefined;
+    const successfulSigning = signing !== undefined;
     const point = route.channel ? channelPoint(result) : undefined;
     const successfulChannel = point !== undefined;
     if (successfulChannel) counts[channel].channelSuccess++;
-    evidence('upstream.completed', { ...detail, status: result.status, successfulIssuance, successfulExecution, successfulChannel, ...(point || {}), counts: counts[channel] });
-    if (!arm || (!successfulIssuance && !successfulExecution && !successfulChannel)) {
+    evidence('upstream.completed', { ...detail, status: result.status, successfulIssuance, successfulExecution, successfulSigning, ...(signing || {}), ...(broadcast || {}), successfulChannel, ...(point || {}), counts: counts[channel] });
+    if (!arm || (!successfulIssuance && !successfulExecution && !successfulSigning && !successfulChannel)) {
       if (arm) evidence('arm.not-triggered', { ...detail, reason: 'upstream-not-successful' });
       relay(res, result); return;
     }
     // This file proves a complete successful REAL wallet response was received
     // before any response bytes were sent to the calling Paykit adapter.
-    save(`${arm.prefix}.ready.json`, { ...detail, upstreamCompletedAt: new Date().toISOString(), successfulIssuance, successfulExecution, successfulChannel, ...(point || {}), action: arm.action, counts: counts[channel] });
+    save(`${arm.prefix}.ready.json`, { ...detail, upstreamCompletedAt: new Date().toISOString(), successfulIssuance, successfulExecution, successfulSigning, ...(signing || {}), ...(broadcast || {}), successfulChannel, ...(point || {}), action: arm.action, counts: counts[channel] });
     if (arm.action === 'drop') { evidence('response.dropped', detail); res.destroy(); return; }
     await hold(res, result, arm, detail);
   } catch (_) {
@@ -319,4 +336,4 @@ async function main() {
   }
 }
 if (require.main === module) main().catch(() => { process.exitCode = 1; shutdown(); });
-module.exports = { channelPoint, channelSucceeded, lndCredentialKind, executionSucceeded, issuanceSucceeded, headersWithoutHop, safeRoute };
+module.exports = { broadcastEvidence, signingEvidence, channelPoint, channelSucceeded, lndCredentialKind, executionSucceeded, issuanceSucceeded, headersWithoutHop, safeRoute };

@@ -8,8 +8,8 @@ use crate::{
     wallet_execution::{self, SpendState},
 };
 use paykit_sdk::{
-    storage::StorageAdapter, LinkedPeerState, PaykitReceiverPath, PaymentRequestLifecycleState,
-    PaymentRequestLocalRole, PaymentRequestRecord, PubkyPublicKey,
+    storage::StorageAdapter, Clock, LinkedPeerState, PaykitReceiverPath,
+    PaymentRequestLifecycleState, PaymentRequestLocalRole, PaymentRequestRecord, PubkyPublicKey,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,10 +27,10 @@ impl Runtime {
     fn request_state(&self) -> anyhow::Result<RequestState> {
         Ok(self.vault.load("requests.cbor")?.unwrap_or_default())
     }
-    fn spend_vault(&self) -> anyhow::Result<crate::storage::Vault> {
+    pub(super) fn spend_vault(&self) -> anyhow::Result<crate::storage::Vault> {
         self.payments.execution_vault()
     }
-    async fn request_record(&self, id: Uuid) -> anyhow::Result<PaymentRequestRecord> {
+    pub(super) async fn request_record(&self, id: Uuid) -> anyhow::Result<PaymentRequestRecord> {
         self.sdk
             .payment_requests()
             .await?
@@ -45,8 +45,16 @@ impl Runtime {
     ) -> anyhow::Result<(PaymentRequestRecord, Proof)> {
         let record = self.request_record(request_id).await?;
         anyhow::ensure!(
+            !super::subscription_workflow::is_offer(&record),
+            "Period offers do not issue receipts."
+        );
+        anyhow::ensure!(
             record.local_role == Some(PaymentRequestLocalRole::Payee)
-                && record.state == PaymentRequestLifecycleState::ProofSubmitted
+                && matches!(
+                    record.state,
+                    PaymentRequestLifecycleState::ProofSubmitted
+                        | PaymentRequestLifecycleState::ActiveRecurring
+                )
                 && record.invalid_reason.is_none(),
             "receipt requires payee and valid proof history"
         );
@@ -86,6 +94,13 @@ impl Runtime {
                     state.executions[n].receiver_id == i.receiver_id,
                     "execution belongs to another receiver"
                 );
+                let execution = &state.executions[n];
+                if execution.view.method == ONCHAIN {
+                    execution
+                        .wallet
+                        .load_existing_core_wallet(&execution.owner, self.owner.as_str())
+                        .await?;
+                }
                 wallet_execution::execute(&mut state, &vault, n, true).await?;
             }
             "proof.submit" => self.submit_proof(c).await?,
@@ -98,6 +113,9 @@ impl Runtime {
     async fn create_request(&self, c: &Command) -> anyhow::Result<()> {
         let i: Create = serde_json::from_value(c.input.clone())?;
         self.ensure_payment_peer(&i.peer_public_key, &i.peer_receiver_path)?;
+        if let Some(schedule) = &i.recurrence {
+            schedule.latest_started(self.clock.now())?;
+        }
         let correlation = format!("polar:{}", c.command_id);
         let mut local = self.request_state()?;
         let records = self.sdk.payment_requests().await?;
@@ -112,7 +130,35 @@ impl Runtime {
             !local.proposals.contains_key(&c.command_id),
             "proposal checkpoint unresolved; inspect SDK history before retry"
         );
-        let bindings = self.fresh_request_bindings(&i, &local).await?;
+        let bindings = if i.recurrence.is_some() {
+            vec![]
+        } else {
+            self.fresh_request_bindings(&i, &local).await?
+        };
+        let amount = paykit_lib::PaymentAmount::new(i.amount_sats, "sat")?;
+        let terms = paykit_lib::PaymentRequestTerms {
+            amount,
+            payment_reference: paykit_lib::PaymentReference::new(correlation.clone())?,
+            proposal_expires_at: Some(
+                (self.clock.now() + chrono::Duration::seconds(i.expiry_seconds.into()))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+            recurrence: i
+                .recurrence
+                .as_ref()
+                .map(crate::recurrence::Recurrence::sdk)
+                .transpose()?,
+            accepted_payment_endpoint_identifiers: i
+                .accepted_methods
+                .into_iter()
+                .map(paykit_lib::PaymentEndpointIdentifier::new)
+                .collect::<Result<_, _>>()?,
+            metadata: json!({"description":i.description,"polarPaykitEndpoints":&bindings})
+                .as_object()
+                .expect("object literal")
+                .clone(),
+        };
+        ensure_request_fits(&terms)?;
         for binding in &bindings {
             local
                 .claims
@@ -120,25 +166,6 @@ impl Runtime {
         }
         local.proposals.insert(c.command_id, correlation.clone());
         self.vault.save("requests.cbor", &local)?;
-        let amount = paykit_lib::PaymentAmount::new(i.amount_sats, "sat")?;
-        let terms = paykit_lib::PaymentRequestTerms {
-            amount,
-            payment_reference: paykit_lib::PaymentReference::new(correlation)?,
-            proposal_expires_at: Some(
-                (chrono::Utc::now() + chrono::Duration::seconds(i.expiry_seconds.into()))
-                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            ),
-            recurrence: None,
-            accepted_payment_endpoint_identifiers: i
-                .accepted_methods
-                .into_iter()
-                .map(paykit_lib::PaymentEndpointIdentifier::new)
-                .collect::<Result<_, _>>()?,
-            metadata: json!({"description":i.description,"polarPaykitEndpoints":bindings})
-                .as_object()
-                .expect("object literal")
-                .clone(),
-        };
         self.sdk
             .propose_payment_request(
                 PubkyPublicKey::new(i.peer_public_key)?,
@@ -216,7 +243,10 @@ impl Runtime {
     /// The pinned SDK has no public combined private-send readiness query. Mirror
     /// its identity + linked-peer/snapshot predicate before our one-shot intent.
     /// This inspects local readiness only: offline peers and paused delivery may queue.
-    async fn ensure_request_send_ready(&self, record: &PaymentRequestRecord) -> anyhow::Result<()> {
+    pub(super) async fn ensure_request_send_ready(
+        &self,
+        record: &PaymentRequestRecord,
+    ) -> anyhow::Result<()> {
         let identity = self.sdk.identity_status().await?;
         let linked = self
             .storage
@@ -255,6 +285,13 @@ impl Runtime {
     async fn transition_request(&self, c: &Command) -> anyhow::Result<()> {
         let i: Request = serde_json::from_value(c.input.clone())?;
         let record = self.request_record(i.request_id).await?;
+        anyhow::ensure!(
+            !super::subscription_workflow::is_offer(&record),
+            "Period offers are endpoint metadata, not independently actionable requests."
+        );
+        if c.command == "request.cancel" {
+            self.disable_subscription(&record.payment_request_id)?;
+        }
         let already = match c.command.as_str() {
             "request.accept" => record.accepted_event_id.is_some(),
             "request.reject" => record.rejected_event_id.is_some(),
@@ -306,31 +343,44 @@ impl Runtime {
         }
         Ok(())
     }
-    async fn execute_request(&mut self, c: &Command) -> anyhow::Result<()> {
+    pub(super) async fn execute_request(&mut self, c: &Command) -> anyhow::Result<()> {
         let i: Execute = serde_json::from_value(c.input.clone())?;
         let vault = self.spend_vault()?;
         let _lock = vault.lock("spending.lock")?;
         let mut state = SpendState::open(&vault)?;
         if state
-            .existing(i.receiver_id, &i.request_id.to_string())
+            .existing_period(i.receiver_id, &i.request_id.to_string(), i.period_index)
             .is_some()
         {
             return Ok(());
         }
         let record = self.request_record(i.request_id).await?;
         anyhow::ensure!(
+            !super::subscription_workflow::is_offer(&record),
+            "Period offers cannot be paid independently."
+        );
+        let period = super::subscription_workflow::period_for(&record, i.period_index)?;
+        if let Some(period) = &period {
+            anyhow::ensure!(
+                crate::recurrence::timestamp(&period.starts_at)? <= self.clock.now(),
+                "Future periods cannot be paid."
+            );
+        }
+        anyhow::ensure!(
             record.local_role == Some(PaymentRequestLocalRole::Payer)
-                && record.state == PaymentRequestLifecycleState::Accepted,
+                && matches!(
+                    record.state,
+                    PaymentRequestLifecycleState::Accepted
+                        | PaymentRequestLifecycleState::ActiveRecurring
+                ),
             "only payer can execute an accepted unpaid request"
         );
+        ensure_period_has_no_proof(&self.vault, &record, i.period_index)?;
         let terms = record
             .terms
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("request terms missing"))?;
-        anyhow::ensure!(
-            terms.recurrence.is_none() && terms.amount.asset == "sat",
-            "unsupported request terms"
-        );
+        anyhow::ensure!(terms.amount.asset == "sat", "unsupported request terms");
         payment_model::sats(&terms.amount.value)?;
         let wallet = self.payments.configured_wallet(&i.wallet_id)?;
         let resolution = self
@@ -354,7 +404,7 @@ impl Runtime {
                     .is_some_and(|m| terms.accepted_payment_endpoint_identifiers.contains(m)),
             "selected endpoint is not accepted or payable"
         );
-        let bindings = bindings(terms)?;
+        let bindings = self.request_bindings(&record, i.period_index).await?;
         anyhow::ensure!(bindings.iter().any(|b|b.source==resolution.source && Some(&b.method)==resolution.method.as_ref() && Some(&b.endpoint)==resolution.endpoint.as_ref()),"resolved endpoint is not bound to this immutable request; restore the expected list or create a new request");
         if resolution.source == "private" {
             self.validate_current_resolution(&resolution).await?;
@@ -367,6 +417,8 @@ impl Runtime {
             i.request_id.to_string(),
             resolution.clone(),
         )?;
+        execution.view.period_index = i.period_index;
+        execution.view.billing_period = period;
         if execution.view.method == crate::payment_model::BOLT11 {
             let info = execution
                 .wallet
@@ -388,13 +440,18 @@ impl Runtime {
         state.save(&vault)?;
         wallet_execution::execute(&mut state, &vault, n, false).await
     }
-    async fn submit_proof(&self, c: &Command) -> anyhow::Result<()> {
+    pub(super) async fn submit_proof(&self, c: &Command) -> anyhow::Result<()> {
         let i: Submit = serde_json::from_value(c.input.clone())?;
         let record = self.request_record(i.request_id).await?;
         anyhow::ensure!(
             record.local_role == Some(PaymentRequestLocalRole::Payer),
             "only payer submits proofs"
         );
+        anyhow::ensure!(
+            !super::subscription_workflow::is_offer(&record),
+            "Period offers do not accept payment proofs."
+        );
+        let mut period_index = i.period_index;
         let proof = if let Some(id) = i.execution_id {
             let vault = self.spend_vault()?;
             let state = SpendState::open(&vault)?;
@@ -405,6 +462,11 @@ impl Runtime {
                     && e.view.status == "succeeded",
                 "execution has no successful payment for this request"
             );
+            anyhow::ensure!(
+                period_index.is_none() || period_index == e.view.period_index,
+                "Execution period mismatch"
+            );
+            period_index = e.view.period_index;
             e.proof
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("execution proof missing"))?
@@ -416,21 +478,36 @@ impl Runtime {
             .as_object()
             .expect("proof object")
             .clone();
-        if !record.payment_proofs.is_empty() {
+        let period = super::subscription_workflow::period_for(&record, period_index)?;
+        if let Some(period) = &period {
             anyhow::ensure!(
-                record.payment_proofs.iter().any(|p| p.proof == value),
+                crate::recurrence::timestamp(&period.starts_at)? <= self.clock.now(),
+                "Future periods cannot submit a proof."
+            );
+        }
+        let prior: Vec<_> = record
+            .payment_proofs
+            .iter()
+            .filter(|p| {
+                super::subscription_workflow::proof_period(&record, p.billing_period.as_ref()).ok()
+                    == Some(period_index)
+            })
+            .collect();
+        if !prior.is_empty() {
+            anyhow::ensure!(
+                prior.iter().any(|p| p.proof == value),
                 "request already has a different proof"
             );
             return Ok(());
         }
         self.ensure_request_send_ready(&record).await?;
-        checkpoint_proof(&self.vault, c.command_id, &record, &proof)?;
+        checkpoint_proof(&self.vault, c.command_id, &record, &proof, period_index)?;
         self.sdk
             .submit_payment_proof(
                 record.counterparty,
                 record.counterparty_receiver_path,
                 &paykit_lib::PaymentRequestId::new(i.request_id.to_string())?,
-                None,
+                period.as_ref().map(crate::recurrence::BillingPeriod::sdk),
                 paykit_lib::PaymentEndpointIdentifier::new(proof.method())?,
                 value,
             )
@@ -441,10 +518,18 @@ impl Runtime {
         let records = self.sdk.payment_requests().await?;
         let mut requests = vec![];
         let mut proofs = vec![];
-        for record in records.into_iter().take(128) {
-            if let Some(terms) = record.terms {
+        for record in records
+            .into_iter()
+            .filter(|r| !super::subscription_workflow::is_offer(r))
+            .take(128)
+        {
+            let recurrence_result = super::subscription_workflow::recurrence(&record);
+            let invalid_recurrence = recurrence_result.is_err();
+            let recurrence = recurrence_result.ok().flatten();
+            if let Some(terms) = record.terms.clone() {
                 let endpoint_bindings = bindings(&terms).unwrap_or_default();
                 requests.push(RequestView {
+                    recurrence: recurrence.clone(),
                     id: record.payment_request_id.clone(),
                     peer_public_key: record.counterparty.to_string(),
                     peer_receiver_path: record.counterparty_receiver_path.to_string(),
@@ -453,7 +538,12 @@ impl Runtime {
                         _ => "payee",
                     }
                     .into(),
-                    lifecycle: lifecycle(record.state).into(),
+                    lifecycle: if invalid_recurrence {
+                        "invalidConflict"
+                    } else {
+                        lifecycle(record.state)
+                    }
+                    .into(),
                     amount_sats: terms.amount.value,
                     description: terms
                         .metadata
@@ -472,12 +562,22 @@ impl Runtime {
                         .unwrap_or_default(),
                 });
             }
-            for p in record.payment_proofs {
+            for p in &record.payment_proofs {
                 if let Ok(proof) = serde_json::from_value::<Proof>(json!(p.proof)) {
                     proofs.push(ProofView {
-                        id: p.event_id,
+                        period_index: super::subscription_workflow::proof_period(
+                            &record,
+                            p.billing_period.as_ref(),
+                        )
+                        .ok()
+                        .flatten(),
+                        billing_period: p
+                            .billing_period
+                            .as_ref()
+                            .map(crate::recurrence::BillingPeriod::from_record),
+                        id: p.event_id.clone(),
                         request_id: record.payment_request_id.clone(),
-                        method: p.payment_endpoint_identifier,
+                        method: p.payment_endpoint_identifier.clone(),
                         proof,
                         delivery_status: delivery(p.outbound_status.as_ref()),
                         recorded_at: p.recorded_at.to_rfc3339(),
@@ -502,8 +602,16 @@ impl Runtime {
         let i: Verify = serde_json::from_value(c.input.clone())?;
         let record = self.request_record(i.request_id).await?;
         anyhow::ensure!(
+            !super::subscription_workflow::is_offer(&record),
+            "Period offers do not settle payments."
+        );
+        anyhow::ensure!(
             record.local_role == Some(PaymentRequestLocalRole::Payee)
-                && record.state == PaymentRequestLifecycleState::ProofSubmitted,
+                && matches!(
+                    record.state,
+                    PaymentRequestLifecycleState::ProofSubmitted
+                        | PaymentRequestLifecycleState::ActiveRecurring
+                ),
             "only payee verifies a proof for an accepted request"
         );
         let p = record
@@ -511,20 +619,30 @@ impl Runtime {
             .iter()
             .find(|p| p.event_id == i.proof_id.to_string())
             .ok_or_else(|| anyhow::anyhow!("proof missing"))?;
+        let period_index =
+            super::subscription_workflow::proof_period(&record, p.billing_period.as_ref())?;
         let proof: Proof = serde_json::from_value(json!(p.proof))?;
         proof.validate()?;
         let vault = self.spend_vault()?;
         let _lock = vault.lock("spending.lock")?;
         let mut spends = SpendState::open(&vault)?;
         let key = proof.identity();
-        let binding = format!("{}:{}", i.receiver_id, i.request_id);
-        let reused = spends.settlements.get(&key).is_some_and(|r| r != &binding);
+        let binding = match period_index {
+            Some(index) => format!("{}:{}:{index}", i.receiver_id, i.request_id),
+            None => format!("{}:{}", i.receiver_id, i.request_id),
+        };
+        let reused = spends.settlement_conflicts(&key, &binding);
         let result = if reused {
             Ok((false, 0, None))
         } else {
-            self.check_settlement(&record, &proof).await
+            self.check_settlement(&record, &proof, period_index).await
         };
         let mut view = SettlementView {
+            period_index,
+            billing_period: p
+                .billing_period
+                .as_ref()
+                .map(crate::recurrence::BillingPeriod::from_record),
             proof_id: i.proof_id.to_string(),
             request_id: i.request_id.to_string(),
             status: "pending".into(),
@@ -574,6 +692,7 @@ impl Runtime {
         &self,
         request: &PaymentRequestRecord,
         proof: &Proof,
+        period_index: Option<u32>,
     ) -> anyhow::Result<(bool, u32, Option<String>)> {
         let terms = request
             .terms
@@ -588,12 +707,13 @@ impl Runtime {
         {
             return Ok((false, 0, None));
         }
-        let bindings = bindings(terms)?;
+        let bindings = self.request_bindings(request, period_index).await?;
         let local = self.request_state()?;
         let records = self.payments.snapshot()?.records;
         for reservation in records.into_iter().filter(|r| {
             r.view.method == proof.method()
-                && local.claims.get(&r.view.id) == Some(&terms.payment_reference)
+                && (period_index.is_some()
+                    || local.claims.get(&r.view.id) == Some(&terms.payment_reference))
                 && bindings.iter().any(|b| {
                     b.reservation_id == r.view.id
                         && b.source == r.view.source
@@ -681,20 +801,23 @@ fn checkpoint_proof(
     command_id: Uuid,
     record: &PaymentRequestRecord,
     proof: &Proof,
+    period_index: Option<u32>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         record.local_role == Some(PaymentRequestLocalRole::Payer)
-            && record.state == PaymentRequestLifecycleState::Accepted,
+            && matches!(
+                record.state,
+                PaymentRequestLifecycleState::Accepted
+                    | PaymentRequestLifecycleState::ActiveRecurring
+            ),
         "only payer can submit a proof for an accepted unpaid request"
     );
     let terms = record
         .terms
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("request terms missing"))?;
-    anyhow::ensure!(
-        terms.recurrence.is_none() && terms.amount.asset == "sat",
-        "unsupported request terms"
-    );
+    anyhow::ensure!(terms.amount.asset == "sat", "unsupported request terms");
+    let period = super::subscription_workflow::period_for(record, period_index)?;
     payment_model::sats(&terms.amount.value)?;
     proof.validate()?;
     let request = paykit_lib::PaymentRequest::new(
@@ -712,7 +835,10 @@ fn checkpoint_proof(
             )?,
             payment_reference: paykit_lib::PaymentReference::new(terms.payment_reference.clone())?,
             proposal_expires_at: terms.proposal_expires_at.clone(),
-            recurrence: None,
+            recurrence: super::subscription_workflow::recurrence(record)?
+                .as_ref()
+                .map(crate::recurrence::Recurrence::sdk)
+                .transpose()?,
             accepted_payment_endpoint_identifiers: terms
                 .accepted_payment_endpoint_identifiers
                 .iter()
@@ -725,7 +851,7 @@ fn checkpoint_proof(
         paykit_lib::EventId::new_v4(),
         request.payment_request_id.clone(),
         request.request.payment_reference.clone(),
-        None,
+        period.as_ref().map(crate::recurrence::BillingPeriod::sdk),
         paykit_lib::PaymentEndpointIdentifier::new(proof.method())?,
         serde_json::to_value(proof)?
             .as_object()
@@ -734,7 +860,10 @@ fn checkpoint_proof(
     )
     .validate_for_request(&request)?;
     let mut local: RequestState = vault.load("requests.cbor")?.unwrap_or_default();
-    let transition = format!("proof:{}", record.payment_request_id);
+    let transition = match period_index {
+        Some(index) => format!("proof:{}:{index}", record.payment_request_id),
+        None => format!("proof:{}", record.payment_request_id),
+    };
     anyhow::ensure!(
         !local.transitions.values().any(|v| v == &transition),
         "proof enqueue checkpoint unresolved; synchronize existing SDK history"
@@ -743,11 +872,50 @@ fn checkpoint_proof(
     vault.save("requests.cbor", &local)
 }
 
+fn ensure_period_has_no_proof(
+    vault: &crate::storage::Vault,
+    record: &PaymentRequestRecord,
+    period_index: Option<u32>,
+) -> anyhow::Result<()> {
+    let has_proof = record
+        .payment_proofs
+        .iter()
+        .try_fold(false, |found, proof| {
+            Ok::<_, anyhow::Error>(
+                found
+                    || super::subscription_workflow::proof_period(
+                        record,
+                        proof.billing_period.as_ref(),
+                    )? == period_index,
+            )
+        })?;
+    anyhow::ensure!(
+        !has_proof,
+        "payment proof already submitted for this period"
+    );
+
+    let transition = match period_index {
+        Some(index) => format!("proof:{}:{index}", record.payment_request_id),
+        None => format!("proof:{}", record.payment_request_id),
+    };
+    anyhow::ensure!(
+        !vault
+            .load::<RequestState>("requests.cbor")?
+            .unwrap_or_default()
+            .transitions
+            .values()
+            .any(|value| value == &transition),
+        "proof enqueue checkpoint unresolved for this period"
+    );
+    Ok(())
+}
+
 fn lifecycle(state: PaymentRequestLifecycleState) -> &'static str {
     match state {
         PaymentRequestLifecycleState::Proposed => "proposed",
         PaymentRequestLifecycleState::ProposalExpired => "proposalExpired",
         PaymentRequestLifecycleState::Accepted => "accepted",
+        PaymentRequestLifecycleState::ActiveRecurring => "activeRecurring",
         PaymentRequestLifecycleState::Rejected => "rejected",
         PaymentRequestLifecycleState::Canceled => "canceled",
         PaymentRequestLifecycleState::ProofSubmitted => "proofSubmitted",
@@ -768,7 +936,22 @@ fn delivery(status: Option<&paykit_sdk::OutboundPrivateMessageStatus>) -> String
         .unwrap_or_else(|| "received".into())
 }
 
-fn bindings(terms: &paykit_sdk::PaymentRequestTermsRecord) -> anyhow::Result<Vec<EndpointBinding>> {
+fn ensure_request_fits(terms: &paykit_lib::PaymentRequestTerms) -> anyhow::Result<()> {
+    let event = paykit_lib::PaymentRequestEvent::Request(paykit_lib::PaymentRequest::new(
+        paykit_lib::EventId::new_v4(),
+        paykit_lib::PaymentRequestId::new_v4(),
+        terms.clone(),
+    ));
+    let serialized = paykit_lib::serialize_payment_request_event(&event)?;
+    if serialized.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
+        return Err(crate::model::PublicError::new("request_too_large", "The encrypted request exceeds its message limit. Shorten the description or select fewer payment methods, then create a new request.").into());
+    }
+    Ok(())
+}
+
+pub(super) fn bindings(
+    terms: &paykit_sdk::PaymentRequestTermsRecord,
+) -> anyhow::Result<Vec<EndpointBinding>> {
     let value = terms
         .metadata
         .get("polarPaykitEndpoints")
@@ -836,7 +1019,7 @@ mod binding_tests {
             output_index: 0,
         };
         record.state = PaymentRequestLifecycleState::Proposed;
-        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof).is_err());
+        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof, None).is_err());
         assert!(open()
             .load::<RequestState>("requests.cbor")
             .unwrap()
@@ -846,13 +1029,13 @@ mod binding_tests {
             payment_hash: "cd".repeat(32),
             preimage: "ef".repeat(32),
         };
-        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &wrong_rail).is_err());
+        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &wrong_rail, None).is_err());
         assert!(open()
             .load::<RequestState>("requests.cbor")
             .unwrap()
             .is_none());
         let command = Uuid::new_v4();
-        checkpoint_proof(&open(), command, &record, &proof).unwrap();
+        checkpoint_proof(&open(), command, &record, &proof, None).unwrap();
         let saved = open()
             .load::<RequestState>("requests.cbor")
             .unwrap()
@@ -862,10 +1045,12 @@ mod binding_tests {
             Some(&format!("proof:{}", record.payment_request_id))
         );
         // A saved checkpoint without an SDK result is an uncertain write, even after restart.
-        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof)
-            .unwrap_err()
-            .to_string()
-            .contains("checkpoint unresolved"));
+        assert!(
+            checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof, None)
+                .unwrap_err()
+                .to_string()
+                .contains("checkpoint unresolved")
+        );
         assert_eq!(
             open()
                 .load::<RequestState>("requests.cbor")
@@ -893,14 +1078,320 @@ mod binding_tests {
         let mut missing_proposal = original;
         missing_proposal.proposal_event_id = None;
         for record in [unsupported, malformed, missing_proposal] {
-            assert!(checkpoint_proof(&vault, Uuid::new_v4(), &record, &proof).is_err());
+            assert!(checkpoint_proof(&vault, Uuid::new_v4(), &record, &proof, None).is_err());
         }
         assert!(vault
             .load::<RequestState>("requests.cbor")
             .unwrap()
             .is_none());
     }
+    #[test]
+    fn recurring_proof_checkpoints_are_independent_per_period_and_durable() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || {
+            crate::storage::Vault::new(dir.path().into(), [25; 32], "period-proof".into()).unwrap()
+        };
+        let mut record = payer_record();
+        record.state = PaymentRequestLifecycleState::ActiveRecurring;
+        record.terms.as_mut().unwrap().recurrence =
+            Some(paykit_sdk::PaymentRequestRecurrenceRecord {
+                every: 1,
+                unit: "month".into(),
+                starts_at: "2026-01-31T00:00:00Z".into(),
+                anchor: "2026-01-31T00:00:00Z".into(),
+                ends_at: None,
+            });
+        let proof = Proof::Onchain {
+            txid: "ab".repeat(32),
+            output_index: 0,
+        };
+        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof, None).is_err());
+        checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof, Some(0)).unwrap();
+        checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof, Some(1)).unwrap();
+        assert!(checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof, Some(0)).is_err());
+        assert_eq!(
+            open()
+                .load::<RequestState>("requests.cbor")
+                .unwrap()
+                .unwrap()
+                .transitions
+                .len(),
+            2
+        );
+        assert_eq!(lifecycle(record.state), "activeRecurring");
+    }
+    #[test]
+    fn recurring_payment_is_held_by_proof_checkpoint_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || {
+            crate::storage::Vault::new(dir.path().into(), [26; 32], "period-hold".into()).unwrap()
+        };
+        let record = recurring_payer_record();
+        let proof = Proof::Onchain {
+            txid: "ab".repeat(32),
+            output_index: 0,
+        };
+        checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof, Some(0)).unwrap();
+
+        assert!(ensure_period_has_no_proof(&open(), &record, Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("checkpoint unresolved"));
+        ensure_period_has_no_proof(&open(), &record, Some(1)).unwrap();
+    }
+    #[test]
+    fn recurring_payment_is_held_only_for_the_sdk_proof_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault =
+            crate::storage::Vault::new(dir.path().into(), [27; 32], "sdk-proof-hold".into())
+                .unwrap();
+        let mut record = recurring_payer_record();
+        let period = crate::recurrence::Recurrence::from_record(
+            record.terms.as_ref().unwrap().recurrence.as_ref().unwrap(),
+        )
+        .unwrap()
+        .period(0)
+        .unwrap();
+        record.payment_proofs.push(
+            serde_json::from_value(json!({
+                "event_id": Uuid::new_v4().to_string(),
+                "outbound_message_id": 1,
+                "outbound_status": "Pending",
+                "stream_item_id": null,
+                "payment_reference": "fixture-reference",
+                "billing_period": {
+                    "starts_at": period.starts_at,
+                    "ends_at": period.ends_at
+                },
+                "payment_endpoint_identifier": ONCHAIN,
+                "proof": {"method": ONCHAIN, "txid": "ab".repeat(32), "outputIndex": 0},
+                "recorded_at": "2026-02-01T00:00:00Z"
+            }))
+            .unwrap(),
+        );
+
+        assert!(ensure_period_has_no_proof(&vault, &record, Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("proof already submitted"));
+        ensure_period_has_no_proof(&vault, &record, Some(1)).unwrap();
+    }
+
+    fn recurring_payer_record() -> PaymentRequestRecord {
+        let mut record = payer_record();
+        record.state = PaymentRequestLifecycleState::ActiveRecurring;
+        record.terms.as_mut().unwrap().recurrence =
+            Some(paykit_sdk::PaymentRequestRecurrenceRecord {
+                every: 1,
+                unit: "month".into(),
+                starts_at: "2026-01-31T00:00:00Z".into(),
+                anchor: "2026-01-31T00:00:00Z".into(),
+                ends_at: None,
+            });
+        record
+    }
+    #[test]
+    fn full_proposal_preflight_enforces_exact_serialized_boundary() {
+        let mut terms = paykit_lib::PaymentRequestTerms {
+            amount: paykit_lib::PaymentAmount::new("5000", "sat").unwrap(),
+            payment_reference: paykit_lib::PaymentReference::new(format!(
+                "polar:{}",
+                Uuid::new_v4()
+            ))
+            .unwrap(),
+            proposal_expires_at: Some("2026-09-11T01:00:00Z".into()),
+            recurrence: None,
+            accepted_payment_endpoint_identifiers: vec![
+                paykit_lib::PaymentEndpointIdentifier::new(ONCHAIN).unwrap(),
+            ],
+            metadata: json!({"description":"","polarPaykitEndpoints":[]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        let event = paykit_lib::PaymentRequestEvent::Request(paykit_lib::PaymentRequest::new(
+            paykit_lib::EventId::new_v4(),
+            paykit_lib::PaymentRequestId::new_v4(),
+            terms.clone(),
+        ));
+        let overhead = paykit_lib::serialize_payment_request_event(&event)
+            .unwrap()
+            .len();
+        terms
+            .metadata
+            .insert("description".into(), json!("x".repeat(1000 - overhead)));
+        ensure_request_fits(&terms).unwrap();
+        terms
+            .metadata
+            .insert("description".into(), json!("x".repeat(1001 - overhead)));
+        assert_eq!(
+            ensure_request_fits(&terms)
+                .unwrap_err()
+                .downcast_ref::<crate::model::PublicError>()
+                .unwrap()
+                .code,
+            "request_too_large"
+        );
+    }
+    #[tokio::test]
+    async fn oversized_recurring_descriptions_leave_no_proposal_or_claim_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let mut runtime = request_runtime(dir.path(), receiver, false);
+        let peer = runtime.sdk.payment_requests().await.unwrap().remove(0);
+        runtime.state.view.links.push(serde_json::from_value(json!({"peerPublicKey":peer.counterparty,"peerReceiverPath":peer.counterparty_receiver_path,"state":"linked","generation":1,"failureCount":0,"pendingMessages":0})).unwrap());
+        for description in [
+            "a".repeat(500),
+            "界".repeat(166),
+            "\"".repeat(500),
+            "\\".repeat(500),
+        ] {
+            let command = Command {
+                command_id: Uuid::new_v4(),
+                command: "request.create".into(),
+                input: json!({"receiverId":receiver,"peerPublicKey":peer.counterparty,"peerReceiverPath":peer.counterparty_receiver_path,"amountSats":"5000","description":description,"expirySeconds":600,"acceptedMethods":[ONCHAIN],"recurrence":{"every":1,"unit":"month","startsAt":"2026-01-31T00:00:00Z","anchor":"2026-01-31T00:00:00Z","endsAt":null}}),
+            };
+            crate::request_input::validate(&command).unwrap();
+            for _ in 0..2 {
+                let error = runtime.create_request(&command).await.unwrap_err();
+                assert_eq!(
+                    error
+                        .downcast_ref::<crate::model::PublicError>()
+                        .unwrap()
+                        .code,
+                    "request_too_large"
+                );
+                let local = runtime.request_state().unwrap();
+                assert!(local.proposals.is_empty());
+                assert!(local.claims.is_empty());
+                assert_eq!(runtime.sdk.payment_requests().await.unwrap().len(), 1);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn sdk_lifecycle_uses_causal_same_second_times_across_reopen() {
+        use paykit_sdk::storage::{OutboundPrivateMessageRecord, StorageState};
+        for cancel_after_acceptance in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let receiver = Uuid::new_v4();
+            let (runtime, clock) =
+                request_runtime_with_clock(dir.path(), receiver, cancel_after_acceptance);
+            runtime
+                .clock
+                .set(&runtime.vault, Some("2090-01-01T00:00:00Z"))
+                .unwrap();
+            let frozen = runtime.clock.now();
+            let request = runtime.sdk.payment_requests().await.unwrap().remove(0);
+            let mut saved: StorageState = runtime.vault.load("sdk.cbor").unwrap().unwrap();
+            saved.private_stream_items[0].received_at = clock.now();
+            for record in &mut saved.outbound_private_messages {
+                record.created_at = clock.now();
+                record.updated_at = record.created_at;
+                record.last_attempt_at = Some(record.created_at);
+                record.sent_at = Some(record.created_at);
+            }
+            let old_raw = saved.private_stream_items[0].raw_json.clone();
+            let prior_time = saved
+                .outbound_private_messages
+                .last()
+                .map(|r| r.created_at)
+                .unwrap_or(saved.private_stream_items[0].received_at);
+            runtime.vault.save("sdk.cbor", &saved).unwrap();
+            drop(runtime);
+            let (runtime, clock) =
+                request_runtime_with_clock(dir.path(), receiver, cancel_after_acceptance);
+            let observed = clock.now();
+            assert!(observed > prior_time);
+            assert_eq!(observed.timestamp(), frozen.timestamp());
+            let id = paykit_lib::PaymentRequestId::new(request.payment_request_id).unwrap();
+            let event = if cancel_after_acceptance {
+                paykit_lib::PaymentRequestEvent::Cancellation(
+                    paykit_lib::PaymentRequestCancellation::new(
+                        paykit_lib::EventId::new_v4(),
+                        id,
+                        None,
+                    ),
+                )
+            } else {
+                paykit_lib::PaymentRequestEvent::Rejection(
+                    paykit_lib::PaymentRequestRejection::new(
+                        paykit_lib::EventId::new_v4(),
+                        id,
+                        None,
+                    ),
+                )
+            };
+            let raw = paykit_lib::serialize_payment_request_event(&event).unwrap();
+            let kind = serde_json::from_str::<Value>(&raw).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            if cancel_after_acceptance {
+                let mut incoming = saved.private_stream_items[0].clone();
+                incoming.stream_item_id = 2;
+                incoming.receive_batch_id = 2;
+                incoming.received_at = observed;
+                incoming.raw_json = raw.clone();
+                incoming.parsed_kind = Some(kind.clone());
+                incoming.known_paykit_kind = Some(kind);
+                saved.private_stream_items.push(incoming);
+                saved.next_private_stream_item_id = 3;
+            } else {
+                saved
+                    .outbound_private_messages
+                    .push(OutboundPrivateMessageRecord {
+                        outbound_message_id: 1,
+                        counterparty: request.counterparty,
+                        counterparty_receiver_path: request.counterparty_receiver_path,
+                        kind,
+                        raw_json: raw.clone(),
+                        status: paykit_sdk::OutboundPrivateMessageStatus::Sent,
+                        attempt_count: 1,
+                        created_at: observed,
+                        updated_at: observed,
+                        last_attempt_at: Some(observed),
+                        sent_at: Some(observed),
+                        last_error: None,
+                    });
+                saved.next_outbound_private_message_id = 2;
+            }
+            runtime.vault.save("sdk.cbor", &saved).unwrap();
+            drop(runtime);
+            let (runtime, clock) =
+                request_runtime_with_clock(dir.path(), receiver, cancel_after_acceptance);
+            assert!(clock.now() > observed);
+            let derived = runtime.sdk.payment_requests().await.unwrap().remove(0);
+            assert_eq!(
+                derived.state,
+                if cancel_after_acceptance {
+                    PaymentRequestLifecycleState::Canceled
+                } else {
+                    PaymentRequestLifecycleState::Rejected
+                }
+            );
+            assert!(derived.invalid_reason.is_none());
+            let stored = runtime
+                .storage
+                .transaction(|tx| Ok(tx.export_storage_state()))
+                .await
+                .unwrap();
+            assert_eq!(stored.private_stream_items[0].raw_json, old_raw);
+            assert_eq!(stored.private_stream_items, saved.private_stream_items);
+            assert_eq!(
+                stored.outbound_private_messages,
+                saved.outbound_private_messages
+            );
+            assert_eq!(runtime.clock.now(), frozen);
+        }
+    }
     fn request_runtime(directory: &std::path::Path, receiver_id: Uuid, accepted: bool) -> Runtime {
+        request_runtime_with_clock(directory, receiver_id, accepted).0
+    }
+    fn request_runtime_with_clock(
+        directory: &std::path::Path,
+        receiver_id: Uuid,
+        accepted: bool,
+    ) -> (Runtime, crate::clock::SdkEventClock) {
         use crate::storage::{ReceiverStorage, Vault};
         use paykit_sdk::storage::{
             OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageState,
@@ -1008,14 +1499,19 @@ mod binding_tests {
             owner.to_string(),
         )
         .unwrap();
-        let sdk = paykit_sdk::PaykitSdk::new(
+        let clock = storage.sdk_clock(payments.clock()).unwrap();
+        let sdk = paykit_sdk::PaykitSdk::try_with_clock(
             storage.clone(),
             provider.clone(),
             payments.clone(),
             paykit_sdk::PaykitSdkConfig::new(receiver_path),
+            clock.clone(),
         )
         .unwrap();
-        Runtime::new(sdk, storage, vault, receiver_id, owner, provider, payments).unwrap()
+        (
+            Runtime::new(sdk, storage, vault, receiver_id, owner, provider, payments).unwrap(),
+            clock,
+        )
     }
     async fn seed_readiness(
         runtime: &Runtime,

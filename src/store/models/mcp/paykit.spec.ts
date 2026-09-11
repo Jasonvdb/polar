@@ -109,3 +109,44 @@ it.each(['receipt.prepare', 'receipt.process', 'receipt.retrieve'] as const)(
     expect(service.operation).not.toHaveBeenCalled();
   },
 );
+
+it.each([
+  'subscription.prepare',
+  'subscription.authorize',
+  'subscription.disable',
+  'clock.set',
+  'clock.reset',
+] as const)(
+  'forwards %s through the shared asynchronous command boundary',
+  async command => {
+    const store = createStore(createMockRootModel(), { injections });
+    store.getActions().network.setNetworks([getNetwork(1, 'test')]);
+    const receiverId = newPaykitId();
+    const requestId = newPaykitId();
+    const inputs: Record<string, PaykitInput> = {
+      'subscription.prepare': {
+        receiverId,
+        requestId,
+        periodIndex: 0,
+        source: 'private',
+        expirySeconds: 3600,
+      },
+      'subscription.authorize': {
+        receiverId,
+        requestId,
+        walletId: 'wallet',
+        source: 'private',
+        method: 'btc-onchain',
+      },
+      'subscription.disable': { receiverId, requestId },
+      'clock.set': { receiverId, now: '2099-01-01T00:00:00Z' },
+      'clock.reset': { receiverId },
+    };
+    const request = { commandId: newPaykitId(), command, input: inputs[command] };
+    service.command.mockResolvedValue({ operationId: request.commandId });
+    await expect(
+      store.getActions().mcp.paykit({ networkId: 1, action: 'command', request }),
+    ).resolves.toEqual({ operationId: request.commandId });
+    expect(service.command).toHaveBeenCalledWith(1, request);
+  },
+);

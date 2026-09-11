@@ -5,6 +5,8 @@ import { createServer } from 'net';
 import { join, resolve, relative, isAbsolute } from 'path';
 import {
   isUuid,
+  isPaykitUtcInstant,
+  isPaykitEndpointCommitment,
   isPaykitRequestEndpointBinding,
   safePaykitAvatar,
   newPaykitId,
@@ -381,7 +383,7 @@ const refreshWallets = (
 };
 
 /** Finite, authenticated requests. Only fixed loopback paths and public payloads are accepted. */
-async function callService(
+export async function callService(
   binding: PaykitEnvironment,
   path: string,
   body?: unknown,
@@ -405,9 +407,10 @@ async function callService(
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => {
           size += chunk.length;
-          if (size > 4 * 1024 * 1024)
-            req.destroy(new Error('Paykit response exceeded size limit'));
-          else chunks.push(chunk);
+          if (size > 4 * 1024 * 1024) {
+            reject(new Error('Paykit response exceeded size limit'));
+            req.destroy();
+          } else chunks.push(chunk);
         });
         res.on('error', () => reject(new Error('Paykit service response interrupted')));
         res.on('end', () => {
@@ -427,10 +430,10 @@ async function callService(
         });
       },
     );
-    const timeout = setTimeout(
-      () => req.destroy(new Error('Paykit service request timed out')),
-      5000,
-    );
+    const timeout = setTimeout(() => {
+      reject(new Error('Paykit service request timed out'));
+      req.destroy();
+    }, 5000);
     req.once('close', () => clearTimeout(timeout));
     req.on('error', () =>
       reject(
@@ -512,16 +515,49 @@ const nullableFields = (value: any, names: string[]) => ({
     names.filter(name => value?.[name] === null).map(name => [name, null]),
   ),
 });
+const billingPeriodFields = (value: any) =>
+  value.billingPeriod === undefined
+    ? {}
+    : {
+        billingPeriod:
+          value.billingPeriod &&
+          isPaykitUtcInstant(value.billingPeriod.startsAt) &&
+          isPaykitUtcInstant(value.billingPeriod.endsAt)
+            ? {
+                startsAt: value.billingPeriod.startsAt,
+                endsAt: value.billingPeriod.endsAt,
+              }
+            : null,
+      };
+const endpointBindings = (value: any) =>
+  Array.isArray(value)
+    ? value
+        .filter(isPaykitRequestEndpointBinding)
+        .map((entry: any) =>
+          fields(entry, ['source', 'method', 'endpoint', 'reservationId']),
+        )
+    : [];
+const recurringFields = (value: any) => ({
+  ...billingPeriodFields(value),
+  ...(value.periodIndex === null ||
+  (Number.isInteger(value.periodIndex) &&
+    value.periodIndex >= 0 &&
+    value.periodIndex <= 10000)
+    ? { periodIndex: value.periodIndex }
+    : {}),
+});
 const publicProof = (value: any) => {
   try {
     validatePaykitProof(value.proof);
     return {
       ...fields(value, ['id', 'requestId', 'method', 'deliveryStatus', 'recordedAt']),
+      ...recurringFields(value),
       proof: { ...value.proof },
     };
   } catch (_) {
     return {
       ...fields(value, ['id', 'requestId', 'method', 'deliveryStatus', 'recordedAt']),
+      ...recurringFields(value),
     };
   }
 };
@@ -581,6 +617,51 @@ export const publicWorkspace = (value: any) => ({
         },
       }
     : {}),
+  ...(value.applicationClock &&
+  ['system', 'controlled'].includes(value.applicationClock.mode) &&
+  isPaykitUtcInstant(value.applicationClock.now)
+    ? { applicationClock: fields(value.applicationClock, ['mode', 'now']) }
+    : {}),
+  subscriptions: list(value.subscriptions, item => ({
+    ...nullableFields(item, ['requestId', 'currentPeriodIndex']),
+    autopay: nullableFields(item.autopay, [
+      'enabled',
+      'walletId',
+      'source',
+      'method',
+      'status',
+      'lastError',
+    ]),
+    periods: list(item.periods, period => ({
+      ...nullableFields(period, [
+        'index',
+        'startsAt',
+        'endsAt',
+        'status',
+        'offerId',
+        'executionId',
+        'proofId',
+        'lastError',
+      ]),
+      endpointBindings: endpointBindings(period.endpointBindings),
+      ...(period.endpointCommitments === undefined
+        ? {}
+        : {
+            endpointCommitments: Array.isArray(period.endpointCommitments)
+              ? period.endpointCommitments
+                  .filter(isPaykitEndpointCommitment)
+                  .map((commitment: any) =>
+                    fields(commitment, [
+                      'source',
+                      'method',
+                      'reservationId',
+                      'endpointHash',
+                    ]),
+                  )
+              : [],
+          }),
+    })),
+  })),
   requests: list(value.requests, item => ({
     ...nullableFields(item, [
       'id',
@@ -596,16 +677,25 @@ export const publicWorkspace = (value: any) => ({
       'createdAt',
     ]),
     acceptedMethods: strings(item.acceptedMethods),
-    endpointBindings: Array.isArray(item.endpointBindings)
-      ? item.endpointBindings
-          .filter(isPaykitRequestEndpointBinding)
-          .map((entry: any) =>
-            fields(entry, ['source', 'method', 'endpoint', 'reservationId']),
-          )
-      : [],
+    ...(item.recurrence === undefined
+      ? {}
+      : {
+          recurrence:
+            item.recurrence && typeof item.recurrence === 'object'
+              ? nullableFields(item.recurrence, [
+                  'every',
+                  'unit',
+                  'startsAt',
+                  'anchor',
+                  'endsAt',
+                ])
+              : null,
+        }),
+    endpointBindings: endpointBindings(item.endpointBindings),
   })),
-  executions: list(value.executions, item =>
-    nullableFields(item, [
+  executions: list(value.executions, item => ({
+    ...recurringFields(item),
+    ...nullableFields(item, [
       'id',
       'requestId',
       'walletId',
@@ -621,10 +711,11 @@ export const publicWorkspace = (value: any) => ({
       'paymentHash',
       'lastError',
     ]),
-  ),
+  })),
   proofs: list(value.proofs, publicProof),
-  settlements: list(value.settlements, item =>
-    nullableFields(item, [
+  settlements: list(value.settlements, item => ({
+    ...recurringFields(item),
+    ...nullableFields(item, [
       'proofId',
       'requestId',
       'status',
@@ -633,9 +724,10 @@ export const publicWorkspace = (value: any) => ({
       'verifiedAt',
       'lastError',
     ]),
-  ),
-  receiptIssuances: list(value.receiptIssuances, item =>
-    receiptFields(
+  })),
+  receiptIssuances: list(value.receiptIssuances, item => ({
+    ...billingPeriodFields(item),
+    ...receiptFields(
       item,
       [
         'id',
@@ -656,9 +748,10 @@ export const publicWorkspace = (value: any) => ({
       ],
       ['outboundMessageId', 'storedAt', 'accessQueuedAt', 'lastError'],
     ),
-  ),
-  receiptAccess: list(value.receiptAccess, item =>
-    receiptFields(
+  })),
+  receiptAccess: list(value.receiptAccess, item => ({
+    ...billingPeriodFields(item),
+    ...receiptFields(
       item,
       [
         'receiptId',
@@ -671,9 +764,10 @@ export const publicWorkspace = (value: any) => ({
       ],
       ['requestId', 'attemptedAt', 'retrievedAt', 'lastError'],
     ),
-  ),
-  receipts: list(value.receipts, item =>
-    receiptFields(
+  })),
+  receipts: list(value.receipts, item => ({
+    ...billingPeriodFields(item),
+    ...receiptFields(
       item,
       [
         'id',
@@ -686,7 +780,7 @@ export const publicWorkspace = (value: any) => ({
       ],
       ['requestId', 'proofId', 'method', 'amountSats', 'description', 'note'],
     ),
-  ),
+  })),
   reservations: list(value.reservations, publicReservation),
   resolutions: list(value.resolutions, publicResolution),
   links: list(value.links, item =>

@@ -1,5 +1,6 @@
 import {
   isUuid,
+  isPaykitEndpointCommitment,
   isPaykitRequestEndpointBinding,
   newPaykitId,
   PaykitCommandRequest,
@@ -425,4 +426,120 @@ describe('Receipt commands', () => {
     ).toThrow();
     expect(() => validate('receipt.retrieve', { ...input, key: 'hidden' })).toThrow();
   });
+});
+
+describe('recurring request and application clock boundaries', () => {
+  const receiverId = newPaykitId();
+  const requestId = newPaykitId();
+  const recurrence = {
+    every: 1,
+    unit: 'month' as const,
+    startsAt: '2099-01-31T00:00:00Z',
+    anchor: '2099-01-31T00:00:00Z',
+    endsAt: null,
+  };
+  const create = {
+    receiverId,
+    peerPublicKey: 'y'.repeat(52),
+    peerReceiverPath: 'alice/wallet',
+    amountSats: '1000',
+    description: 'Monthly service',
+    expirySeconds: 3600,
+    acceptedMethods: ['btc-onchain'],
+    recurrence,
+  };
+  const validate = (
+    command: PaykitCommandRequest['command'],
+    input: PaykitCommandRequest['input'],
+  ) => validatePaykitCommand({ commandId: newPaykitId(), command, input });
+  it('accepts canonical UTC recurrence and rejects malformed or expanded terms', () => {
+    expect(() => validate('request.create', create)).not.toThrow();
+    expect(() =>
+      validate('request.create', { ...create, recurrence: null }),
+    ).not.toThrow();
+    for (const invalid of [
+      { ...recurrence, every: 0 },
+      { ...recurrence, every: 1.5 },
+      { ...recurrence, every: 1001 },
+      { ...recurrence, unit: 'fortnight' },
+      { ...recurrence, startsAt: '2099-02-30T00:00:00Z', anchor: '2099-02-30T00:00:00Z' },
+      { ...recurrence, startsAt: '2099-01-31T00:00:00+00:00' },
+      { ...recurrence, anchor: '2099-02-01T00:00:00Z' },
+      { ...recurrence, endsAt: '2098-01-01T00:00:00Z' },
+      { ...recurrence, sessionSecret: 'unexpected' },
+      { ...recurrence, endsAt: undefined },
+    ])
+      expect(() =>
+        validate('request.create', { ...create, recurrence: invalid as any }),
+      ).toThrow('recurrence');
+  });
+  it('requires exact autopay authorization while keeping manual preference optional', () => {
+    const input = { receiverId, requestId, walletId: 'wallet', source: 'private' };
+    expect(() => validate('subscription.authorize', input)).toThrow('method');
+    expect(() =>
+      validate('subscription.authorize', { ...input, method: 'btc-onchain' }),
+    ).not.toThrow();
+    expect(() =>
+      validate('subscription.authorize', { ...input, method: 'bolt12' }),
+    ).toThrow('method');
+    expect(() => validate('payment.execute', { ...input, periodIndex: 0 })).not.toThrow();
+    for (const periodIndex of [-1, 0.5, 10001, '0', null])
+      expect(() => validate('payment.execute', { ...input, periodIndex })).toThrow(
+        'periodIndex',
+      );
+    expect(() =>
+      validate('subscription.prepare', {
+        receiverId,
+        requestId,
+        source: 'private',
+        expirySeconds: 60,
+      }),
+    ).toThrow('periodIndex');
+    expect(() =>
+      validate('subscription.disable', { receiverId, requestId, enabled: 'false' }),
+    ).toThrow('input');
+  });
+  it('accepts scoped canonical clock commands without permitting external clock controls', () => {
+    expect(() =>
+      validate('clock.set', { receiverId, now: '2100-01-01T00:00:00Z' }),
+    ).not.toThrow();
+    expect(() => validate('clock.reset', { receiverId })).not.toThrow();
+    for (const now of [
+      '2019-01-01T00:00:00Z',
+      '2101-01-01T00:00:00Z',
+      '2099-02-29T00:00:00Z',
+      '2099-01-01T00:00:00.000Z',
+      '2099-01-01T00:00:00+00:00',
+    ])
+      expect(() => validate('clock.set', { receiverId, now })).toThrow('UTC time');
+    expect(() =>
+      validate('clock.set', {
+        receiverId,
+        now: '2099-01-01T00:00:00Z',
+        bitcoinTime: '2099-01-01',
+      }),
+    ).toThrow('input');
+  });
+});
+
+it('accepts only complete safe endpoint commitments with lowercase SHA-256 hashes', () => {
+  const commitment = {
+    source: 'private',
+    method: 'btc-lightning-bolt11',
+    reservationId: newPaykitId(),
+    endpointHash: 'a'.repeat(64),
+  };
+  expect(isPaykitEndpointCommitment(commitment)).toBe(true);
+  for (const invalid of [
+    null,
+    [],
+    { ...commitment, endpointHash: 'A'.repeat(64) },
+    { ...commitment, endpointHash: 'a'.repeat(63) },
+    { ...commitment, endpointHash: { key: 'secret' } },
+    { ...commitment, reservationId: '../other' },
+    { ...commitment, method: 'bolt12' },
+    { ...commitment, source: 'fallback' },
+    { ...commitment, sessionSecret: 'secret' },
+  ])
+    expect(isPaykitEndpointCommitment(invalid)).toBe(false);
 });

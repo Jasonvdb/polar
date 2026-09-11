@@ -61,6 +61,9 @@ pub fn validate(command: &Command) -> Result<(), PublicError> {
             Ok(())
         }
         "preset.create" | "preset.fund" if command.input == serde_json::json!({}) => Ok(()),
+        value if crate::subscription_input::is_command(value) => {
+            crate::subscription_input::validate(command)
+        }
         value if crate::receipt_input::is_command(value) => crate::receipt_input::validate(command),
         value if crate::request_input::is_command(value) => crate::request_input::validate(command),
         value if crate::payment_input::is_command(value) => crate::payment_input::validate(command),
@@ -274,7 +277,10 @@ pub struct ProfileInput {
     pub avatar_mime: Option<String>,
 }
 pub fn workspace_command(command: &str) -> bool {
-    if crate::receipt_input::is_command(command) || crate::request_input::is_command(command) {
+    if crate::subscription_input::is_command(command)
+        || crate::receipt_input::is_command(command)
+        || crate::request_input::is_command(command)
+    {
         return true;
     }
     crate::payment_input::is_command(command)

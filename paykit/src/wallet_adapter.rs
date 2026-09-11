@@ -37,6 +37,7 @@ pub(crate) struct Ledger {
 }
 #[derive(Clone)]
 pub struct WalletAdapter {
+    clock: crate::clock::ApplicationClock,
     vault: Arc<Vault>,
     state: Arc<Mutex<Ledger>>,
     environment: Uuid,
@@ -46,13 +47,18 @@ pub struct WalletAdapter {
 impl WalletAdapter {
     pub fn open(vault: Arc<Vault>, environment: Uuid, owner: String) -> anyhow::Result<Self> {
         let state: Ledger = vault.load(LEDGER)?.unwrap_or_default();
+        let clock = crate::clock::ApplicationClock::open(&vault)?;
         Ok(Self {
+            clock,
             vault,
             state: Arc::new(Mutex::new(state)),
             environment,
             owner,
             selection: Arc::new(Mutex::new(vec![])),
         })
+    }
+    pub(crate) fn clock(&self) -> crate::clock::ApplicationClock {
+        self.clock.clone()
     }
     pub(crate) fn execution_vault(&self) -> anyhow::Result<Vault> {
         self.vault.shared_wallets(self.environment)
@@ -177,7 +183,7 @@ impl WalletAdapter {
                     .any(|r| matches!(r.view.status.as_str(), "issuing" | "uncertain")),
                 "reconcile uncertain issuance before another list"
             );
-            let now = chrono::Utc::now();
+            let now = self.clock.now();
             let expires = (now + chrono::Duration::seconds(expiry.into())).to_rfc3339();
             let mut ids = vec![];
             for method in &s.methods.enabled_methods {

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReceiptIssuanceView {
+    #[serde(default)]
+    pub billing_period: Option<crate::recurrence::BillingPeriod>,
     pub id: String,
     pub request_id: String,
     pub proof_id: String,
@@ -27,6 +29,8 @@ pub struct ReceiptIssuanceView {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReceiptAccessView {
+    #[serde(default)]
+    pub billing_period: Option<crate::recurrence::BillingPeriod>,
     pub receipt_id: String,
     pub peer_public_key: String,
     pub peer_receiver_path: String,
@@ -42,6 +46,8 @@ pub struct ReceiptAccessView {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DecryptedReceiptView {
+    #[serde(default)]
+    pub billing_period: Option<crate::recurrence::BillingPeriod>,
     pub id: String,
     pub issuer_public_key: String,
     pub issuer_receiver_path: String,

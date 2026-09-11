@@ -10,6 +10,7 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
   assert(['full', 'pubky-only'].includes(scope), 'Unknown scenario scope');
   assert(scope === 'pubky-only' || walletFixture, 'Full scenarios require the real wallet fixture. Run node scripts/paykit-ci.js, or explicitly choose --pubky-only for the earlier 23 Pubky checks.');
   const stages = [];
+  let recurringEvidence;
   const stage = name => { signal?.throwIfAborted(); progress(name); stages.push(name); };
   const token = fs.readFileSync(tokenFile, 'utf8').trim();
   const request = async (path, body) => {
@@ -161,9 +162,10 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
       throw new Error('Receipt environment restart did not restore receivers');
     };
     await require('./paykit-receipt-scenarios').run({ ...context, receiptFixture, requests, restartEnvironment });
+    recurringEvidence = await require('./paykit-recurring-scenarios').run({ ...context, requests, restartEnvironment });
   }
   stage('complete');
-  return { scope, stages, environmentId: initial.environmentId, participantKeys: initial.participants.map(p => p.publicKey), receiverNoiseKeys: initial.receivers.map(r => r.noisePublicKey), passed: true };
+  return { scope, stages, recurringEvidence, environmentId: initial.environmentId, participantKeys: initial.participants.map(p => p.publicKey), receiverNoiseKeys: initial.receivers.map(r => r.noisePublicKey), passed: true };
 }
 module.exports = { run };
 if (require.main === module) {
