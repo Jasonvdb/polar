@@ -210,6 +210,9 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     await command('receiver.start', { receiverId: alice.id });
     const core = await requests.createPaid('btc-onchain');
     const lightning = await requests.createPaid('btc-lightning-bolt11');
+    await requests.mine(1);
+    await requests.verify(core.requestId, core.proof);
+    await requests.verify(lightning.requestId, lightning.proof);
     const payer = await requests.view(alice);
     const coreExecution = payer.executions.find(value => value.requestId === core.requestId);
     const lightningExecution = payer.executions.find(value => value.requestId === lightning.requestId);
