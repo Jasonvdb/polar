@@ -76,11 +76,11 @@ pub(crate) fn with_recovery_gate(
     let mut encoded = Vec::new();
     ciborium::into_writer(&value, &mut encoded)?;
     let mut state: LocalState = ciborium::from_reader(encoded.as_slice())?;
+    state.recovery_forced_delivery_pause = !state.view.delivery_paused;
     state.view.delivery_paused = true;
     state.view.recovery = Some(recovery);
     state.recovery_preparations.clear();
     state.explicit_relink_peers.clear();
-    state.recovery_forced_delivery_pause = false;
     state.recovery_reached_ready = state.view.recovery.as_ref().is_some_and(|recovery| {
         recovery.sdk_validated
             && recovery.wallet_reconciled
@@ -111,6 +111,16 @@ pub(crate) fn save_recovery(vault: &Vault, recovery: crate::model::Recovery) -> 
     }
     if !currently_safe {
         state.explicit_relink_peers.clear();
+    }
+    if currently_safe
+        && state.view.recovery.as_ref().is_some_and(|recovery| {
+            matches!(recovery.phase, crate::model::RecoveryPhase::Ready)
+                && recovery.peers_requiring_relink.is_empty()
+        })
+        && state.recovery_forced_delivery_pause
+    {
+        state.view.delivery_paused = false;
+        state.recovery_forced_delivery_pause = false;
     }
     vault.save("workspace.cbor", &state)
 }
@@ -2355,7 +2365,8 @@ mod tests {
         assert!(restored.recovery_preparations.is_empty());
         assert!(restored.explicit_relink_peers.is_empty());
         assert!(restored.recovery_reached_ready);
-        assert!(!restored.recovery_forced_delivery_pause);
+        assert!(restored.recovery_forced_delivery_pause);
+        assert!(restored.view.delivery_paused);
 
         let mut initial = ready_recovery();
         initial.phase = crate::model::RecoveryPhase::RelinkRequired;
@@ -2372,7 +2383,8 @@ mod tests {
         ciborium::into_writer(&gated, &mut bytes).unwrap();
         let restored: LocalState = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert!(!restored.recovery_reached_ready);
-        assert!(!restored.recovery_forced_delivery_pause);
+        assert!(restored.recovery_forced_delivery_pause);
+        assert!(restored.view.delivery_paused);
     }
     #[test]
     fn recovery_handshake_requires_complete_preparation_barrier() {
@@ -2823,6 +2835,50 @@ mod tests {
         let reopened: LocalState = vault.load("workspace.cbor").unwrap().unwrap();
         assert!(reopened.view.delivery_paused);
         assert!(reopened.view.recovery == Some(recovery));
+    }
+    #[test]
+    fn archive_gate_restores_only_delivery_it_paused_after_safe_recovery() {
+        for explicitly_paused in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let receiver = Uuid::new_v4();
+            let vault = Vault::new(dir.path().into(), [7; 32], receiver.to_string()).unwrap();
+            let mut archived = open(dir.path(), receiver).state;
+            archived.view.delivery_paused = explicitly_paused;
+            // Archived provenance is untrusted and must not affect the new episode.
+            archived.recovery_forced_delivery_pause = true;
+            let encoded = ciborium::Value::serialized(&archived).unwrap();
+            let mut unsafe_recovery = ready_recovery();
+            unsafe_recovery.phase = crate::model::RecoveryPhase::WalletReconciliationRequired;
+            unsafe_recovery.automation_paused = true;
+            unsafe_recovery.wallet_reconciled = false;
+            unsafe_recovery.uncertain_execution_count = 1;
+            unsafe_recovery.unresolved_execution_ids = vec!["execution".into()];
+            unsafe_recovery.blocked_reasons =
+                vec![crate::model::RecoveryBlockedReason::WalletUncertain];
+            let gated = with_recovery_gate(encoded, unsafe_recovery.clone()).unwrap();
+            let mut bytes = Vec::new();
+            ciborium::into_writer(&gated, &mut bytes).unwrap();
+            let gated_state: LocalState = ciborium::from_reader(bytes.as_slice()).unwrap();
+            assert!(gated_state.view.delivery_paused);
+            assert_eq!(
+                gated_state.recovery_forced_delivery_pause,
+                !explicitly_paused
+            );
+            vault.save("workspace.cbor", &gated_state).unwrap();
+
+            save_recovery(&vault, unsafe_recovery).unwrap();
+            let unsafe_state: LocalState = vault.load("workspace.cbor").unwrap().unwrap();
+            assert!(unsafe_state.view.delivery_paused);
+            assert_eq!(
+                unsafe_state.recovery_forced_delivery_pause,
+                !explicitly_paused
+            );
+
+            save_recovery(&vault, ready_recovery()).unwrap();
+            let ready_state: LocalState = vault.load("workspace.cbor").unwrap().unwrap();
+            assert_eq!(ready_state.view.delivery_paused, explicitly_paused);
+            assert!(!ready_state.recovery_forced_delivery_pause);
+        }
     }
     #[test]
     fn wallet_reconciliation_invalidates_prior_ready_relink_authorization() {
