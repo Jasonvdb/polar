@@ -288,8 +288,13 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     assert.equal(safeLink.state, 'linked');
     const safeReservation = { receiverId: bob.id, peerPublicKey: safePeer.peerPublicKey, peerReceiverPath: safePeer.peerReceiverPath, amountSats: '123', expirySeconds: 600 };
     const beforeBlockedSafePeer = fixture.paymentHistory(ownerKeys);
+    const beforeBlockedReservations = (await requests.view(bob)).reservations.map(value => ({ id: value.id, endpoint: value.endpoint, status: value.status }));
     const blockedSafePeer = await command('reservation.create', safeReservation, undefined, 'failed');
-    assert.equal(blockedSafePeer.operation.error.code, 'recovery_required');
+    assert.equal(blockedSafePeer.operation.error.code, 'receiver_operation_failed');
+    assert.equal(blockedSafePeer.operation.error.message, 'Finish receiver recovery before changing receiver or payment state.');
+    const afterBlockedSafePeer = await requests.view(bob);
+    assert.deepEqual(afterBlockedSafePeer.reservations.map(value => ({ id: value.id, endpoint: value.endpoint, status: value.status })), beforeBlockedReservations, 'Global recovery gate changed reservation state');
+    assert.equal(afterBlockedSafePeer.deliveryPaused, true);
     assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeBlockedSafePeer, 'Global recovery gate triggered a financial action');
     assert.equal(recovery.automationPaused, true); stage('backup-relink');
     await prepareExactRecovery(command, requests, initial, bob, unsafeRemote);
