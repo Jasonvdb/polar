@@ -464,14 +464,7 @@ impl Runtime {
                     .iter()
                     .filter_map(|p| proof_period(r, p.billing_period.as_ref()).ok().flatten()),
             );
-            for index in indices
-                .into_iter()
-                .rev()
-                .take(256)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-            {
+            for index in projected_indices(&records, r, indices) {
                 let Ok(period) = schedule.period(index) else {
                     continue;
                 };
@@ -587,6 +580,54 @@ impl Runtime {
         Ok(())
     }
 }
+fn projected_indices(
+    records: &[PaymentRequestRecord],
+    parent: &PaymentRequestRecord,
+    mut history: std::collections::BTreeSet<u32>,
+) -> std::collections::BTreeSet<u32> {
+    let paid: std::collections::BTreeSet<_> = parent
+        .payment_proofs
+        .iter()
+        .filter_map(|p| {
+            proof_period(parent, p.billing_period.as_ref())
+                .ok()
+                .flatten()
+        })
+        .collect();
+    let mut actionable = std::collections::BTreeSet::new();
+    let incoming: std::collections::BTreeSet<_> = records
+        .iter()
+        .filter_map(|candidate| {
+            let terms = candidate.terms.as_ref()?;
+            if terms.metadata.get("parentRequestId") != Some(&json!(parent.payment_request_id)) {
+                return None;
+            }
+            terms
+                .metadata
+                .get("periodIndex")
+                .and_then(Value::as_u64)
+                .and_then(|i| u32::try_from(i).ok())
+        })
+        .collect();
+    for index in incoming {
+        if find_offer(records, parent, index).is_ok_and(|offer| offer.is_some()) {
+            history.insert(index);
+            if !paid.contains(&index) {
+                actionable.insert(index);
+            }
+        }
+    }
+    // Keep the oldest unpaid offers actionable even when recent history fills the cap.
+    let mut selected: std::collections::BTreeSet<_> = actionable.into_iter().take(256).collect();
+    for index in history.into_iter().rev() {
+        if selected.len() == 256 {
+            break;
+        }
+        selected.insert(index);
+    }
+    selected
+}
+
 fn offer_terms(
     parent: &PaymentRequestRecord,
     index: u32,
@@ -884,6 +925,47 @@ mod tests {
             &offer_terms(parent, index, commitments).unwrap(),
         ));
         record
+    }
+    #[test]
+    fn old_incoming_manual_offer_survives_a_full_recent_history_cap() {
+        let mut parent = parent();
+        parent
+            .terms
+            .as_mut()
+            .unwrap()
+            .recurrence
+            .as_mut()
+            .unwrap()
+            .unit = "minute".into();
+        let incoming = v2_offer(&parent, 0);
+        let history = (128..=512).collect();
+        let projected = projected_indices(std::slice::from_ref(&incoming), &parent, history);
+        assert_eq!(projected.len(), 256);
+        assert!(projected.contains(&0));
+        assert!(projected.contains(&512));
+        let retained = find_offer(&[incoming], &parent, 0)
+            .unwrap()
+            .unwrap()
+            .clone();
+        assert!(!offer_commitments(retained.terms.as_ref().unwrap())
+            .unwrap()
+            .is_empty());
+        let mut authorization = Authorization::default();
+        assert!(authorization.observe(512));
+        assert!(!authorization.observe(0));
+    }
+    #[test]
+    fn invalid_or_conflicting_old_offers_do_not_displace_history() {
+        let parent = parent();
+        let mut bad = v2_offer(&parent, 0);
+        bad.counterparty_receiver_path =
+            paykit_sdk::PaykitReceiverPath::new("other/wallet").unwrap();
+        assert!(!projected_indices(&[bad], &parent, (128..=383).collect()).contains(&0));
+        let valid = v2_offer(&parent, 0);
+        assert!(
+            !projected_indices(&[valid.clone(), valid], &parent, (128..=383).collect())
+                .contains(&0)
+        );
     }
     #[test]
     fn compact_offer_does_not_duplicate_invoice_and_both_rails_fit() {

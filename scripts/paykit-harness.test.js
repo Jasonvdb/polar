@@ -10,6 +10,7 @@ function recurringEvidence() {
   const hash = 'a'.repeat(64);
   return {
     version: 1,
+    regressions: { oversizedRejected: true, oldOfferIndex: 0, oldCurrentIndex: 128, oldManual: true, coreRestarts: ['unsigned','broadcast'].map((phase,index)=>({phase,executionId:randomUUID(),txid:String(index).repeat(64),transactionDigest:hash,originalDigest:hash,walletWasUnloaded:true,walletDirectoryBefore:['paykit-fixture'],walletDirectoryAfter:['paykit-fixture'],sendsBefore:index,sendsAfter:index+1})) },
     rails: ['btc-onchain', 'btc-lightning-bolt11'].map(method => ({
       requestId: randomUUID(), method, source: method === 'btc-onchain' ? 'public' : 'private', amountSats: '701', receiptId: randomUUID(), canceled: true,
       periods: [0, 1, 2].map(index => ({ index, startsAt: `2030-01-01T00:0${index}:00Z`, endsAt: `2030-01-01T00:0${index + 1}:00Z`, executionId: randomUUID(), proofId: randomUUID(), paymentReference: String(index).repeat(64), mode: index === 1 ? 'automatic' : 'manual', verified: true })),
@@ -35,6 +36,7 @@ function walletEvidence(environment) {
     readiness: [0, 1, 2].map(i => ({ syncedToChain: true, publicKey: `${environment}-wallet-${i}`, version: '0.20.0' })),
     gateCounts: { core: { issuanceSuccess: 2, executionSuccess: 1 }, lnd: { issuanceSuccess: 1, executionSuccess: 1 } },
     gateEvents: [completed('core', 1), dropped('core', 1), completed('lnd', 2), dropped('lnd', 2), completed('core', 3), { event: 'hold.finished', channel: 'core', id: 3, nonce: 'nonce-3', action: 'relay', reason: 'control' }, { ...completed('core', 4), successfulIssuance: false, successfulExecution: true }, dropped('core', 4), { ...completed('lnd', 5), successfulIssuance: false, successfulExecution: true }, dropped('lnd', 5)],
+    coreLifecycle: [0, 1].flatMap(cycle => ['stopIntent','stopped','startIntent','started'].map((action,index)=>({action,identity:{id:`${environment}-core`,startedAt:String(cycle+(index===3?1:0)),labels:{'polar-paykit.test-run':'current'},mounts:[]}}))),
     storageFaults: ['payments', 'workspace', 'requests', 'executions'].flatMap(ledger => [
       { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'host', active: true },
       { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'guest', active: true, observed: ledger === 'executions' ? 'readableCommitBlocked' : 'directory', ...(ledger === 'executions' ? { uid: 1001, writable: false } : {}) },
@@ -111,10 +113,10 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
   const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, recurringEvidence: recurringEvidence(), participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
   const write = value => fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(value));
   write(report); assert.equal(validateReport(root).passed, true);
-  assert.equal(requiredStages.length, 70);
-  assert.equal(new Set(requiredStages).size, 70);
+  assert.equal(requiredStages.length, 72);
+  assert.equal(new Set(requiredStages).size, 72);
   write({ ...report, survivingWalletEnvironmentVerified: false }); assert.throws(() => validateReport(root));
-  for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery', 'recurring-onchain-manual', 'recurring-lightning-autopay', 'recurring-failure-safety']) {
+  for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery', 'recurring-onchain-manual', 'recurring-lightning-autopay', 'recurring-failure-safety', 'recurring-core-unsigned-restart', 'recurring-core-broadcast-restart']) {
     write({ ...report, environments: report.environments.map(environment => ({ ...environment, stages: environment.stages.filter(stage => stage !== missing) })) });
     assert.throws(() => validateReport(root));
   }

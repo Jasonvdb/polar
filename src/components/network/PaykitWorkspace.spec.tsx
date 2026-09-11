@@ -424,3 +424,91 @@ it('retains clock command identity after uncertain acceptance and blocks actions
   });
   await waitFor(() => expect(button).not.toBeDisabled(), { timeout: 2500 });
 });
+
+it('shows actionable oversized-proposal failure and lets the user shorten terms with a new command', async () => {
+  const participantId = newPaykitId();
+  const receiverId = newPaykitId();
+  const operationId = newPaykitId();
+  const current: PaykitState = {
+    ...state,
+    participants: [
+      { id: participantId, name: 'Proposal Bob', publicKey: 'y'.repeat(52) },
+    ],
+    receivers: [
+      {
+        id: receiverId,
+        participantId,
+        name: 'Proposal wallet',
+        path: 'proposal/wallet',
+        status: 'running',
+        generation: 1,
+        noisePublicKey: 'public',
+      },
+    ],
+    receiverWorkspaces: [
+      {
+        receiverId,
+        deliveryPaused: false,
+        links: [],
+        contacts: [],
+        discoveries: [],
+        profiles: [],
+      },
+    ],
+  };
+  service.state.mockResolvedValue(current);
+  service.command
+    .mockResolvedValueOnce({ operationId })
+    .mockResolvedValueOnce({ operationId: newPaykitId() });
+  const view = setup();
+  await waitFor(() =>
+    expect(
+      view.getByText('Create Alice / Bob / Carol preset').closest('button'),
+    ).not.toBeDisabled(),
+  );
+  const select = (name: string, text: string) => {
+    fireEvent.mouseDown(view.getByRole('combobox', { name }));
+    fireEvent.click(view.getAllByText(text).slice(-1)[0]);
+  };
+  select('Participant', 'Proposal Bob');
+  select('Receiver', 'Proposal wallet (running)');
+  for (const [label, value] of [
+    ['Subscription payer public key', 'y'.repeat(52)],
+    ['Subscription payer receiver path', 'alice/wallet'],
+    ['Subscription description', 'x'.repeat(500)],
+    ['Subscription UTC anchor', '2099-01-31T00:00:00Z'],
+  ])
+    fireEvent.change(view.getByLabelText(label), { target: { value } });
+  select('Subscription accepted methods', 'btc-onchain');
+  const create = view.getByText('Create recurring request').closest('button')!;
+  fireEvent.click(create);
+  await waitFor(() => expect(service.command).toHaveBeenCalledTimes(1));
+  expect(create).toBeDisabled();
+  const message =
+    'The encrypted request exceeds its message limit. Shorten the description or select fewer payment methods, then create a new request.';
+  service.state.mockResolvedValue({
+    ...current,
+    operations: [
+      {
+        id: operationId,
+        command: 'request.create',
+        status: 'failed',
+        error: { code: 'receiver_operation_failed', message },
+      },
+    ],
+  });
+  await view.findByText(`receiver_operation_failed: ${message}`, {}, { timeout: 2500 });
+  expect(view.queryByText('Retry command')).not.toBeInTheDocument();
+  expect(view.getByLabelText('Subscription description')).toHaveValue('x'.repeat(500));
+  expect(create).not.toBeDisabled();
+  fireEvent.change(view.getByLabelText('Subscription description'), {
+    target: { value: 'Monthly service' },
+  });
+  fireEvent.click(create);
+  await waitFor(() => expect(service.command).toHaveBeenCalledTimes(2));
+  const first = service.command.mock.calls[0][1];
+  const second = service.command.mock.calls[1][1];
+  expect(first.command).toBe('request.create');
+  expect(second.commandId).not.toBe(first.commandId);
+  expect(second.input).toEqual({ ...first.input, description: 'Monthly service' });
+});

@@ -165,7 +165,7 @@ fn open(directory: &Path, receiver: Uuid) -> Runtime {
     let payments =
         crate::wallet_adapter::WalletAdapter::open(vault.clone(), receiver, owner().to_string())
             .unwrap();
-    let clock = payments.clock();
+    let clock = storage.sdk_clock(payments.clock()).unwrap();
     let sdk = paykit_sdk::PaykitSdk::try_with_clock(
         storage.clone(),
         sessions.clone(),

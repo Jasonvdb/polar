@@ -6,6 +6,7 @@ function sampleEvidence() {
   const hash = 'a'.repeat(64);
   return {
     version: 1,
+    regressions: { oversizedRejected: true, oldOfferIndex: 0, oldCurrentIndex: 128, oldManual: true, coreRestarts: ['unsigned','broadcast'].map((phase,index)=>({phase,executionId:randomUUID(),txid:String(index).repeat(64),transactionDigest:hash,originalDigest:hash,walletWasUnloaded:true,walletDirectoryBefore:['paykit-fixture'],walletDirectoryAfter:['paykit-fixture'],sendsBefore:index,sendsAfter:index+1})) },
     rails: ['btc-onchain', 'btc-lightning-bolt11'].map(method => ({
       requestId: randomUUID(), method, source: method === 'btc-onchain' ? 'public' : 'private', amountSats: '701', receiptId: randomUUID(), canceled: true,
       periods: [0, 1, 2].map(index => ({ index, startsAt: `2030-01-01T00:0${index}:00Z`, endsAt: `2030-01-01T00:0${index + 1}:00Z`, executionId: randomUUID(), proofId: randomUUID(), paymentReference: String(index).repeat(64), mode: index === 1 ? 'automatic' : 'manual', verified: true })),
@@ -35,12 +36,17 @@ test('recurring evidence requires both rails, exact periods and no automatic bac
     e => { e.persistence.clocksRetained = false; },
     e => { e.failures.uncertainReconciled = false; },
     e => { e.failures.uncertainAfter = 'b'.repeat(64); },
+    e => { e.regressions.oldCurrentIndex = 127; },
+    e => { e.regressions.coreRestarts[0].walletWasUnloaded = false; },
+    e => { e.regressions.coreRestarts[1].originalDigest = 'b'.repeat(64); },
+    e => { e.regressions.coreRestarts[1].sendsAfter++; },
+    e => { e.regressions.coreRestarts[0].walletDirectoryAfter.push('paykit-replacement'); },
     e => { e.clock.blockAfter = 'b'.repeat(64); },
     e => { e.clock.applicationNow = '2020-01-01T00:00:00Z'; },
   ]) { const evidence = sampleEvidence(); mutate(evidence); assert.throws(() => validateEvidence(evidence)); }
 });
 test('recurring diagnostics reject unrecognized or secret-bearing fields at every level', () => {
-  for (const select of [e => e, e => e.rails[0], e => e.rails[0].periods[0], e => e.persistence, e => e.failures, e => e.clock]) {
+  for (const select of [e => e, e => e.rails[0], e => e.rails[0].periods[0], e => e.persistence, e => e.failures, e => e.clock, e => e.regressions, e => e.regressions.coreRestarts[0]]) {
     const evidence = sampleEvidence(); select(evidence).preimage = 'private';
     assert.throws(() => validateEvidence(evidence));
   }

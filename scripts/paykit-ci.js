@@ -63,6 +63,14 @@ function validateReport(root) {
       assert(blocked >= 0 && restored > blocked, 'Missing confirmed guest ledger boundaries');
     }
     assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active));
+    assert.deepEqual(wallets.coreLifecycle.map(e => e.action), ['stopIntent','stopped','startIntent','started','stopIntent','stopped','startIntent','started']);
+    for (let cycle = 0; cycle < 2; cycle++) {
+      const events = wallets.coreLifecycle.slice(cycle * 4, cycle * 4 + 4);
+      for (const event of events) { assert.equal(event.identity.id, wallets.coreContainer); assert.equal(event.identity.labels['polar-paykit.test-run'], ledger.runId); }
+      assert.deepEqual(events[0].identity, events[1].identity); assert.deepEqual(events[1].identity, events[2].identity);
+      assert.notEqual(events[2].identity.startedAt, events[3].identity.startedAt);
+      assert.deepEqual({ ...events[3].identity, startedAt: events[2].identity.startedAt }, events[2].identity);
+    }
     validateReceiptEvidence(owned.receiptEvidence, { runId: ledger.runId, environmentId: environment.environmentId });
     require('./paykit-recurring-scenarios').validateEvidence(environment.recurringEvidence);
     assert.deepEqual(environment.stages, requiredStages);
@@ -241,6 +249,8 @@ function start() {
   console.log(`Paykit CI artifact root: ${root}; Node ${process.version}`);
   if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `artifact-root=${root}\n`);
   runCli(work, {
+    // Two sequential 72-stage environments exceed the former 20-minute allowance.
+    timeoutMs: 1800000,
     cleanup,
     complete(result, cleaned) {
       const report = { schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: true, cleanup: cleaned, ...result };

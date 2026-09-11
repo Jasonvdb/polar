@@ -46,3 +46,12 @@ for (const route of ['DELETE /v1/channels', 'POST /v1/newaddress', 'POST /v1/mac
   const [method, url] = route.split(' '); assert.equal(lndCredentialKind({ method, url }), 'invoices');
 }
 console.log('Channel response and exact credential routing assertions passed.');
+
+const { signingEvidence } = require('./paykit-wallet-fault-gate');
+const signedFixture = { hex: '001122', complete: true };
+assert.deepEqual(safeRoute('core', {method:'POST',url:'/wallet/owner'},Buffer.from('{"method":"signrawtransactionwithwallet"}')), {operation:'signrawtransactionwithwallet',issuance:false,signing:true});
+const signedEvidence = signingEvidence(result(200,{result:signedFixture,error:null}));
+assert.match(signedEvidence.signedTransactionDigest,/^[a-f0-9]{64}$/);
+assert.deepEqual(Object.keys(signedEvidence),['signedTransactionDigest']);
+for(const response of [result(500,{result:signedFixture}),result(200,{result:{...signedFixture,complete:false}}),result(200,{result:{...signedFixture,hex:'invalid'}}),result(200,{result:signedFixture,error:{message:'private'}})]) assert.equal(signingEvidence(response),undefined);
+console.log('Signing response evidence validates successful bytes and exposes only a digest.');

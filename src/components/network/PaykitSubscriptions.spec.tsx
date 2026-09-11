@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent } from '@testing-library/react';
+import { act, fireEvent } from '@testing-library/react';
 import { newPaykitId, PaykitReceiverWorkspace, PaykitState } from 'shared/paykitApi';
 import { renderWithProviders } from 'utils/tests';
 import PaykitSubscriptions from './PaykitSubscriptions';
@@ -348,4 +348,119 @@ it('does not fall back to full endpoints when the commitment field is explicitly
   view.select('Subscription endpoint source', 'Private');
   expect(view.getByText('Pay selected period manually').closest('button')).toBeDisabled();
   expect(view.command).not.toHaveBeenCalled();
+});
+
+it('manually pays a newly delivered period-zero offer beyond the 128-period history window', () => {
+  const utcDay = (index: number) =>
+    new Date(Date.UTC(2099, 0, 1 + index)).toISOString().replace('.000Z', 'Z');
+  const original = workspace.subscriptions![0];
+  const latestPeriods = Array.from({ length: 128 }, (_, offset) => ({
+    ...original.periods[0],
+    index: offset + 1,
+    startsAt: utcDay(offset + 1),
+    endsAt: utcDay(offset + 2),
+    offerId: null,
+    endpointBindings: [],
+    endpointCommitments: [],
+  }));
+  const current: PaykitReceiverWorkspace = {
+    ...workspace,
+    applicationClock: { mode: 'controlled', now: utcDay(128) },
+    requests: [
+      {
+        ...workspace.requests![0],
+        recurrence: {
+          every: 1,
+          unit: 'day',
+          startsAt: utcDay(0),
+          anchor: utcDay(0),
+          endsAt: null,
+        },
+      },
+    ],
+    subscriptions: [{ ...original, currentPeriodIndex: 128, periods: latestPeriods }],
+  };
+  const command = jest.fn();
+  let refreshProjection: (next: PaykitReceiverWorkspace) => void;
+  const ProjectionUpdates = () => {
+    const [projection, setProjection] = React.useState(current);
+    refreshProjection = setProjection;
+    return (
+      <PaykitSubscriptions
+        receiverId={receiverId}
+        workspace={projection}
+        state={state}
+        command={command}
+        disabled={false}
+      />
+    );
+  };
+  const rendered = renderWithProviders(<ProjectionUpdates />);
+  const view = {
+    ...rendered,
+    command,
+    select: (name: string, text: string) => {
+      fireEvent.mouseDown(rendered.getByRole('combobox', { name }));
+      fireEvent.click(rendered.getAllByText(text).slice(-1)[0]);
+    },
+  };
+  view.select('Subscription request', `Monthly work · payer · ${requestId}`);
+  fireEvent.click(view.getByText('Select period 128'));
+  fireEvent.change(view.getByLabelText('Subscription period index'), {
+    target: { value: '0' },
+  });
+  view.select('Subscription spending wallet', 'Alice wallet');
+  view.select('Subscription payment method', 'btc-onchain');
+  view.select('Subscription endpoint source', 'Private');
+  const pay = view.getByText('Pay selected period manually').closest('button')!;
+  expect(pay).toBeDisabled();
+  expect(view.command).not.toHaveBeenCalled();
+
+  // This is the refreshed public projection after the backend authenticates an old offer.
+  // Backend tests independently verify inclusion and prioritization under the projection cap.
+  const received: PaykitReceiverWorkspace = {
+    ...current,
+    subscriptions: [
+      {
+        ...current.subscriptions![0],
+        periods: [
+          {
+            ...original.periods[0],
+            startsAt: utcDay(0),
+            endsAt: utcDay(1),
+            endpointBindings: [],
+            endpointCommitments: [
+              {
+                source: 'private',
+                method: 'btc-onchain',
+                reservationId: newPaykitId(),
+                endpointHash: 'b'.repeat(64),
+              },
+            ],
+          },
+          ...latestPeriods,
+        ],
+      },
+    ],
+  };
+  act(() => refreshProjection(received));
+  expect(view.getByLabelText('Subscription period index')).toHaveValue('0');
+  expect(view.getByText('Select period 0')).toBeInTheDocument();
+  expect(pay).not.toBeDisabled();
+  expect(view.command).not.toHaveBeenCalled();
+  view.select('Subscription endpoint source', 'Public');
+  expect(pay).toBeDisabled();
+  view.select('Subscription endpoint source', 'Private');
+  expect(pay).not.toBeDisabled();
+  fireEvent.click(pay);
+  expect(view.command).toHaveBeenCalledTimes(1);
+  expect(view.command).toHaveBeenCalledWith('payment.execute', {
+    receiverId,
+    requestId,
+    periodIndex: 0,
+    source: 'private',
+    walletId: 'wallet',
+    method: 'btc-onchain',
+  });
+  expect(view.getByText(/Autopay: Disabled/)).toBeInTheDocument();
 });

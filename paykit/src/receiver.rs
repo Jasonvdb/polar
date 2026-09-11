@@ -91,7 +91,7 @@ pub async fn run(config: Config, id: Uuid) -> anyhow::Result<()> {
         config.environment_id,
         owner.public_key().to_string(),
     )?;
-    let clock = payments.clock();
+    let clock = storage.sdk_clock(payments.clock())?;
     let sdk = PaykitSdk::try_with_clock(
         storage.clone(),
         provider.clone(),

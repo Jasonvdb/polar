@@ -4,7 +4,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const { sleep } = require('./paykit-harness');
 const ONCHAIN = 'btc-onchain';
 const BOLT11 = 'btc-lightning-bolt11';
-const stages = ['recurring-validation', 'recurring-onchain-manual', 'recurring-onchain-autopay', 'recurring-onchain-missed', 'recurring-lightning-manual', 'recurring-lightning-autopay', 'recurring-lightning-missed', 'recurring-persistence-cancel', 'recurring-failure-safety', 'recurring-wallet-clock'];
+const stages = ['recurring-validation', 'recurring-onchain-manual', 'recurring-onchain-autopay', 'recurring-onchain-missed', 'recurring-lightning-manual', 'recurring-lightning-autopay', 'recurring-lightning-missed', 'recurring-persistence-cancel', 'recurring-failure-safety', 'recurring-wallet-clock', 'recurring-core-unsigned-restart', 'recurring-core-broadcast-restart'];
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const utc = value => new Date(value).toISOString().replace('.000Z', 'Z');
 function keys(value, expected) { assert.deepEqual(Object.keys(value).sort(), expected.split(' ').sort()); }
@@ -19,7 +19,7 @@ function assertEndpointCommitment(commitment, binding, source, method) {
   assert.equal(createHash('sha256').update(binding.endpoint, 'utf8').digest('hex'), commitment.endpointHash, 'Actual endpoint differs from the selected period commitment');
 }
 function validateEvidence(evidence) {
-  keys(evidence, 'version rails persistence failures clock'); assert.equal(evidence.version, 1);
+  keys(evidence, 'version rails persistence failures clock regressions'); assert.equal(evidence.version, 1);
   assert.equal(evidence.rails.length, 2);
   assert.deepEqual(evidence.rails.map(r => r.method), [ONCHAIN, BOLT11]);
   for (const field of ['requestId', 'receiptId']) assert.equal(new Set(evidence.rails.map(r => r[field])).size, 2);
@@ -58,6 +58,18 @@ function validateEvidence(evidence) {
   assert(Number.isSafeInteger(evidence.clock.invoiceExpiry) && evidence.clock.invoiceExpiry > 0);
   assert(Date.parse(evidence.clock.applicationNow) / 1000 > evidence.clock.invoiceTimestamp + evidence.clock.invoiceExpiry);
   assert.equal(evidence.clock.invoicePaid, true); assert.equal(evidence.clock.resetRejected, true);
+  keys(evidence.regressions, 'oversizedRejected oldOfferIndex oldCurrentIndex oldManual coreRestarts');
+  assert.equal(evidence.regressions.oversizedRejected, true); assert.equal(evidence.regressions.oldOfferIndex, 0);
+  assert(evidence.regressions.oldCurrentIndex >= 128); assert.equal(evidence.regressions.oldManual, true);
+  assert.deepEqual(evidence.regressions.coreRestarts.map(r => r.phase), ['unsigned', 'broadcast']);
+  for (const r of evidence.regressions.coreRestarts) {
+    keys(r, 'phase executionId txid transactionDigest originalDigest walletWasUnloaded walletDirectoryBefore walletDirectoryAfter sendsBefore sendsAfter');
+    assert.match(r.executionId, /^[0-9a-f-]{36}$/); assert.match(r.txid, /^[a-f0-9]{64}$/);
+    assert.match(r.transactionDigest, /^[a-f0-9]{64}$/); assert.equal(r.transactionDigest, r.originalDigest);
+    assert.equal(r.walletWasUnloaded, true); assert.deepEqual(r.walletDirectoryBefore, r.walletDirectoryAfter);
+    assert(r.walletDirectoryBefore.length > 0 && r.walletDirectoryBefore.every(w => typeof w === 'string' && w.startsWith('paykit-')));
+    assert(Number.isInteger(r.sendsBefore) && r.sendsBefore >= 0); assert.equal(r.sendsAfter, r.sendsBefore + 1);
+  }
   return evidence;
 }
 async function run({ initial, state, command, request, stage, signal, walletFixture: fixture, requests, restartEnvironment }) {
@@ -98,7 +110,7 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
   const selection = (r, index, walletId = fixture.walletIds.alice) => ({ receiverId: r.payer.id, requestId: r.id, periodIndex: index, walletId, source: r.source, method: r.method });
   const authorize = (r, walletId = fixture.walletIds.alice) => { const { periodIndex, ...input } = selection(r, 0, walletId); return command('subscription.authorize', input); };
   const disable = r => command('subscription.disable', { receiverId: r.payer.id, requestId: r.id });
-  const finish = async (r, index, automatic = false) => {
+  const finish = async (r, index, automatic = false, mineBlocks = mine) => {
     if (automatic) await wait(s => execution(workspace(s, r.payer), r.id, index)?.status === 'succeeded');
     const payerView = await view(r.payer);
     const spend = execution(payerView, r.id, index); assert.equal(spend?.status, 'succeeded');
@@ -115,7 +127,7 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
       const tx = fixture.core('getrawtransaction', [spend.txid, true]);
       assert.equal(tx.vout[spend.outputIndex].scriptPubKey.address, spend.endpoint);
       assert.equal(BigInt(tx.vout[spend.outputIndex].value.toFixed(8).replace('.', '')), BigInt(r.amountSats));
-      await mine(1);
+      await mineBlocks(1);
     } else {
       const invoice = fixture.lnd(r.payee === bob ? 1 : 2, 'lookupinvoice', spend.paymentHash);
       assert.equal(invoice.state, 'SETTLED'); assert.equal(invoice.amt_paid_sat, r.amountSats);
@@ -129,7 +141,7 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
     await wait(s => workspace(s, r.payer).requests.find(v => v.id === r.id)?.lifecycle === 'canceled');
     assert.equal(subscription(await view(r.payer), r.id).autopay.enabled, false);
   };
-  const evidence = { version: 1, rails: [] };
+  const evidence = { version: 1, rails: [], regressions: { coreRestarts: [] } };
   const blockBefore = fixture.core('getbestblockhash');
   const serverClock = (await view(server)).applicationClock.mode;
   await set([alice, bob, carol], now);
@@ -137,6 +149,12 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
   const blockAfter = fixture.core('getbestblockhash'); assert.equal(blockAfter, blockBefore);
   const input = { ...peer(bob, alice), amountSats: '701', description: 'Invalid recurrence', expirySeconds: 600, acceptedMethods: [ONCHAIN], recurrence: { every: 1, unit: 'minute', startsAt: utc(now), anchor: utc(now), endsAt: null } };
   for (const recurrence of [{ ...input.recurrence, every: 0 }, { ...input.recurrence, every: 1.5 }, { ...input.recurrence, anchor: utc(now + 1000) }, { ...input.recurrence, endsAt: utc(now + 30000) }, { ...input.recurrence, unit: 'fortnight' }]) assert.equal((await request('/v1/commands', { commandId: randomUUID(), command: 'request.create', input: { ...input, recurrence } })).status, 400);
+  const unchangedProposalState = () => state().then(s => s.receiverWorkspaces.map(w => ({ receiverId: w.receiverId, requestIds: w.requests.map(r => r.id).sort(), reservationIds: w.reservations.map(r => r.id).sort() })).sort((a, b) => a.receiverId.localeCompare(b.receiverId)));
+  const beforeOversized = await unchangedProposalState();
+  const oversized = await command('request.create', { ...input, description: 'x'.repeat(500) }, randomUUID(), 'failed');
+  assert.match(oversized.operation.error.message, /[Ss]horten the description/);
+  assert.deepEqual(await unchangedProposalState(), beforeOversized);
+  evidence.regressions.oversizedRejected = true;
   stage('recurring-validation');
   const subscriptions = [];
   for (const method of [ONCHAIN, BOLT11]) {
@@ -195,6 +213,16 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
     stage(`recurring-${name}-missed`);
     now += 60000; await set([alice, bob, carol], now);
   }
+  // An offer that arrives after its period leaves the default 128-period window must remain manually usable.
+  const old = await create(ONCHAIN, '703'); await authorize(old);
+  now = old.anchor + 128 * 60000; await set([bob, alice, carol], now);
+  await prepare(old, 0);
+  const oldView = subscription(await view(alice), old.id);
+  assert.equal(oldView.currentPeriodIndex, 128); assert(oldView.periods.some(p => p.index === 0 && p.offerId && p.endpointCommitments.some(c => c.source === old.source && c.method === old.method)));
+  await stableTicks(); assert.equal(execution(await view(alice), old.id, 0), undefined);
+  await mine(1); await command('payment.execute', selection(old, 0)); await finish(old, 0);
+  await disable(old); await cancel(old);
+  Object.assign(evidence.regressions, { oldOfferIndex: 0, oldCurrentIndex: 128, oldManual: true });
   const persisted = async () => Promise.all([alice, bob].map(async r => {
     const w = await view(r); return { clock: w.applicationClock, subscriptions: w.subscriptions.filter(s => subscriptions.some(r => r.id === s.requestId)) };
   }));
@@ -239,6 +267,54 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
   const clock = (await view(alice)).applicationClock;
   await command('clock.reset', { receiverId: alice.id }, randomUUID(), 'failed'); assert.deepEqual((await view(alice)).applicationClock, clock);
   evidence.clock.resetRejected = true; stage('recurring-wallet-clock');
+  // The gate proves an actual wallet response existed before losing it; Core is restarted independently of Paykit.
+  const miningAddress = fixture.core('getnewaddress', [], '');
+  const mineAfterRestart = async count => fixture.core('generatetoaddress', [count, miningAddress]);
+  const walletName = `paykit-${owner(alice)}`;
+  const sendIds = () => [...new Set(fixture.core('listtransactions', ['*', 10000, 0, true], walletName).filter(t => t.category === 'send').map(t => t.txid))].sort();
+  const walletDirectory = () => fixture.core('listwalletdir').wallets.map(w => w.name).filter(w => w.startsWith('paykit-')).sort();
+  for (const phase of ['unsigned', 'broadcast']) {
+    await mineAfterRestart(1);
+    const r = await create(ONCHAIN, phase === 'unsigned' ? '709' : '719'); await prepare(r, 0);
+    const sendsBefore = sendIds(); const walletDirectoryBefore = walletDirectory();
+    const operation = phase === 'unsigned' ? 'signrawtransactionwithwallet' : 'sendrawtransaction';
+    const gateBefore = fixture.counts().core.executionSuccess;
+    const nonce = fixture.arm('core', 'hold', operation);
+    const commandId = randomUUID();
+    const pending = command('payment.execute', selection(r, 0, fixture.walletIds.fault), commandId, 'failed').then(value => ({ value }), error => ({ error }));
+    // Observe a successful real response before interrupting Core; the held response cannot complete Paykit yet.
+    const ready = await fixture.waitReady('core', nonce);
+    let originalDigest = ready.signedTransactionDigest;
+    if (phase === 'broadcast') {
+      const inFlight = execution(await view(alice), r.id, 0); assert(inFlight?.txid);
+      originalDigest = createHash('sha256').update(Buffer.from(fixture.core('getrawtransaction', [inFlight.txid, false]), 'hex')).digest('hex');
+    }
+    await fixture.stopCore(); fixture.release('core', nonce, 'drop');
+    const outcome = await pending; if (outcome.error) throw outcome.error;
+    const interrupted = execution(await view(alice), r.id, 0); assert.equal(interrupted.status, 'uncertain');
+    if (phase === 'unsigned') assert.equal(interrupted.txid, null);
+    else assert.match(interrupted.txid, /^[a-f0-9]{64}$/);
+    await fixture.startCore();
+    assert(!fixture.core('listwallets').includes(walletName), 'Core must leave the persisted participant wallet unloaded for this regression');
+    assert.deepEqual(walletDirectory(), walletDirectoryBefore);
+    await command('payment.reconcile', { receiverId: alice.id, executionId: interrupted.id });
+    const recovered = execution(await view(alice), r.id, 0); assert.equal(recovered.id, interrupted.id); assert.equal(recovered.status, 'succeeded');
+    if (phase === 'broadcast') assert.equal(recovered.txid, interrupted.txid);
+    const raw = fixture.core('getrawtransaction', [recovered.txid, false]);
+    const transactionDigest = createHash('sha256').update(Buffer.from(raw, 'hex')).digest('hex'); assert.equal(transactionDigest, originalDigest);
+    if (phase === 'unsigned') {
+      const signing = fixture.evidence().gateEvents.filter(e => e.event === 'upstream.completed' && e.successfulSigning && e.identityDigest === ready.identityDigest);
+      assert.equal(signing.length, 2, 'Original unsigned transaction must be signed again byte-for-byte after reload');
+      assert(signing.every(e => e.signedTransactionDigest === originalDigest));
+    }
+    await finish(r, 0, false, mineAfterRestart);
+    await command('payment.reconcile', { receiverId: alice.id, executionId: recovered.id });
+    await command('payment.execute', selection(r, 0, fixture.walletIds.fault));
+    const sendsAfter = sendIds(); assert.deepEqual(sendsAfter, [...new Set([...sendsBefore, recovered.txid])].sort()); assert.equal(sendsAfter.length, sendsBefore.length + 1);
+    assert.equal(fixture.counts().core.executionSuccess, gateBefore + 1); assert.deepEqual(walletDirectory(), walletDirectoryBefore);
+    evidence.regressions.coreRestarts.push({ phase, executionId: recovered.id, txid: recovered.txid, transactionDigest, originalDigest, walletWasUnloaded: true, walletDirectoryBefore, walletDirectoryAfter: walletDirectory(), sendsBefore: sendsBefore.length, sendsAfter: sendsAfter.length });
+    await cancel(r); stage(`recurring-core-${phase}-restart`);
+  }
   return validateEvidence(evidence);
 }
 module.exports = { stages, run, validateEvidence, assertEndpointCommitment };

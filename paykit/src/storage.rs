@@ -159,6 +159,7 @@ fn private_options() -> OpenOptions {
 pub struct ReceiverStorage {
     vault: Vault,
     state: Mutex<StorageState>,
+    event_clock: std::sync::OnceLock<crate::clock::SdkEventClock>,
     _lock: File,
 }
 impl ReceiverStorage {
@@ -168,8 +169,26 @@ impl ReceiverStorage {
         Ok(Self {
             vault,
             state: Mutex::new(state),
+            event_clock: std::sync::OnceLock::new(),
             _lock: lock,
         })
+    }
+    pub(crate) fn sdk_clock(
+        &self,
+        application: crate::clock::ApplicationClock,
+    ) -> paykit_sdk::Result<crate::clock::SdkEventClock> {
+        let state = self.state.lock().map_err(|_| storage_error())?;
+        let clock = crate::clock::SdkEventClock::new(application, &state);
+        clock.ensure_valid()?;
+        self.event_clock
+            .set(clock.clone())
+            .map_err(|_| storage_error())?;
+        Ok(clock)
+    }
+    fn check_event_clock(&self) -> paykit_sdk::Result<()> {
+        self.event_clock
+            .get()
+            .map_or(Ok(()), crate::clock::SdkEventClock::ensure_valid)
     }
 }
 #[async_trait]
@@ -178,8 +197,10 @@ impl StorageAdapter for ReceiverStorage {
         &self,
         f: StorageTransactionCallback<'a>,
     ) -> paykit_sdk::Result<Box<dyn Any + Send>> {
+        self.check_event_clock()?;
         let mut state = self.state.lock().map_err(|_| storage_error())?;
         let (updated, value) = run_storage_state_transaction(state.clone(), f)?;
+        self.check_event_clock()?;
         if updated != *state {
             self.vault
                 .save("sdk.cbor", &updated)
@@ -199,6 +220,90 @@ fn storage_error() -> PaykitSdkError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn ignored_exhausted_clock_read_cannot_commit_or_allocate_ids() {
+        use paykit_sdk::Clock;
+        let dir = tempfile::tempdir().unwrap();
+        let open = || Vault::new(dir.path().into(), [31; 32], "clock-guard".into()).unwrap();
+        let vault = open();
+        let application = crate::clock::ApplicationClock::open(&vault).unwrap();
+        application
+            .set(&vault, Some("2090-01-01T00:00:00Z"))
+            .unwrap();
+        let frozen = application.now();
+        let initial = StorageState {
+            identity_state: Some(paykit_sdk::IdentityState {
+                local_pubky_public_key: None,
+                local_receiver_noise_public_key: None,
+                initialized_at: frozen + chrono::Duration::nanoseconds(999_999_998),
+                sign_out_generation: 0,
+            }),
+            ..Default::default()
+        };
+        vault.save("sdk.cbor", &initial).unwrap();
+        let before = std::fs::read(dir.path().join("sdk.cbor")).unwrap();
+        let storage = ReceiverStorage::open(open()).unwrap();
+        let clock = storage.sdk_clock(application.clone()).unwrap();
+        assert!(storage
+            .transaction(|tx| {
+                let _ = clock.now();
+                let _ = clock.now();
+                tx.allocate_receive_batch_id();
+                Ok(())
+            })
+            .await
+            .is_err());
+        assert_eq!(*storage.state.lock().unwrap(), initial);
+        assert_eq!(std::fs::read(dir.path().join("sdk.cbor")).unwrap(), before);
+        assert_eq!(application.now(), frozen);
+        assert!(storage
+            .transaction(|_| -> paykit_sdk::Result<()> {
+                panic!("latched clock must reject even read callbacks")
+            })
+            .await
+            .is_err());
+    }
+    #[tokio::test]
+    async fn failed_sdk_commit_does_not_persist_clock_watermark_or_mutation() {
+        use paykit_sdk::Clock;
+        let dir = tempfile::tempdir().unwrap();
+        let open = || Vault::new(dir.path().into(), [32; 32], "clock-rollback".into()).unwrap();
+        let application = crate::clock::ApplicationClock::open(&open()).unwrap();
+        application
+            .set(&open(), Some("2090-01-01T00:00:00Z"))
+            .unwrap();
+        let storage = ReceiverStorage::open(open()).unwrap();
+        let clock = storage.sdk_clock(application.clone()).unwrap();
+        std::fs::create_dir(dir.path().join("sdk.cbor")).unwrap();
+        assert!(storage
+            .transaction(|tx| {
+                tx.save_identity_state(paykit_sdk::IdentityState {
+                    local_pubky_public_key: None,
+                    local_receiver_noise_public_key: None,
+                    initialized_at: clock.now(),
+                    sign_out_generation: 0,
+                });
+                tx.allocate_receive_batch_id();
+                Ok(())
+            })
+            .await
+            .is_err());
+        assert_eq!(*storage.state.lock().unwrap(), StorageState::default());
+        drop(storage);
+        std::fs::remove_dir(dir.path().join("sdk.cbor")).unwrap();
+        let reopened = ReceiverStorage::open(open()).unwrap();
+        assert_eq!(
+            reopened.sdk_clock(application.clone()).unwrap().now(),
+            application.now()
+        );
+        assert_eq!(
+            reopened
+                .transaction(|tx| Ok(tx.export_storage_state()))
+                .await
+                .unwrap(),
+            StorageState::default()
+        );
+    }
     #[tokio::test]
     async fn readonly_sdk_transactions_do_not_reencrypt_or_replace_state() {
         let dir = tempfile::tempdir().unwrap();

@@ -94,6 +94,13 @@ impl Runtime {
                     state.executions[n].receiver_id == i.receiver_id,
                     "execution belongs to another receiver"
                 );
+                let execution = &state.executions[n];
+                if execution.view.method == ONCHAIN {
+                    execution
+                        .wallet
+                        .load_existing_core_wallet(&execution.owner, self.owner.as_str())
+                        .await?;
+                }
                 wallet_execution::execute(&mut state, &vault, n, true).await?;
             }
             "proof.submit" => self.submit_proof(c).await?,
@@ -128,17 +135,10 @@ impl Runtime {
         } else {
             self.fresh_request_bindings(&i, &local).await?
         };
-        for binding in &bindings {
-            local
-                .claims
-                .insert(binding.reservation_id.clone(), correlation.clone());
-        }
-        local.proposals.insert(c.command_id, correlation.clone());
-        self.vault.save("requests.cbor", &local)?;
         let amount = paykit_lib::PaymentAmount::new(i.amount_sats, "sat")?;
         let terms = paykit_lib::PaymentRequestTerms {
             amount,
-            payment_reference: paykit_lib::PaymentReference::new(correlation)?,
+            payment_reference: paykit_lib::PaymentReference::new(correlation.clone())?,
             proposal_expires_at: Some(
                 (self.clock.now() + chrono::Duration::seconds(i.expiry_seconds.into()))
                     .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -153,11 +153,19 @@ impl Runtime {
                 .into_iter()
                 .map(paykit_lib::PaymentEndpointIdentifier::new)
                 .collect::<Result<_, _>>()?,
-            metadata: json!({"description":i.description,"polarPaykitEndpoints":bindings})
+            metadata: json!({"description":i.description,"polarPaykitEndpoints":&bindings})
                 .as_object()
                 .expect("object literal")
                 .clone(),
         };
+        ensure_request_fits(&terms)?;
+        for binding in &bindings {
+            local
+                .claims
+                .insert(binding.reservation_id.clone(), correlation.clone());
+        }
+        local.proposals.insert(c.command_id, correlation.clone());
+        self.vault.save("requests.cbor", &local)?;
         self.sdk
             .propose_payment_request(
                 PubkyPublicKey::new(i.peer_public_key)?,
@@ -889,6 +897,19 @@ fn delivery(status: Option<&paykit_sdk::OutboundPrivateMessageStatus>) -> String
         .unwrap_or_else(|| "received".into())
 }
 
+fn ensure_request_fits(terms: &paykit_lib::PaymentRequestTerms) -> anyhow::Result<()> {
+    let event = paykit_lib::PaymentRequestEvent::Request(paykit_lib::PaymentRequest::new(
+        paykit_lib::EventId::new_v4(),
+        paykit_lib::PaymentRequestId::new_v4(),
+        terms.clone(),
+    ));
+    let serialized = paykit_lib::serialize_payment_request_event(&event)?;
+    if serialized.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
+        return Err(crate::model::PublicError::new("request_too_large", "The encrypted request exceeds its message limit. Shorten the description or select fewer payment methods, then create a new request.").into());
+    }
+    Ok(())
+}
+
 pub(super) fn bindings(
     terms: &paykit_sdk::PaymentRequestTermsRecord,
 ) -> anyhow::Result<Vec<EndpointBinding>> {
@@ -1060,7 +1081,208 @@ mod binding_tests {
         );
         assert_eq!(lifecycle(record.state), "activeRecurring");
     }
+    #[test]
+    fn full_proposal_preflight_enforces_exact_serialized_boundary() {
+        let mut terms = paykit_lib::PaymentRequestTerms {
+            amount: paykit_lib::PaymentAmount::new("5000", "sat").unwrap(),
+            payment_reference: paykit_lib::PaymentReference::new(format!(
+                "polar:{}",
+                Uuid::new_v4()
+            ))
+            .unwrap(),
+            proposal_expires_at: Some("2026-09-11T01:00:00Z".into()),
+            recurrence: None,
+            accepted_payment_endpoint_identifiers: vec![
+                paykit_lib::PaymentEndpointIdentifier::new(ONCHAIN).unwrap(),
+            ],
+            metadata: json!({"description":"","polarPaykitEndpoints":[]})
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        let event = paykit_lib::PaymentRequestEvent::Request(paykit_lib::PaymentRequest::new(
+            paykit_lib::EventId::new_v4(),
+            paykit_lib::PaymentRequestId::new_v4(),
+            terms.clone(),
+        ));
+        let overhead = paykit_lib::serialize_payment_request_event(&event)
+            .unwrap()
+            .len();
+        terms
+            .metadata
+            .insert("description".into(), json!("x".repeat(1000 - overhead)));
+        ensure_request_fits(&terms).unwrap();
+        terms
+            .metadata
+            .insert("description".into(), json!("x".repeat(1001 - overhead)));
+        assert_eq!(
+            ensure_request_fits(&terms)
+                .unwrap_err()
+                .downcast_ref::<crate::model::PublicError>()
+                .unwrap()
+                .code,
+            "request_too_large"
+        );
+    }
+    #[tokio::test]
+    async fn oversized_recurring_descriptions_leave_no_proposal_or_claim_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let mut runtime = request_runtime(dir.path(), receiver, false);
+        let peer = runtime.sdk.payment_requests().await.unwrap().remove(0);
+        runtime.state.view.links.push(serde_json::from_value(json!({"peerPublicKey":peer.counterparty,"peerReceiverPath":peer.counterparty_receiver_path,"state":"linked","generation":1,"failureCount":0,"pendingMessages":0})).unwrap());
+        for description in [
+            "a".repeat(500),
+            "界".repeat(166),
+            "\"".repeat(500),
+            "\\".repeat(500),
+        ] {
+            let command = Command {
+                command_id: Uuid::new_v4(),
+                command: "request.create".into(),
+                input: json!({"receiverId":receiver,"peerPublicKey":peer.counterparty,"peerReceiverPath":peer.counterparty_receiver_path,"amountSats":"5000","description":description,"expirySeconds":600,"acceptedMethods":[ONCHAIN],"recurrence":{"every":1,"unit":"month","startsAt":"2026-01-31T00:00:00Z","anchor":"2026-01-31T00:00:00Z","endsAt":null}}),
+            };
+            crate::request_input::validate(&command).unwrap();
+            for _ in 0..2 {
+                let error = runtime.create_request(&command).await.unwrap_err();
+                assert_eq!(
+                    error
+                        .downcast_ref::<crate::model::PublicError>()
+                        .unwrap()
+                        .code,
+                    "request_too_large"
+                );
+                let local = runtime.request_state().unwrap();
+                assert!(local.proposals.is_empty());
+                assert!(local.claims.is_empty());
+                assert_eq!(runtime.sdk.payment_requests().await.unwrap().len(), 1);
+            }
+        }
+    }
+    #[tokio::test]
+    async fn sdk_lifecycle_uses_causal_same_second_times_across_reopen() {
+        use paykit_sdk::storage::{OutboundPrivateMessageRecord, StorageState};
+        for cancel_after_acceptance in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let receiver = Uuid::new_v4();
+            let (runtime, clock) =
+                request_runtime_with_clock(dir.path(), receiver, cancel_after_acceptance);
+            runtime
+                .clock
+                .set(&runtime.vault, Some("2090-01-01T00:00:00Z"))
+                .unwrap();
+            let frozen = runtime.clock.now();
+            let request = runtime.sdk.payment_requests().await.unwrap().remove(0);
+            let mut saved: StorageState = runtime.vault.load("sdk.cbor").unwrap().unwrap();
+            saved.private_stream_items[0].received_at = clock.now();
+            for record in &mut saved.outbound_private_messages {
+                record.created_at = clock.now();
+                record.updated_at = record.created_at;
+                record.last_attempt_at = Some(record.created_at);
+                record.sent_at = Some(record.created_at);
+            }
+            let old_raw = saved.private_stream_items[0].raw_json.clone();
+            let prior_time = saved
+                .outbound_private_messages
+                .last()
+                .map(|r| r.created_at)
+                .unwrap_or(saved.private_stream_items[0].received_at);
+            runtime.vault.save("sdk.cbor", &saved).unwrap();
+            drop(runtime);
+            let (runtime, clock) =
+                request_runtime_with_clock(dir.path(), receiver, cancel_after_acceptance);
+            let observed = clock.now();
+            assert!(observed > prior_time);
+            assert_eq!(observed.timestamp(), frozen.timestamp());
+            let id = paykit_lib::PaymentRequestId::new(request.payment_request_id).unwrap();
+            let event = if cancel_after_acceptance {
+                paykit_lib::PaymentRequestEvent::Cancellation(
+                    paykit_lib::PaymentRequestCancellation::new(
+                        paykit_lib::EventId::new_v4(),
+                        id,
+                        None,
+                    ),
+                )
+            } else {
+                paykit_lib::PaymentRequestEvent::Rejection(
+                    paykit_lib::PaymentRequestRejection::new(
+                        paykit_lib::EventId::new_v4(),
+                        id,
+                        None,
+                    ),
+                )
+            };
+            let raw = paykit_lib::serialize_payment_request_event(&event).unwrap();
+            let kind = serde_json::from_str::<Value>(&raw).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            if cancel_after_acceptance {
+                let mut incoming = saved.private_stream_items[0].clone();
+                incoming.stream_item_id = 2;
+                incoming.receive_batch_id = 2;
+                incoming.received_at = observed;
+                incoming.raw_json = raw.clone();
+                incoming.parsed_kind = Some(kind.clone());
+                incoming.known_paykit_kind = Some(kind);
+                saved.private_stream_items.push(incoming);
+                saved.next_private_stream_item_id = 3;
+            } else {
+                saved
+                    .outbound_private_messages
+                    .push(OutboundPrivateMessageRecord {
+                        outbound_message_id: 1,
+                        counterparty: request.counterparty,
+                        counterparty_receiver_path: request.counterparty_receiver_path,
+                        kind,
+                        raw_json: raw.clone(),
+                        status: paykit_sdk::OutboundPrivateMessageStatus::Sent,
+                        attempt_count: 1,
+                        created_at: observed,
+                        updated_at: observed,
+                        last_attempt_at: Some(observed),
+                        sent_at: Some(observed),
+                        last_error: None,
+                    });
+                saved.next_outbound_private_message_id = 2;
+            }
+            runtime.vault.save("sdk.cbor", &saved).unwrap();
+            drop(runtime);
+            let (runtime, clock) =
+                request_runtime_with_clock(dir.path(), receiver, cancel_after_acceptance);
+            assert!(clock.now() > observed);
+            let derived = runtime.sdk.payment_requests().await.unwrap().remove(0);
+            assert_eq!(
+                derived.state,
+                if cancel_after_acceptance {
+                    PaymentRequestLifecycleState::Canceled
+                } else {
+                    PaymentRequestLifecycleState::Rejected
+                }
+            );
+            assert!(derived.invalid_reason.is_none());
+            let stored = runtime
+                .storage
+                .transaction(|tx| Ok(tx.export_storage_state()))
+                .await
+                .unwrap();
+            assert_eq!(stored.private_stream_items[0].raw_json, old_raw);
+            assert_eq!(stored.private_stream_items, saved.private_stream_items);
+            assert_eq!(
+                stored.outbound_private_messages,
+                saved.outbound_private_messages
+            );
+            assert_eq!(runtime.clock.now(), frozen);
+        }
+    }
     fn request_runtime(directory: &std::path::Path, receiver_id: Uuid, accepted: bool) -> Runtime {
+        request_runtime_with_clock(directory, receiver_id, accepted).0
+    }
+    fn request_runtime_with_clock(
+        directory: &std::path::Path,
+        receiver_id: Uuid,
+        accepted: bool,
+    ) -> (Runtime, crate::clock::SdkEventClock) {
         use crate::storage::{ReceiverStorage, Vault};
         use paykit_sdk::storage::{
             OutboundPrivateMessageRecord, PrivateStreamItemRecord, StorageState,
@@ -1168,7 +1390,7 @@ mod binding_tests {
             owner.to_string(),
         )
         .unwrap();
-        let clock = payments.clock();
+        let clock = storage.sdk_clock(payments.clock()).unwrap();
         let sdk = paykit_sdk::PaykitSdk::try_with_clock(
             storage.clone(),
             provider.clone(),
@@ -1177,7 +1399,10 @@ mod binding_tests {
             clock.clone(),
         )
         .unwrap();
-        Runtime::new(sdk, storage, vault, receiver_id, owner, provider, payments).unwrap()
+        (
+            Runtime::new(sdk, storage, vault, receiver_id, owner, provider, payments).unwrap(),
+            clock,
+        )
     }
     async fn seed_readiness(
         runtime: &Runtime,

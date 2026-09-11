@@ -19,7 +19,7 @@ pub(crate) type Sdk = PaykitSdk<
     Arc<ReceiverStorage>,
     crate::receiver::SessionProvider,
     crate::wallet_adapter::WalletAdapter,
-    crate::clock::ApplicationClock,
+    crate::clock::SdkEventClock,
 >;
 const FAILURE: &str = "The receiver operation failed. Check peer state and local services. An interrupted command requires reconciliation before another attempt.";
 #[derive(Clone, Serialize, Deserialize)]
@@ -780,7 +780,7 @@ mod tests {
         let payments =
             crate::wallet_adapter::WalletAdapter::open(vault.clone(), receiver, "test".into())
                 .unwrap();
-        let clock = payments.clock();
+        let clock = storage.sdk_clock(payments.clock()).unwrap();
         let sdk = PaykitSdk::try_with_clock(
             storage.clone(),
             provider.clone(),

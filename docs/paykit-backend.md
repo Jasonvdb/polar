@@ -407,3 +407,24 @@ receipt records continue to use encrypted `sdk.cbor`; signed transactions remain
 in the shared encrypted execution ledger. The workspace projects the latest 128
 periods plus recorded older periods, capped at 256; explicit older indices remain
 accepted by commands within the supported schedule bounds.
+
+Review recovery boundaries: subscription history prioritizes validated unpaid period
+offers, including old manually prepared periods, before filling its 256-row cap
+with recent history. This projection does not authorize automatic backlog payment.
+A complete request proposal is serialized before any proposal or endpoint-claim
+checkpoint; descriptions remain limited to 500 UTF-8 bytes, and the full encrypted
+message must also fit the SDK's 1000-byte limit. Oversize requests expose a safe operation error (internally
+`request_too_large`, wrapped as `receiver_operation_failed` by receiver IPC) with instructions to shorten the description or method list.
+On-chain reconciliation verifies the persisted wallet name against the receiver
+identity, loads only that existing wallet, and verifies `getwalletinfo` before
+continuing. Missing wallets remain blocked; reconciliation never creates a
+replacement or changes the persisted unsigned/signed transaction materials.
+
+SDK observation timestamps use a separate monotonic nanosecond clock within the
+current application UTC second. This preserves causal ordering between incoming
+and outgoing events when the application clock is frozen. The clock resumes
+above persisted SDK observation timestamps after restart; reads write no files.
+Application time, billing periods, request/proof terms and wallet invoice time are
+unchanged. Backward seconds or exhausted subsecond precision latch a storage
+error checked before callbacks and commits, including read-only transactions.
+Existing event history and authenticated payloads are never rewritten.

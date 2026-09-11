@@ -390,3 +390,85 @@ fn settled_period_rejects_another_proof_and_original_proof_cannot_pay_another_pe
     assert!(restored.settlement_conflicts("btc:proof-one:0", "receiver:request:1"));
     assert!(!restored.settlement_conflicts("btc:proof-two:0", "receiver:request:1"));
 }
+
+#[tokio::test]
+async fn reconciliation_loads_only_the_persisted_existing_wallet() {
+    for (already_loaded, returned_name, load_fails, expected_success) in [
+        (false, "paykit-alice", false, true),
+        (true, "paykit-alice", false, true),
+        (false, "paykit-alice", true, true),
+        (false, "replacement", false, false),
+        (false, "", true, false),
+    ] {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let observed = calls.clone();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut e = entry("paykit-alice");
+        e.unsigned = Some("original unsigned bytes".into());
+        e.signed = Some("original signed bytes".into());
+        e.inputs = vec![json!({"txid":"original input"})];
+        e.wallet.bitcoin.url = format!("http://{}", listener.local_addr().unwrap());
+        let app = axum::Router::new().fallback(axum::routing::post(
+            move |uri: axum::http::Uri, axum::Json(input): axum::Json<Value>| {
+                let calls = observed.clone();
+                async move {
+                    let method = input["method"].as_str().unwrap();
+                    calls.lock().unwrap().push(method.into());
+                    let result = match method {
+                        "listwallets" => {
+                            if already_loaded {
+                                json!(["paykit-alice"])
+                            } else {
+                                json!([])
+                            }
+                        }
+                        "loadwallet" => {
+                            assert_eq!(input["params"], json!(["paykit-alice"]));
+                            if load_fails {
+                                return axum::Json(json!({"result":null,"error":{"code":-18}}));
+                            }
+                            json!({"name":"paykit-alice"})
+                        }
+                        "getwalletinfo" => {
+                            assert_eq!(uri.path(), "/wallet/paykit-alice");
+                            if returned_name.is_empty() {
+                                return axum::Json(json!({"result":null,"error":{"code":-18}}));
+                            }
+                            json!({"walletname":returned_name})
+                        }
+                        _ => {
+                            panic!("reconciliation must not create a wallet or mutate transactions")
+                        }
+                    };
+                    axum::Json(json!({"result":result,"error":null}))
+                }
+            },
+        ));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let before = serde_json::to_value(&e).unwrap();
+        assert_eq!(
+            e.wallet
+                .load_existing_core_wallet(&e.owner, "alice")
+                .await
+                .is_ok(),
+            expected_success
+        );
+        assert_eq!(serde_json::to_value(&e).unwrap(), before);
+        assert_eq!(
+            *calls.lock().unwrap(),
+            if already_loaded {
+                vec!["listwallets", "getwalletinfo"]
+            } else {
+                vec!["listwallets", "loadwallet", "getwalletinfo"]
+            }
+        );
+        let count = calls.lock().unwrap().len();
+        assert!(e
+            .wallet
+            .load_existing_core_wallet("paykit-other", "alice")
+            .await
+            .is_err());
+        assert_eq!(calls.lock().unwrap().len(), count);
+        server.abort();
+    }
+}

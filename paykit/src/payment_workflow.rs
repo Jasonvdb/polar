@@ -676,7 +676,7 @@ mod publication_recovery_tests {
         );
         let provider = crate::receiver::SessionProvider::without_access(vault.clone());
         let payments = WalletAdapter::open(vault.clone(), receiver, "test".into()).unwrap();
-        let clock = payments.clock();
+        let clock = storage.sdk_clock(payments.clock()).unwrap();
         let sdk = PaykitSdk::try_with_clock(
             storage.clone(),
             provider.clone(),
