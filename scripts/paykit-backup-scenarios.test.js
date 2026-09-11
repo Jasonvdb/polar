@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, assertPublicSnapshot, recoveryView, assertWrongReceiverPreview, receiverForPeer, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
+const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, assertPublicSnapshot, recoveryView, assertWrongReceiverPreview, receiverForPeer, forceExactRelink, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
 
 const receiverId = '123e4567-e89b-42d3-a456-426614174000';
 const presetReceiverId = 'af9f976d-b4ff-5feb-af0e-4fad185109f1';
@@ -81,4 +81,17 @@ test('unsafe checkpoint repair and later relink resolve the exact same configure
   assert.equal(receiverForPeer(initial, peer), initial.receivers[0]);
   assert.equal(receiverForPeer(initial, { ...peer, peerPublicKey: 'other' }), undefined);
   assert.equal(receiverForPeer(initial, { ...peer, peerReceiverPath: 'other/path' }), undefined);
+});
+test('exact relink clears the local projection first and verifies both endpoints', async () => {
+  const local = { id: 'local', participantId: 'local-owner', path: 'local/wallet' };
+  const remote = { id: 'remote', participantId: 'remote-owner', path: 'remote/wallet' };
+  const initial = { participants: [{ id: 'local-owner', publicKey: 'local-key' }, { id: 'remote-owner', publicKey: 'remote-key' }] };
+  const calls = []; let repaired = false;
+  const requests = {
+    unlinkLocally: async (actualLocal, actualRemote) => { calls.push(['unlink', actualLocal.id, actualRemote.id]); },
+    relinkAfterRestart: async (actualLocal, actualRemote) => { calls.push(['relink', actualLocal.id, actualRemote.id]); repaired = true; },
+    view: async receiver => ({ links: repaired ? [{ peerPublicKey: receiver === local ? 'remote-key' : 'local-key', peerReceiverPath: receiver === local ? remote.path : local.path, state: 'linked' }] : [] }),
+  };
+  await forceExactRelink(requests, initial, local, remote);
+  assert.deepEqual(calls, [['unlink', 'local', 'remote'], ['relink', 'local', 'remote']]);
 });

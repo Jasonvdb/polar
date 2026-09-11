@@ -96,6 +96,15 @@ function receiverForPeer(initial, peer) {
     && initial.participants.find(participant => participant.id === receiver.participantId)?.publicKey === peer.peerPublicKey);
 }
 
+async function forceExactRelink(requests, initial, local, remote) {
+  const owner = receiver => initial.participants.find(participant => participant.id === receiver.participantId).publicKey;
+  const exact = (workspace, peer) => workspace.links.find(link => link.peerPublicKey === owner(peer) && link.peerReceiverPath === peer.path);
+  await requests.unlinkLocally(local, remote);
+  await requests.relinkAfterRestart(local, remote);
+  assert.equal(exact(await requests.view(local), remote)?.state, 'linked');
+  assert.equal(exact(await requests.view(remote), local)?.state, 'linked');
+}
+
 async function run({ initial, state, command, stage, signal, walletFixture: fixture, base, token, requests }) {
   assert(fixture?.loseReceiverState && fixture?.pruneBackupExecutions && fixture?.markPeerUnsafe && fixture?.backupJournalProjection, 'PR8 backup fixture capabilities are required');
   const bobParticipant = initial.participants.find(value => value.name === 'Bob');
@@ -106,9 +115,13 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
   const passphrase = randomPassphrase(); const alicePassphrase = randomPassphrase(); let archive; let aliceArchive;
   try {
     await requests.link(bob, requests.carol);
-    const linkedPeers = (await requests.view(bob)).links.filter(value => value.state === 'linked');
-    assert(linkedPeers.length >= 2, 'Backup recovery requires two existing linked peers');
-    const linkedPeer = linkedPeers[0]; const safePeer = linkedPeers[1];
+    const bobLinks = (await requests.view(bob)).links;
+    const alicePeer = { peerPublicKey: initial.participants.find(value => value.id === alice.participantId).publicKey, peerReceiverPath: alice.path };
+    const carol = requests.carol;
+    const carolPeer = { peerPublicKey: initial.participants.find(value => value.id === carol.participantId).publicKey, peerReceiverPath: carol.path };
+    const linkedPeer = bobLinks.find(value => value.state === 'linked' && value.peerPublicKey === alicePeer.peerPublicKey && value.peerReceiverPath === alicePeer.peerReceiverPath);
+    const safePeer = bobLinks.find(value => value.state === 'linked' && value.peerPublicKey === carolPeer.peerPublicKey && value.peerReceiverPath === carolPeer.peerReceiverPath);
+    assert(linkedPeer && safePeer, 'Backup recovery requires Bob linked to the exact Alice and Carol wallet peers');
     await command('receiver.stop', { receiverId: bob.id });
     const unsafe = fixture.markPeerUnsafe(bob.id, linkedPeer.peerPublicKey, linkedPeer.peerReceiverPath);
     assert.equal(unsafe.unsafeCheckpoints, 1);
@@ -168,7 +181,7 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     await command('receiver.start', { receiverId: bob.id });
     const unsafeRemote = receiverForPeer(initial, linkedPeer);
     assert(unsafeRemote, 'Unsafe checkpoint peer no longer resolves to one configured receiver');
-    await requests.relinkAfterRestart(bob, unsafeRemote);
+    await forceExactRelink(requests, initial, bob, unsafeRemote);
     await command('receiver.stop', { receiverId: alice.id });
     const aliceExportId = await createTransfer({ base, token, purpose: 1, receiverId: alice.id, passphrase: alicePassphrase, signal });
     await command('backup.export', { receiverId: alice.id, transferId: aliceExportId });
@@ -256,7 +269,7 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     assert.equal(blockedSafePeer.operation.error.code, 'recovery_required');
     assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeBlockedSafePeer, 'Global recovery gate triggered a financial action');
     assert.equal(recovery.automationPaused, true); stage('backup-relink');
-    await requests.relinkAfterRestart(bob, unsafeRemote);
+    await forceExactRelink(requests, initial, bob, unsafeRemote);
     await command('receiver.stop', { receiverId: bob.id });
     await command('recovery.reconcile', { receiverId: bob.id });
     const ready = recoveryView(await state(), bob.id);
@@ -273,4 +286,4 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
   } finally { passphrase.fill(0); alicePassphrase.fill(0); archive?.fill(0); aliceArchive?.fill(0); }
 }
 
-module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertPublicSnapshot, assertWrongReceiverPreview, receiverForPeer, MAX_ARCHIVE };
+module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertPublicSnapshot, assertWrongReceiverPreview, receiverForPeer, forceExactRelink, MAX_ARCHIVE };
