@@ -225,34 +225,37 @@ pub async fn export_receiver(
         .participants
         .iter()
         .find(|value| value.public.id == receiver.public.participant_id)
-        .ok_or_else(backup_invalid)?;
-    let vault = crate::receiver::vault(config, receiver_id).map_err(|_| backup_invalid())?;
+        .ok_or_else(|| export_failure("receiver_owner"))?;
+    let vault = crate::receiver::vault(config, receiver_id)
+        .map_err(|_| export_failure("receiver_vault"))?;
     let session: crate::receiver::ReceiverSecrets = vault
         .load("session.cbor")
-        .map_err(|_| backup_invalid())?
-        .ok_or_else(backup_invalid)?;
-    validate_receiver_binding(receiver, owner, &session)?;
+        .map_err(|_| export_failure("receiver_session_read"))?
+        .ok_or_else(|| export_failure("receiver_session_missing"))?;
+    validate_receiver_binding(receiver, owner, &session)
+        .map_err(|_| export_failure("receiver_binding"))?;
     let storage = crate::storage::ReceiverStorage::open(
-        crate::receiver::vault(config, receiver_id).map_err(|_| backup_invalid())?,
+        crate::receiver::vault(config, receiver_id)
+            .map_err(|_| export_failure("sdk_storage_vault"))?,
     )
-    .map_err(|_| backup_invalid())?;
-    let path =
-        paykit_sdk::PaykitReceiverPath::new(session.path.clone()).map_err(|_| backup_invalid())?;
+    .map_err(|_| export_failure("sdk_storage_open"))?;
+    let path = paykit_sdk::PaykitReceiverPath::new(session.path.clone())
+        .map_err(|_| export_failure("receiver_path"))?;
     let sdk = paykit_sdk::export_backup_state(&storage, path)
         .await
-        .map_err(|_| backup_invalid())?;
+        .map_err(|_| export_failure("sdk_export"))?;
     let spend_vault = vault
         .shared_wallets(config.environment_id)
-        .map_err(|_| backup_invalid())?;
-    let spend =
-        crate::wallet_execution::SpendState::open(&spend_vault).map_err(|_| backup_invalid())?;
+        .map_err(|_| export_failure("wallet_vault"))?;
+    let spend = crate::wallet_execution::SpendState::open(&spend_vault)
+        .map_err(|_| export_failure("wallet_journal"))?;
     let payment_state: crate::wallet_adapter::Ledger = vault
         .load("payments.cbor")
-        .map_err(|_| backup_invalid())?
+        .map_err(|_| export_failure("payment_state"))?
         .unwrap_or_default();
     let mut anchors = capture_environment_anchors(config, state)
         .await
-        .map_err(|_| backup_invalid())?;
+        .map_err(|_| export_failure("wallet_history"))?;
     if anchors.is_empty() {
         anchors = capture_wallet_anchors(
             config,
@@ -262,7 +265,7 @@ pub async fn export_receiver(
             &payment_state,
         )
         .await
-        .map_err(|_| backup_invalid())?;
+        .map_err(|_| export_failure("bound_wallet_history"))?;
     }
     let bundle = ReceiverBackupV1 {
         version: 1,
@@ -275,11 +278,14 @@ pub async fn export_receiver(
         created_at: chrono::Utc::now(),
         session,
         sdk,
-        workspace: load_value(&vault, "workspace.cbor")?,
+        workspace: load_value(&vault, "workspace.cbor")
+            .map_err(|_| export_failure("workspace_state"))?,
         payment_adapter_state: ciborium::Value::serialized(&payment_state)
-            .map_err(|_| backup_invalid())?,
-        subscriptions: load_value(&vault, "subscriptions.cbor")?,
-        application_clock: load_value(&vault, "clock.cbor")?,
+            .map_err(|_| export_failure("payment_state_encode"))?,
+        subscriptions: load_value(&vault, "subscriptions.cbor")
+            .map_err(|_| export_failure("subscription_state"))?,
+        application_clock: load_value(&vault, "clock.cbor")
+            .map_err(|_| export_failure("clock_state"))?,
         wallet: WalletBackup {
             receiver_executions: spend
                 .executions
@@ -291,8 +297,13 @@ pub async fn export_receiver(
         },
     };
     let mut clear = Zeroizing::new(Vec::new());
-    ciborium::into_writer(&bundle, &mut *clear).map_err(|_| backup_invalid())?;
-    encrypt(&clear, passphrase)
+    ciborium::into_writer(&bundle, &mut *clear).map_err(|_| export_failure("archive_encode"))?;
+    encrypt(&clear, passphrase).map_err(|_| export_failure("archive_encrypt"))
+}
+
+fn export_failure(stage: &str) -> PublicError {
+    eprintln!("Paykit backup export failed at stage: {stage}");
+    backup_invalid()
 }
 
 async fn capture_environment_anchors(
@@ -600,9 +611,7 @@ pub async fn inspect_receiver(
     let archived_owner = pubky::Keypair::from_secret(&backup.session.owner)
         .public_key()
         .z32();
-    let archived_noise = paykit_sdk::ReceiverNoiseSecretKey::new(backup.session.noise)
-        .public_key()
-        .to_string();
+    let archived_noise = crate::receiver::noise_public_key(backup.session.noise);
     let identity_matches = backup.environment_id == config.environment_id
         && backup.participant_id == receiver.public.participant_id
         && backup.owner_public_key == owner.public.public_key
@@ -741,9 +750,7 @@ fn validate_receiver_binding(
     owner: &crate::model::OwnerRecord,
     session: &crate::receiver::ReceiverSecrets,
 ) -> Result<(), PublicError> {
-    let noise = paykit_sdk::ReceiverNoiseSecretKey::new(session.noise)
-        .public_key()
-        .to_string();
+    let noise = crate::receiver::noise_public_key(session.noise);
     let owner_key = pubky::Keypair::from_secret(&session.owner)
         .public_key()
         .z32();
@@ -1095,9 +1102,7 @@ fn validate_archive_identity(
     let archived_owner = pubky::Keypair::from_secret(&backup.session.owner)
         .public_key()
         .z32();
-    let archived_noise = paykit_sdk::ReceiverNoiseSecretKey::new(backup.session.noise)
-        .public_key()
-        .to_string();
+    let archived_noise = crate::receiver::noise_public_key(backup.session.noise);
     if backup.version != 1
         || backup.environment_id != config.environment_id
         || backup.participant_id != receiver.public.participant_id
@@ -1898,6 +1903,61 @@ mod tests {
             decrypt(&encrypted, b"wrong password").unwrap_err().code,
             "backup_invalid"
         );
+    }
+
+    #[test]
+    fn receiver_binding_uses_sdk_noise_key_and_rejects_each_mismatch() {
+        let owner_key = pubky::Keypair::random();
+        let owner = crate::model::OwnerRecord {
+            public: crate::model::Participant {
+                id: Uuid::new_v4(),
+                name: "owner".into(),
+                public_key: owner_key.public_key().z32(),
+            },
+            secret: owner_key.secret(),
+            registered: true,
+        };
+        let secrets = crate::receiver::ReceiverSecrets {
+            owner: owner.secret,
+            noise: pubky::Keypair::random().secret(),
+            path: "receiver/wallet".into(),
+            session: Some("opaque".into()),
+        };
+        let receiver = crate::model::ReceiverRecord {
+            public: crate::model::Receiver {
+                id: Uuid::new_v4(),
+                participant_id: owner.public.id,
+                name: "wallet".into(),
+                path: secrets.path.clone(),
+                status: crate::model::ReceiverStatus::Stopped,
+                generation: 1,
+                noise_public_key: crate::receiver::noise_public_key(secrets.noise),
+                last_error: None,
+            },
+            desired_running: false,
+        };
+        assert!(validate_receiver_binding(&receiver, &owner, &secrets).is_ok());
+        let mut wrong = receiver.clone();
+        wrong.public.noise_public_key = paykit_sdk::ReceiverNoiseSecretKey::new(secrets.noise)
+            .public_key()
+            .to_string();
+        assert!(validate_receiver_binding(&wrong, &owner, &secrets).is_err());
+        wrong = receiver.clone();
+        wrong.public.path.push_str("/other");
+        assert!(validate_receiver_binding(&wrong, &owner, &secrets).is_err());
+        let mut wrong_secrets = secrets.clone();
+        wrong_secrets.owner = pubky::Keypair::random().secret();
+        assert!(validate_receiver_binding(&receiver, &owner, &wrong_secrets).is_err());
+    }
+
+    #[test]
+    fn sdk_noise_key_uses_pubky_z32_wire_encoding() {
+        let secret = pubky::Keypair::random().secret();
+        let pubky_z32 = pubky::Keypair::from_secret(&secret).public_key().z32();
+        let sdk_public = paykit_sdk::ReceiverNoiseSecretKey::new(secret).public_key();
+        assert_eq!(sdk_public.z32(), pubky_z32);
+        assert_ne!(sdk_public.to_string(), pubky_z32);
+        assert_eq!(crate::receiver::noise_public_key(secret), pubky_z32);
     }
 
     #[test]

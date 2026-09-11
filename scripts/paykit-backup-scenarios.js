@@ -2,7 +2,8 @@
 const assert = require('node:assert/strict');
 const { randomBytes } = require('node:crypto');
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const MAX_ARCHIVE = 24 * 1024 * 1024;
 const stages = ['backup-export', 'backup-invalid-archives', 'backup-local-loss', 'backup-wallet-survivors', 'backup-empty-oracle', 'backup-relink', 'backup-ready'];
 
@@ -39,12 +40,12 @@ async function createTransfer({ base, token, purpose, receiverId, passphrase, ar
     const response = await boundedFetch(`${base}/v1/transfers`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/octet-stream' }, body: frame }, signal);
     const data = await response.json();
     assert.equal(response.status, 201, `Transfer upload failed: ${data.error?.code || response.status}`);
-    assert.match(data.transferId, UUID); return data.transferId;
+    assert.match(data.transferId, UUID_V4); return data.transferId;
   } finally { frame.fill(0); }
 }
 
 async function downloadArchive({ base, token, transferId, signal }) {
-  assert.match(transferId, UUID);
+  assert.match(transferId, UUID_V4);
   const response = await boundedFetch(`${base}/v1/transfers/${transferId}/archive`, { headers: { authorization: `Bearer ${token}` } }, signal);
   assert.equal(response.status, 200); assert.equal(response.headers.get('content-type'), 'application/octet-stream');
   const archive = Buffer.from(await response.arrayBuffer());

@@ -35,6 +35,9 @@ pub struct ReceiverSecrets {
     pub path: String,
     pub session: Option<String>,
 }
+pub(crate) fn noise_public_key(secret: [u8; 32]) -> String {
+    ReceiverNoiseSecretKey::new(secret).public_key().z32()
+}
 pub fn vault(config: &Config, id: Uuid) -> anyhow::Result<Vault> {
     Vault::new(
         config.data_dir.join("receivers").join(id.to_string()),

@@ -453,7 +453,7 @@ export async function callService(
 const MAX_BACKUP_BYTES = 24 * 1024 * 1024;
 const exportDestinations = new Map<string, { path: string; expiresAt: number }>();
 const uuidBytes = (value: string) => {
-  if (!isUuid(value) || value !== value.toLowerCase() || value[14] !== '4')
+  if (!isUuid(value) || value !== value.toLowerCase())
     throw new Error('Invalid Paykit receiver ID');
   return Buffer.from(value.replace(/-/g, ''), 'hex');
 };

@@ -216,6 +216,7 @@ impl Supervisor {
             Ok(())
         })?;
         crate::participants::reconcile(&self.repository).await?;
+        self.migrate_receiver_noise_keys()?;
         for owner in self
             .repository
             .snapshot()?
@@ -540,9 +541,7 @@ impl Supervisor {
                         path,
                         status: ReceiverStatus::Stopped,
                         generation: 0,
-                        noise_public_key: pubky::Keypair::from_secret(&secrets.noise)
-                            .public_key()
-                            .z32(),
+                        noise_public_key: receiver::noise_public_key(secrets.noise),
                         last_error: None,
                     },
                     desired_running: true,
@@ -607,6 +606,35 @@ impl Supervisor {
         }
         Ok(())
     }
+
+    fn migrate_receiver_noise_keys(&self) -> anyhow::Result<()> {
+        let snapshot = self.repository.snapshot()?;
+        let mut canonical = HashMap::new();
+        for receiver_record in &snapshot.receivers {
+            let owner = snapshot
+                .participants
+                .iter()
+                .find(|value| value.public.id == receiver_record.public.participant_id)
+                .ok_or_else(|| anyhow::anyhow!("receiver owner missing"))?;
+            let Some(secrets): Option<ReceiverSecrets> =
+                receiver::vault(&self.config, receiver_record.public.id)?.load("session.cbor")?
+            else {
+                // A crash before initial receiver provisioning is handled by normal
+                // lifecycle recovery and must not block unrelated receivers.
+                continue;
+            };
+            let sdk_key = canonical_noise_for_binding(receiver_record, owner, &secrets)?;
+            canonical.insert(receiver_record.public.id, sdk_key);
+        }
+        self.repository.update(|state| {
+            for receiver_record in &mut state.receivers {
+                if let Some(value) = canonical.remove(&receiver_record.public.id) {
+                    receiver_record.public.noise_public_key = value;
+                }
+            }
+            Ok(())
+        })
+    }
     async fn start_child(&mut self, id: Uuid) -> anyhow::Result<()> {
         if self.children.contains_key(&id) {
             let state = self.repository.snapshot()?;
@@ -623,6 +651,22 @@ impl Supervisor {
             }
             self.stop_child(id).await?;
         }
+        let snapshot = self.repository.snapshot()?;
+        let receiver_record = snapshot
+            .receivers
+            .iter()
+            .find(|value| value.public.id == id)
+            .ok_or_else(|| anyhow::anyhow!("receiver missing"))?;
+        let owner = snapshot
+            .participants
+            .iter()
+            .find(|value| value.public.id == receiver_record.public.participant_id)
+            .ok_or_else(|| anyhow::anyhow!("receiver owner missing"))?;
+        let secrets: ReceiverSecrets = receiver::vault(&self.config, id)?
+            .load("session.cbor")?
+            .ok_or_else(|| anyhow::anyhow!("receiver session missing"))?;
+        let canonical_noise_public_key =
+            canonical_noise_for_binding(receiver_record, owner, &secrets)?;
         self.repository.update(|s| {
             let r = find_receiver(s, id)?;
             r.public.status = ReceiverStatus::Starting;
@@ -797,7 +841,9 @@ impl Supervisor {
         );
         tokio::time::timeout(Duration::from_secs(60), ready_rx).await???;
         self.repository.update(|s| {
-            find_receiver(s, id)?.public.status = ReceiverStatus::Running;
+            let receiver = find_receiver(s, id)?;
+            receiver.public.status = ReceiverStatus::Running;
+            receiver.public.noise_public_key = canonical_noise_public_key;
             s.event("receiver.running", json!({"receiverId":id}));
             Ok(())
         })
@@ -860,6 +906,27 @@ impl Supervisor {
         })
     }
 }
+
+fn canonical_noise_for_binding(
+    receiver_record: &ReceiverRecord,
+    owner: &OwnerRecord,
+    secrets: &ReceiverSecrets,
+) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        secrets.owner == owner.secret && secrets.path == receiver_record.public.path,
+        "receiver binding mismatch"
+    );
+    let sdk_key = receiver::noise_public_key(secrets.noise);
+    let transient_display_key = paykit_sdk::ReceiverNoiseSecretKey::new(secrets.noise)
+        .public_key()
+        .to_string();
+    anyhow::ensure!(
+        receiver_record.public.noise_public_key == sdk_key
+            || receiver_record.public.noise_public_key == transient_display_key,
+        "receiver Noise key mismatch"
+    );
+    Ok(sdk_key)
+}
 fn find_receiver(state: &mut AppState, id: Uuid) -> anyhow::Result<&mut ReceiverRecord> {
     state
         .receivers
@@ -885,6 +952,155 @@ mod diagnostic_tests {
             token: zeroize::Zeroizing::new("0".repeat(64)),
             listen: "127.0.0.1:0".into(),
         }
+    }
+
+    #[test]
+    fn stopped_receiver_migration_accepts_only_canonical_or_transient_encoding() {
+        let owner_key = pubky::Keypair::random();
+        let noise = pubky::Keypair::random().secret();
+        let owner = OwnerRecord {
+            public: Participant {
+                id: Uuid::new_v4(),
+                name: "owner".into(),
+                public_key: owner_key.public_key().z32(),
+            },
+            secret: owner_key.secret(),
+            registered: true,
+        };
+        let secrets = ReceiverSecrets {
+            owner: owner.secret,
+            noise,
+            path: "receiver/wallet".into(),
+            session: Some("unchanged-session".into()),
+        };
+        let mut record = ReceiverRecord {
+            public: Receiver {
+                id: Uuid::new_v4(),
+                participant_id: owner.public.id,
+                name: "wallet".into(),
+                path: secrets.path.clone(),
+                status: ReceiverStatus::Stopped,
+                generation: 4,
+                noise_public_key: pubky::Keypair::from_secret(&noise).public_key().z32(),
+                last_error: None,
+            },
+            desired_running: false,
+        };
+        let canonical = canonical_noise_for_binding(&record, &owner, &secrets).unwrap();
+        assert_eq!(canonical, crate::receiver::noise_public_key(noise));
+        assert_eq!(secrets.session.as_deref(), Some("unchanged-session"));
+        assert_eq!(secrets.noise, noise);
+        record.public.noise_public_key = pubky::Keypair::random().public_key().z32();
+        assert!(canonical_noise_for_binding(&record, &owner, &secrets).is_err());
+    }
+
+    #[test]
+    fn startup_migration_preserves_unprovisioned_stopped_receiver() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(directory.path());
+        let repository = Arc::new(Repository::open(&config).unwrap());
+        let owner_key = pubky::Keypair::random();
+        let owner_id = Uuid::new_v4();
+        let receiver_id = Uuid::new_v4();
+        repository
+            .update(|state| {
+                state.participants.push(OwnerRecord {
+                    public: Participant {
+                        id: owner_id,
+                        name: "owner".into(),
+                        public_key: owner_key.public_key().z32(),
+                    },
+                    secret: owner_key.secret(),
+                    registered: true,
+                });
+                state.receivers.push(ReceiverRecord {
+                    public: Receiver {
+                        id: receiver_id,
+                        participant_id: owner_id,
+                        name: "wallet".into(),
+                        path: "receiver/wallet".into(),
+                        status: ReceiverStatus::Stopped,
+                        generation: 0,
+                        noise_public_key: "pending".into(),
+                        last_error: None,
+                    },
+                    desired_running: false,
+                });
+                Ok(())
+            })
+            .unwrap();
+        Supervisor::new(config, repository.clone())
+            .migrate_receiver_noise_keys()
+            .unwrap();
+        let after = repository.snapshot().unwrap();
+        let receiver = after
+            .receivers
+            .iter()
+            .find(|value| value.public.id == receiver_id)
+            .unwrap();
+        assert!(receiver.public.status == ReceiverStatus::Stopped);
+        assert!(!receiver.desired_running);
+        assert_eq!(receiver.public.noise_public_key, "pending");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_rejects_mismatched_noise_before_status_change_or_spawn() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config(directory.path());
+        let repository = Arc::new(Repository::open(&config).unwrap());
+        let owner_key = pubky::Keypair::random();
+        let owner_id = Uuid::new_v4();
+        let receiver_id = Uuid::new_v4();
+        let secrets = ReceiverSecrets {
+            owner: owner_key.secret(),
+            noise: pubky::Keypair::random().secret(),
+            path: "receiver/wallet".into(),
+            session: Some("opaque-session".into()),
+        };
+        receiver::vault(&config, receiver_id)
+            .unwrap()
+            .save("session.cbor", &secrets)
+            .unwrap();
+        let wrong_noise = pubky::Keypair::random().public_key().z32();
+        repository
+            .update(|state| {
+                state.participants.push(OwnerRecord {
+                    public: Participant {
+                        id: owner_id,
+                        name: "owner".into(),
+                        public_key: owner_key.public_key().z32(),
+                    },
+                    secret: owner_key.secret(),
+                    registered: true,
+                });
+                state.receivers.push(ReceiverRecord {
+                    public: Receiver {
+                        id: receiver_id,
+                        participant_id: owner_id,
+                        name: "wallet".into(),
+                        path: secrets.path.clone(),
+                        status: ReceiverStatus::Stopped,
+                        generation: 7,
+                        noise_public_key: wrong_noise.clone(),
+                        last_error: None,
+                    },
+                    desired_running: false,
+                });
+                Ok(())
+            })
+            .unwrap();
+        let mut supervisor = Supervisor::new(config, repository.clone());
+        assert!(supervisor.start_child(receiver_id).await.is_err());
+        assert!(supervisor.children.is_empty());
+        let after = repository.snapshot().unwrap();
+        let receiver = after
+            .receivers
+            .iter()
+            .find(|value| value.public.id == receiver_id)
+            .unwrap();
+        assert!(receiver.public.status == ReceiverStatus::Stopped);
+        assert_eq!(receiver.public.generation, 7);
+        assert_eq!(receiver.public.noise_public_key, wrong_noise);
     }
 
     #[test]

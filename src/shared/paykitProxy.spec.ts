@@ -56,15 +56,26 @@ const network = () => ({
 });
 
 describe('Paykit sensitive transfer framing', () => {
-  it('uses the fixed binary frame and rejects short passphrases before transport', () => {
-    const receiverId = '9b03a782-e2f3-4b7a-8ef5-429628921ee2';
+  it('uses the fixed binary frame for a deterministic UUIDv5 receiver', () => {
+    const receiverId = 'af9f976d-b4ff-5feb-af0e-4fad185109f1';
     const archive = Buffer.from('archive');
     const framed = frameTransfer(2, receiverId, 'twelve-byte-password', archive);
     expect(framed.subarray(0, 4).toString()).toBe('PKTR');
     expect([...framed.subarray(4, 6)]).toEqual([1, 2]);
+    expect(framed.subarray(6, 22).toString('hex')).toBe(receiverId.replace(/-/g, ''));
     expect(framed.readUInt32BE(24)).toBe(archive.length);
+  });
+  it('rejects malformed receiver IDs and short passphrases before transport', () => {
+    const receiverId = '9b03a782-e2f3-4b7a-8ef5-429628921ee2';
+    expect(() =>
+      frameTransfer(
+        1,
+        'af9f976d-b4ff-5feb-af0e-4fad185109fz',
+        'long-enough-passphrase',
+        Buffer.alloc(0),
+      ),
+    ).toThrow('receiver ID');
     expect(() => frameTransfer(1, receiverId, 'short', Buffer.alloc(0))).toThrow('12');
-    framed.fill(0);
   });
   it('rejects symlinks and same-size inode replacement while opening an archive', async () => {
     fsMock.lstat.mockResolvedValueOnce({

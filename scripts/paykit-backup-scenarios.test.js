@@ -1,8 +1,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transferFrame, publicSnapshot, recoveryView, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
+const { transferFrame, createTransfer, downloadArchive, publicSnapshot, recoveryView, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
 
 const receiverId = '123e4567-e89b-42d3-a456-426614174000';
+const presetReceiverId = 'af9f976d-b4ff-5feb-af0e-4fad185109f1';
 test('PKTR frame uses exact binary fields and big-endian lengths', () => {
   const passphrase = Buffer.from('correct horse battery staple'); const archive = Buffer.from([1, 2, 3]);
   const frame = transferFrame({ purpose: 2, receiverId, passphrase, archive });
@@ -11,11 +12,32 @@ test('PKTR frame uses exact binary fields and big-endian lengths', () => {
   assert.equal(frame.readUInt16BE(22), passphrase.length); assert.equal(frame.readUInt32BE(24), archive.length);
   assert.deepEqual(frame.subarray(28), Buffer.concat([passphrase, archive]));
 });
+test('PKTR frame accepts a deterministic UUIDv5 receiver', () => {
+  const frame = transferFrame({ purpose: 1, receiverId: presetReceiverId, passphrase: Buffer.alloc(12) });
+  assert.equal(frame.subarray(6, 22).toString('hex'), presetReceiverId.replaceAll('-', ''));
+});
 test('frame rejects invalid scope, secrets and archive bounds', () => {
   assert.throws(() => transferFrame({ purpose: 3, receiverId, passphrase: Buffer.alloc(12) }));
   assert.throws(() => transferFrame({ purpose: 1, receiverId: 'bad', passphrase: Buffer.alloc(12) }));
   assert.throws(() => transferFrame({ purpose: 1, receiverId, passphrase: Buffer.alloc(11) }));
   assert.throws(() => transferFrame({ purpose: 2, receiverId, passphrase: Buffer.alloc(12), archive: Buffer.alloc(MAX_ARCHIVE + 1) }));
+});
+test('transfer IDs remain UUIDv4-only', async () => {
+  await assert.rejects(
+    downloadArchive({ base: 'http://127.0.0.1', token: 'token', transferId: presetReceiverId }),
+  );
+  const originalFetch = global.fetch;
+  global.fetch = async () => ({
+    status: 201,
+    json: async () => ({ transferId: presetReceiverId }),
+  });
+  try {
+    await assert.rejects(
+      createTransfer({ base: 'http://127.0.0.1', token: 'token', purpose: 1, receiverId, passphrase: Buffer.alloc(12) }),
+    );
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 test('public state oracle selects only the receiver and its recovery view', () => {
   const snapshot = { receivers: [{ id: receiverId, status: 'stopped' }, { id: 'other' }], receiverWorkspaces: [{ receiverId, recovery: { phase: 'ready' } }, { receiverId: 'other' }] };
