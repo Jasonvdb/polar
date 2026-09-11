@@ -39,6 +39,10 @@ struct LocalState {
     owned_avatars: Vec<String>,
     #[serde(default)]
     recovery_preparations: Vec<RecoveryPreparationAnchor>,
+    #[serde(default)]
+    explicit_relink_peers: Vec<(String, String)>,
+    #[serde(default)]
+    recovery_reached_ready: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct RecoveryPreparationAnchor {
@@ -73,6 +77,14 @@ pub(crate) fn with_recovery_gate(
     state.view.delivery_paused = true;
     state.view.recovery = Some(recovery);
     state.recovery_preparations.clear();
+    state.explicit_relink_peers.clear();
+    state.recovery_reached_ready = state.view.recovery.as_ref().is_some_and(|recovery| {
+        recovery.sdk_validated
+            && recovery.wallet_reconciled
+            && recovery.grant_valid
+            && recovery.marker_valid
+            && matches!(recovery.phase, crate::model::RecoveryPhase::Ready)
+    });
     Ok(ciborium::Value::serialized(&state)?)
 }
 
@@ -80,9 +92,40 @@ pub(crate) fn save_recovery(vault: &Vault, recovery: crate::model::Recovery) -> 
     let mut state: LocalState = vault
         .load("workspace.cbor")?
         .ok_or_else(|| anyhow::anyhow!("receiver workspace missing"))?;
+    let currently_safe = recovery_valid_for_explicit_relink(&recovery);
     state.view.delivery_paused = recovery.automation_paused;
     state.view.recovery = Some(recovery);
+    if state.view.recovery.as_ref().is_some_and(|recovery| {
+        recovery.sdk_validated
+            && recovery.wallet_reconciled
+            && recovery.grant_valid
+            && recovery.marker_valid
+            && matches!(recovery.phase, crate::model::RecoveryPhase::Ready)
+    }) {
+        state.recovery_reached_ready = true;
+    }
+    if !currently_safe {
+        state.explicit_relink_peers.clear();
+    }
     vault.save("workspace.cbor", &state)
+}
+
+fn recovery_valid_for_explicit_relink(recovery: &crate::model::Recovery) -> bool {
+    recovery.sdk_validated
+        && recovery.wallet_reconciled
+        && recovery.grant_valid
+        && recovery.marker_valid
+        && recovery.uncertain_execution_count == 0
+        && recovery.unknown_after_export_count == 0
+        && recovery.unresolved_execution_ids.is_empty()
+        && recovery
+            .blocked_reasons
+            .iter()
+            .all(|reason| *reason == crate::model::RecoveryBlockedReason::PeerRelinkRequired)
+        && matches!(
+            recovery.phase,
+            crate::model::RecoveryPhase::Ready | crate::model::RecoveryPhase::RelinkRequired
+        )
 }
 impl Runtime {
     pub(crate) fn new(
@@ -104,6 +147,8 @@ impl Runtime {
             uncertain_peers: vec![],
             owned_avatars: vec![],
             recovery_preparations: vec![],
+            explicit_relink_peers: vec![],
+            recovery_reached_ready: false,
         });
         anyhow::ensure!(state.view.receiver_id == id, "workspace receiver mismatch");
         for intent in state
@@ -114,9 +159,9 @@ impl Runtime {
             intent.error = Some(FAILURE.into());
             if let Ok(peer) = serde_json::from_value::<PeerInput>(intent.command.input.clone()) {
                 if intent.command.command.starts_with("link.") {
-                    state
-                        .uncertain_peers
-                        .push((peer.peer_public_key, peer.peer_receiver_path));
+                    let target = (peer.peer_public_key, peer.peer_receiver_path);
+                    state.uncertain_peers.push(target.clone());
+                    state.explicit_relink_peers.retain(|value| value != &target);
                 }
             }
             state.view.last_error = Some(FAILURE.into());
@@ -288,12 +333,14 @@ impl Runtime {
                 "link.block" => {
                     self.sdk.block_peer(key, path).await?;
                     self.state.uncertain_peers.retain(|p| p != &peer);
+                    self.clear_explicit_relink(&peer);
                     self.clear_recovery_preparation(&peer);
                 }
                 "link.unblock" => {
                     self.clear_blocked_outbox(&key, &path).await?;
                     self.sdk.unblock_peer(key, path).await?;
                     self.clear_recovery_preparation(&peer);
+                    self.authorize_explicit_relink(&peer);
                 }
                 "link.sendEmptyList" => {
                     let message = self
@@ -665,9 +712,12 @@ impl Runtime {
             return Ok(());
         };
         let preparation = self.recovery_preparation(peer, application_target);
-        let barrier_required = application_target
-            || peer.state == LinkedPeerState::RecoveryRequired
-            || preparation.is_some();
+        let intentional_relink =
+            self.explicit_relink_allowed(target) && peer.local_recovery_marker_last_error.is_none();
+        let barrier_required = !intentional_relink
+            && (application_target
+                || peer.state == LinkedPeerState::RecoveryRequired
+                || preparation.is_some());
         if barrier_required && !preparation.is_some_and(|value| value.ready_for_handshake) {
             return Err(PublicError::new(
                 "recovery_preparation_required",
@@ -772,6 +822,43 @@ impl Runtime {
             .retain(|value| value.peer_public_key != peer.0 || value.peer_receiver_path != peer.1);
     }
 
+    fn mark_explicit_relink(&mut self, peer: &(String, String)) {
+        if !self.state.explicit_relink_peers.contains(peer) {
+            self.state.explicit_relink_peers.push(peer.clone());
+        }
+    }
+
+    fn authorize_explicit_relink(&mut self, peer: &(String, String)) {
+        if !self.state.uncertain_peers.contains(peer)
+            && (!self.recovery_targets(peer) || self.completed_recovery_allows_explicit_relink())
+        {
+            self.mark_explicit_relink(peer);
+        }
+    }
+
+    fn clear_explicit_relink(&mut self, peer: &(String, String)) {
+        self.state
+            .explicit_relink_peers
+            .retain(|value| value != peer);
+    }
+
+    fn explicit_relink_allowed(&self, peer: &(String, String)) -> bool {
+        self.state.explicit_relink_peers.contains(peer)
+            && !self.state.uncertain_peers.contains(peer)
+            && (!self.recovery_targets(peer) || self.completed_recovery_allows_explicit_relink())
+            && self.recovery_preparation_anchor(peer).is_none()
+    }
+
+    fn completed_recovery_allows_explicit_relink(&self) -> bool {
+        self.state.recovery_reached_ready
+            && self
+                .state
+                .view
+                .recovery
+                .as_ref()
+                .is_some_and(recovery_valid_for_explicit_relink)
+    }
+
     fn recovery_preparation(
         &self,
         peer: &LinkedPeerRecord,
@@ -793,8 +880,12 @@ impl Runtime {
             peer.counterparty.to_string(),
             peer.counterparty_receiver_path.to_string(),
         );
-        if !self.state.uncertain_peers.contains(&target) || !self.recovery_targets(&target) {
+        if !self.recovery_targets(&target) {
             return true;
+        }
+        if self.explicit_relink_allowed(&target) {
+            return peer.state == LinkedPeerState::Linking
+                && peer.local_recovery_marker_last_error.is_none();
         }
         peer.state == LinkedPeerState::Linking
             && self.recovery_preparation(peer, true).is_some_and(|value| {
@@ -828,6 +919,9 @@ impl Runtime {
             if recovery.wallet_reconciled && recovery.sdk_validated {
                 recovery.phase = crate::model::RecoveryPhase::Ready;
                 recovery.automation_paused = false;
+                if recovery.grant_valid && recovery.marker_valid {
+                    self.state.recovery_reached_ready = true;
+                }
             }
         }
     }
@@ -841,13 +935,18 @@ impl Runtime {
             let locally_converged = peer.state == LinkedPeerState::Linked
                 && peer.local_recovery_attempt_id.is_none()
                 && peer.local_recovery_marker_last_error.is_none();
-            if peer.state == LinkedPeerState::RecoveryRequired || (uncertain && !locally_converged)
+            if (peer.state == LinkedPeerState::RecoveryRequired
+                && (!self.explicit_relink_allowed(&target)
+                    || peer.local_recovery_marker_last_error.is_some()))
+                || (uncertain && !locally_converged)
             {
+                self.clear_explicit_relink(&target);
                 self.require_recovery_peer(&target);
                 continue;
             }
             if locally_converged {
                 self.state.uncertain_peers.retain(|value| value != &target);
+                self.clear_explicit_relink(&target);
                 self.clear_recovery_preparation(&target);
                 self.complete_recovery_peer(&target);
             }
@@ -1124,14 +1223,18 @@ impl Runtime {
         }
         Ok(())
     }
+    async fn refresh_link_recovery(&mut self) -> anyhow::Result<Vec<LinkedPeerRecord>> {
+        let peers = self.sdk.linked_peers().await?;
+        self.reconcile_local_link_recovery(&peers);
+        Ok(peers)
+    }
     pub async fn refresh(&mut self) -> anyhow::Result<()> {
         self.project_receipts().await?;
         self.project_requests().await?;
         self.project_subscriptions().await?;
         self.state.view.application_clock = Some(self.clock.view());
         self.payments.project(&mut self.state.view)?;
-        let peers = self.sdk.linked_peers().await?;
-        self.reconcile_local_link_recovery(&peers);
+        let peers = self.refresh_link_recovery().await?;
         self.state.view.links = self
             .storage
             .transaction(|tx| {
@@ -1726,6 +1829,160 @@ mod tests {
         assert_eq!(recovery.peers_requiring_relink.len(), 1);
         assert!(runtime.state.view.delivery_paused);
     }
+    #[tokio::test]
+    async fn remote_first_explicit_relink_stays_paused_until_linked_after_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let mut runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let target = (key.to_string(), path.to_string());
+        runtime.state.view.recovery = Some(ready_recovery());
+        runtime.state.recovery_reached_ready = true;
+        seed_abandoned_link(&runtime, &key, &path, LinkedPeerState::RecoveryRequired).await;
+
+        runtime.refresh_link_recovery().await.unwrap();
+        let recovery = runtime.view().recovery.unwrap();
+        assert!(matches!(
+            recovery.phase,
+            crate::model::RecoveryPhase::RelinkRequired
+        ));
+        assert!(recovery.automation_paused);
+        assert_eq!(recovery.peers_requiring_relink.len(), 1);
+        assert!(!runtime.state.explicit_relink_peers.contains(&target));
+
+        seed_abandoned_link(&runtime, &key, &path, LinkedPeerState::NotLinked).await;
+        runtime.authorize_explicit_relink(&target);
+        assert!(runtime.state.explicit_relink_peers.contains(&target));
+        assert!(runtime.recovery_targets(&target));
+        runtime.save().unwrap();
+        drop(runtime);
+
+        let mut reopened = open(dir.path(), receiver);
+        reopened.refresh_link_recovery().await.unwrap();
+        assert!(reopened.state.explicit_relink_peers.contains(&target));
+        assert!(reopened.recovery_targets(&target));
+        let recovery_required =
+            recovery_peer_record(&key, &path, LinkedPeerState::RecoveryRequired);
+        reopened
+            .ensure_recovery_prepared(&target, Some(&recovery_required))
+            .unwrap();
+        reopened.reconcile_local_link_recovery(&[recovery_required]);
+        let recovery = reopened.view().recovery.unwrap();
+        assert!(matches!(
+            recovery.phase,
+            crate::model::RecoveryPhase::RelinkRequired
+        ));
+        assert!(recovery.automation_paused);
+        assert_eq!(recovery.peers_requiring_relink.len(), 1);
+
+        let linking = recovery_peer_record(&key, &path, LinkedPeerState::Linking);
+        assert!(reopened.link_advancement_allowed(&linking));
+
+        let linked = recovery_peer_record(&key, &path, LinkedPeerState::Linked);
+        reopened.reconcile_local_link_recovery(&[linked]);
+        assert!(!reopened.state.explicit_relink_peers.contains(&target));
+        let recovery = reopened.view().recovery.unwrap();
+        assert!(matches!(recovery.phase, crate::model::RecoveryPhase::Ready));
+        assert!(!recovery.automation_paused);
+        assert!(recovery.peers_requiring_relink.is_empty());
+    }
+    #[test]
+    fn interrupted_link_command_clears_explicit_relink_provenance_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let mut runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let target = (key.to_string(), path.to_string());
+        runtime.mark_explicit_relink(&target);
+        let command = Command {
+            command_id: Uuid::new_v4(),
+            command: "link.accept".into(),
+            input: json!({"receiverId":receiver,"peerPublicKey":target.0.clone(),"peerReceiverPath":target.1.clone()}),
+        };
+        runtime.state.intents.insert(
+            command.command_id,
+            Intent {
+                command,
+                result: None,
+                error: None,
+            },
+        );
+        runtime.save().unwrap();
+        drop(runtime);
+
+        let reopened = open(dir.path(), receiver);
+        assert!(!reopened.state.explicit_relink_peers.contains(&target));
+        assert!(reopened.state.uncertain_peers.contains(&target));
+    }
+    #[test]
+    fn uncertain_link_command_overrides_explicit_relink_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = open(dir.path(), Uuid::new_v4());
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let target = (key.to_string(), path.to_string());
+        runtime.state.view.recovery = Some(ready_recovery());
+        runtime.state.recovery_reached_ready = true;
+        runtime.mark_explicit_relink(&target);
+        runtime.state.uncertain_peers.push(target.clone());
+        let peer = recovery_peer_record(&key, &path, LinkedPeerState::RecoveryRequired);
+
+        runtime.reconcile_local_link_recovery(std::slice::from_ref(&peer));
+        assert!(!runtime.state.explicit_relink_peers.contains(&target));
+        assert!(runtime.recovery_targets(&target));
+        let error = runtime
+            .ensure_recovery_prepared(&target, Some(&peer))
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<PublicError>().unwrap().code,
+            "recovery_preparation_required"
+        );
+    }
+    #[test]
+    fn initial_or_other_peer_recovery_cannot_use_explicit_relink_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut runtime = open(dir.path(), Uuid::new_v4());
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let target = (key.to_string(), path.to_string());
+        let mut initial = ready_recovery();
+        initial.phase = crate::model::RecoveryPhase::RelinkRequired;
+        initial.automation_paused = true;
+        initial
+            .peers_requiring_relink
+            .push(crate::model::RecoveryPeer {
+                peer_public_key: target.0.clone(),
+                peer_receiver_path: target.1.clone(),
+            });
+        initial
+            .blocked_reasons
+            .push(crate::model::RecoveryBlockedReason::PeerRelinkRequired);
+        runtime.state.view.recovery = Some(initial);
+        runtime.authorize_explicit_relink(&target);
+        assert!(!runtime.state.explicit_relink_peers.contains(&target));
+        let peer = recovery_peer_record(&key, &path, LinkedPeerState::RecoveryRequired);
+        assert_eq!(
+            runtime
+                .ensure_recovery_prepared(&target, Some(&peer))
+                .unwrap_err()
+                .downcast_ref::<PublicError>()
+                .unwrap()
+                .code,
+            "recovery_preparation_required"
+        );
+
+        runtime.state.recovery_reached_ready = true;
+        let other_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let other_path = PaykitReceiverPath::new("other/wallet").unwrap();
+        let other_target = (other_key.to_string(), other_path.to_string());
+        let other =
+            recovery_peer_record(&other_key, &other_path, LinkedPeerState::RecoveryRequired);
+        runtime.reconcile_local_link_recovery(&[other]);
+        assert!(runtime.recovery_targets(&other_target));
+        assert!(!runtime.state.explicit_relink_peers.contains(&other_target));
+    }
     #[test]
     fn recovery_preparation_requires_both_markers_from_the_current_episode() {
         let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
@@ -2012,12 +2269,33 @@ mod tests {
         assert!(reopened
             .recovery_preparation(&peer, true)
             .is_some_and(|value| value.ready_for_handshake));
+        let mut reopened = reopened;
+        reopened.mark_explicit_relink(&target);
+        reopened.state.recovery_reached_ready = true;
         let encoded = ciborium::Value::serialized(&reopened.state).unwrap();
         let gated = with_recovery_gate(encoded, ready_recovery()).unwrap();
         let mut bytes = Vec::new();
         ciborium::into_writer(&gated, &mut bytes).unwrap();
         let restored: LocalState = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert!(restored.recovery_preparations.is_empty());
+        assert!(restored.explicit_relink_peers.is_empty());
+        assert!(restored.recovery_reached_ready);
+
+        let mut initial = ready_recovery();
+        initial.phase = crate::model::RecoveryPhase::RelinkRequired;
+        initial.automation_paused = true;
+        initial
+            .peers_requiring_relink
+            .push(crate::model::RecoveryPeer {
+                peer_public_key: target.0.clone(),
+                peer_receiver_path: target.1.clone(),
+            });
+        let encoded = ciborium::Value::serialized(&reopened.state).unwrap();
+        let gated = with_recovery_gate(encoded, initial).unwrap();
+        let mut bytes = Vec::new();
+        ciborium::into_writer(&gated, &mut bytes).unwrap();
+        let restored: LocalState = ciborium::from_reader(bytes.as_slice()).unwrap();
+        assert!(!restored.recovery_reached_ready);
     }
     #[test]
     fn recovery_handshake_requires_complete_preparation_barrier() {
@@ -2196,6 +2474,7 @@ mod tests {
             runtime.sdk.linked_peers().await.unwrap()[0].state,
             LinkedPeerState::Blocked
         );
+        assert!(runtime.state.explicit_relink_peers.is_empty());
         drop(runtime);
         let mut restored = open(dir.path(), receiver);
         assert_eq!(
@@ -2439,6 +2718,8 @@ mod tests {
                     uncertain_peers: vec![],
                     owned_avatars: vec![],
                     recovery_preparations: vec![],
+                    explicit_relink_peers: vec![],
+                    recovery_reached_ready: false,
                 },
             )
             .unwrap();
@@ -2464,6 +2745,91 @@ mod tests {
         let reopened: LocalState = vault.load("workspace.cbor").unwrap().unwrap();
         assert!(reopened.view.delivery_paused);
         assert!(reopened.view.recovery == Some(recovery));
+    }
+    #[test]
+    fn wallet_reconciliation_invalidates_prior_ready_relink_authorization() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let target = (key.to_string(), path.to_string());
+        drop(runtime);
+
+        save_recovery(
+            &Vault::new(dir.path().into(), [8; 32], receiver.to_string()).unwrap(),
+            ready_recovery(),
+        )
+        .unwrap();
+        let mut runtime = open(dir.path(), receiver);
+        assert!(runtime.state.recovery_reached_ready);
+        runtime.mark_explicit_relink(&target);
+        runtime.save().unwrap();
+        drop(runtime);
+
+        let mut unsafe_recovery = ready_recovery();
+        unsafe_recovery.phase = crate::model::RecoveryPhase::WalletReconciliationRequired;
+        unsafe_recovery.automation_paused = true;
+        unsafe_recovery.wallet_reconciled = false;
+        unsafe_recovery.uncertain_execution_count = 1;
+        unsafe_recovery.unresolved_execution_ids = vec!["execution".into()];
+        unsafe_recovery.blocked_reasons =
+            vec![crate::model::RecoveryBlockedReason::WalletUncertain];
+        unsafe_recovery
+            .peers_requiring_relink
+            .push(crate::model::RecoveryPeer {
+                peer_public_key: target.0.clone(),
+                peer_receiver_path: target.1.clone(),
+            });
+        save_recovery(
+            &Vault::new(dir.path().into(), [8; 32], receiver.to_string()).unwrap(),
+            unsafe_recovery,
+        )
+        .unwrap();
+
+        let mut reopened = open(dir.path(), receiver);
+        assert!(reopened.state.recovery_reached_ready);
+        assert!(reopened.state.explicit_relink_peers.is_empty());
+        reopened.authorize_explicit_relink(&target);
+        assert!(reopened.state.explicit_relink_peers.is_empty());
+        let recovery_required =
+            recovery_peer_record(&key, &path, LinkedPeerState::RecoveryRequired);
+        assert_eq!(
+            reopened
+                .ensure_recovery_prepared(&target, Some(&recovery_required))
+                .unwrap_err()
+                .downcast_ref::<PublicError>()
+                .unwrap()
+                .code,
+            "recovery_preparation_required"
+        );
+        let linking = recovery_peer_record(&key, &path, LinkedPeerState::Linking);
+        assert!(!reopened.link_advancement_allowed(&linking));
+        reopened.save().unwrap();
+        drop(reopened);
+
+        let mut relink_only = ready_recovery();
+        relink_only.phase = crate::model::RecoveryPhase::RelinkRequired;
+        relink_only.automation_paused = true;
+        relink_only.blocked_reasons = vec![crate::model::RecoveryBlockedReason::PeerRelinkRequired];
+        relink_only
+            .peers_requiring_relink
+            .push(crate::model::RecoveryPeer {
+                peer_public_key: target.0.clone(),
+                peer_receiver_path: target.1.clone(),
+            });
+        save_recovery(
+            &Vault::new(dir.path().into(), [8; 32], receiver.to_string()).unwrap(),
+            relink_only,
+        )
+        .unwrap();
+        let mut reopened = open(dir.path(), receiver);
+        reopened.authorize_explicit_relink(&target);
+        assert!(reopened.state.explicit_relink_peers.contains(&target));
+        reopened
+            .ensure_recovery_prepared(&target, Some(&recovery_required))
+            .unwrap();
+        assert!(reopened.link_advancement_allowed(&linking));
     }
 }
 
