@@ -180,6 +180,16 @@ impl Runtime {
                     .all(|m| terms.accepted_payment_endpoint_identifiers.contains(m)),
             "Configure receiving methods accepted by this subscription."
         );
+        let predicted: Vec<_> = enabled
+            .iter()
+            .map(|method| EndpointCommitment {
+                source: i.source.clone(),
+                method: method.clone(),
+                reservation_id: Uuid::new_v5(&c.command_id, method.as_bytes()).to_string(),
+                endpoint_hash: "0".repeat(64),
+            })
+            .collect();
+        ensure_offer_fits(&offer_terms(&r, i.period_index, predicted)?)?;
         self.payments.ensure_new_issuance()?;
         state.preparations.insert(
             k.clone(),
@@ -270,6 +280,12 @@ impl Runtime {
             .expect("saved preparation")
             .bindings = bindings.clone();
         self.vault.save(FILE, &state)?;
+        let commitments = bindings
+            .iter()
+            .map(EndpointCommitment::from_binding)
+            .collect();
+        let offer = offer_terms(&r, i.period_index, commitments)?;
+        ensure_offer_fits(&offer)?;
         if i.source == "public" {
             self.publish_current().await?;
         } else {
@@ -280,11 +296,6 @@ impl Runtime {
             )
             .await?;
         }
-        let offer=paykit_lib::PaymentRequestTerms{
-            amount:paykit_lib::PaymentAmount::new(terms.amount.value.clone(),"sat")?,payment_reference:paykit_lib::PaymentReference::new(correlation(&r.payment_request_id,i.period_index))?,proposal_expires_at:None,recurrence:None,
-            accepted_payment_endpoint_identifiers:enabled.iter().map(paykit_lib::PaymentEndpointIdentifier::new).collect::<Result<_,_>>()?,
-            metadata:json!({"polarPaykitPeriodVersion":1,"parentRequestId":r.payment_request_id,"periodIndex":i.period_index,"billingPeriod":period,"polarPaykitEndpoints":bindings,"description":"Subscription period endpoint offer"}).as_object().expect("object").clone()
-        };
         self.sdk
             .propose_payment_request(r.counterparty, r.counterparty_receiver_path, offer)
             .await?;
@@ -312,21 +323,19 @@ impl Runtime {
             );
         };
         let offer=self.period_offer(record,index).await?.ok_or_else(||error("This period has no endpoint offer. Ask the payee to prepare it and synchronize delivery."))?;
-        let bindings = super::requests::bindings(offer.terms.as_ref().expect("validated offer"))?;
-        if record.local_role == Some(Role::Payee) {
-            let state = self.subscriptions()?;
-            let local = state
-                .preparations
-                .get(&key(&record.payment_request_id, index))
-                .ok_or_else(|| anyhow::anyhow!("period reservation claims missing"))?;
-            anyhow::ensure!(
-                local.request_id == record.payment_request_id
-                    && local.period_index == index
-                    && local.bindings == bindings,
-                "Period offer differs from durable reservation claims."
-            );
-        }
-        Ok(bindings)
+        let commitments = offer_commitments(offer.terms.as_ref().expect("validated offer"))?;
+        let state = self.subscriptions()?;
+        let spends = SpendState::open(&self.spend_vault()?)?;
+        let ledger = self.payments.snapshot()?;
+        full_period_bindings(
+            record,
+            index,
+            &commitments,
+            &state,
+            &spends,
+            &ledger,
+            self.state.view.receiver_id,
+        )
     }
     pub(super) async fn subscription_background(&mut self) -> anyhow::Result<()> {
         if self.state.view.delivery_paused || !self.state.uncertain_peers.is_empty() {
@@ -423,6 +432,7 @@ impl Runtime {
         let spends = SpendState::open(&self.spend_vault()?)?;
         let mut views = vec![];
         let records = self.sdk.payment_requests().await?;
+        let ledger = self.payments.snapshot()?;
         for r in &records {
             let Ok(Some(schedule)) = recurrence(r) else {
                 continue;
@@ -477,8 +487,12 @@ impl Runtime {
                 match find_offer(&records, r, index) {
                     Ok(Some(offer)) => {
                         view.offer_id = Some(offer.payment_request_id.clone());
-                        view.endpoint_bindings =
-                            super::requests::bindings(offer.terms.as_ref().expect("offer terms"))?;
+                        view.endpoint_commitments =
+                            offer_commitments(offer.terms.as_ref().expect("offer terms"))?;
+                        match full_period_bindings(r, index, &view.endpoint_commitments, &state, &spends, &ledger, self.state.view.receiver_id) {
+                            Ok(bindings) => view.endpoint_bindings = bindings,
+                            Err(_) => view.last_error = Some("Period commitments do not match local reservation claims. Restore valid receiver state.".into()),
+                        }
                         view.status = "prepared".into();
                     }
                     Err(_) => {
@@ -573,6 +587,150 @@ impl Runtime {
         Ok(())
     }
 }
+fn offer_terms(
+    parent: &PaymentRequestRecord,
+    index: u32,
+    commitments: Vec<EndpointCommitment>,
+) -> anyhow::Result<paykit_lib::PaymentRequestTerms> {
+    let parent_terms = parent
+        .terms
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("parent terms missing"))?;
+    period_for(parent, Some(index))?;
+    Ok(paykit_lib::PaymentRequestTerms {
+        amount: paykit_lib::PaymentAmount::new(parent_terms.amount.value.clone(), "sat")?,
+        payment_reference: paykit_lib::PaymentReference::new(correlation(&parent.payment_request_id,index))?,
+        proposal_expires_at: None, recurrence: None,
+        accepted_payment_endpoint_identifiers: commitments.iter().map(|c| paykit_lib::PaymentEndpointIdentifier::new(&c.method)).collect::<Result<_,_>>()?,
+        metadata: json!({"polarPaykitPeriodVersion":2,"parentRequestId":parent.payment_request_id,"periodIndex":index,"endpointCommitments":commitments}).as_object().expect("object").clone(),
+    })
+}
+fn serialized_offer(terms: &paykit_lib::PaymentRequestTerms) -> anyhow::Result<String> {
+    // SDK-generated event/request UUIDs always have this same encoded length.
+    let request = paykit_lib::PaymentRequest::new(
+        paykit_lib::EventId::new_v4(),
+        paykit_lib::PaymentRequestId::new_v4(),
+        terms.clone(),
+    );
+    Ok(paykit_lib::serialize_payment_request_event(
+        &paykit_lib::PaymentRequestEvent::Request(request),
+    )?)
+}
+fn ensure_offer_fits(terms: &paykit_lib::PaymentRequestTerms) -> anyhow::Result<()> {
+    if serialized_offer(terms)?.len() > paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN {
+        return Err(error("Period offer exceeds the encrypted message limit. Configure fewer receiving methods before preparing this period."));
+    }
+    Ok(())
+}
+fn offer_commitments(
+    terms: &paykit_sdk::PaymentRequestTermsRecord,
+) -> anyhow::Result<Vec<EndpointCommitment>> {
+    let commitments: Vec<EndpointCommitment> = match terms
+        .metadata
+        .get("polarPaykitPeriodVersion")
+        .and_then(Value::as_u64)
+    {
+        Some(1) => super::requests::bindings(terms)?
+            .iter()
+            .map(EndpointCommitment::from_binding)
+            .collect(),
+        Some(2) => serde_json::from_value(
+            terms
+                .metadata
+                .get("endpointCommitments")
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("commitments missing"))?,
+        )?,
+        _ => anyhow::bail!("unsupported period offer version"),
+    };
+    anyhow::ensure!(
+        !commitments.is_empty() && commitments.len() <= 2,
+        "invalid period commitment count"
+    );
+    let mut methods = std::collections::BTreeSet::new();
+    let mut reservations = std::collections::BTreeSet::new();
+    for c in &commitments {
+        let id = Uuid::parse_str(&c.reservation_id)?;
+        anyhow::ensure!(
+            matches!(c.source.as_str(), "public" | "private")
+                && c.source == commitments[0].source
+                && !id.is_nil()
+                && id.to_string() == c.reservation_id
+                && c.endpoint_hash.len() == 64
+                && c.endpoint_hash
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                && methods.insert(c.method.clone())
+                && reservations.insert(c.reservation_id.clone())
+                && terms
+                    .accepted_payment_endpoint_identifiers
+                    .contains(&c.method),
+            "invalid period commitment"
+        );
+        crate::payment_model::methods(std::slice::from_ref(&c.method), false)?;
+    }
+    anyhow::ensure!(
+        terms
+            .accepted_payment_endpoint_identifiers
+            .iter()
+            .all(|m| methods.contains(m)),
+        "missing accepted method commitment"
+    );
+    Ok(commitments)
+}
+fn full_period_bindings(
+    record: &PaymentRequestRecord,
+    index: u32,
+    commitments: &[EndpointCommitment],
+    state: &SubscriptionState,
+    spends: &SpendState,
+    ledger: &crate::wallet_adapter::Ledger,
+    receiver: Uuid,
+) -> anyhow::Result<Vec<EndpointBinding>> {
+    if record.local_role == Some(Role::Payee) {
+        let local = state
+            .preparations
+            .get(&key(&record.payment_request_id, index))
+            .ok_or_else(|| anyhow::anyhow!("period reservation claims missing"))?;
+        anyhow::ensure!(
+            local.request_id == record.payment_request_id
+                && local.period_index == index
+                && local.bindings.len() == commitments.len()
+                && local.bindings.iter().all(|b| commitments
+                    .iter()
+                    .any(|c| c.reservation_id == b.reservation_id
+                        && c.matches(&b.source, &b.method, &b.endpoint))),
+            "Period offer differs from durable reservation claims."
+        );
+        return Ok(local.bindings.clone());
+    }
+    let mut bindings = vec![];
+    for c in commitments {
+        let executed = spends
+            .existing_period(receiver, &record.payment_request_id, Some(index))
+            .filter(|e| c.matches(&e.view.source, &e.view.method, &e.view.endpoint))
+            .map(|e| e.view.endpoint.as_str());
+        let resolved = ledger
+            .resolutions
+            .iter()
+            .rev()
+            .find(|r| {
+                r.peer_public_key == record.counterparty.as_str()
+                    && r.peer_receiver_path == record.counterparty_receiver_path.as_str()
+                    && r.status == "payable"
+                    && r.method
+                        .as_ref()
+                        .zip(r.endpoint.as_ref())
+                        .is_some_and(|(m, e)| c.matches(&r.source, m, e))
+            })
+            .and_then(|r| r.endpoint.as_deref());
+        if let Some(endpoint) = executed.or(resolved) {
+            bindings.push(c.binding(endpoint));
+        }
+    }
+    Ok(bindings)
+}
+
 fn validate_offer(
     parent: &PaymentRequestRecord,
     offer: &PaymentRequestRecord,
@@ -595,8 +753,8 @@ fn validate_offer(
             && offer.invalid_reason.is_none()
             && offer.state == Lifecycle::Proposed
             && o.recurrence.is_none()
-            && o.metadata.get("polarPaykitPeriodVersion") == Some(&json!(1))
-            && o.metadata.get("billingPeriod") == Some(&json!(period))
+            && o.metadata.get("parentRequestId") == Some(&json!(parent.payment_request_id))
+            && o.metadata.get("periodIndex") == Some(&json!(index))
             && o.amount == p.amount
             && o.payment_reference == correlation(&parent.payment_request_id, index)
             && !o.accepted_payment_endpoint_identifiers.is_empty()
@@ -605,11 +763,18 @@ fn validate_offer(
                 .all(|m| p.accepted_payment_endpoint_identifiers.contains(m)),
         "Period offer does not match its immutable parent, peer, amount or schedule."
     );
-    let bindings = super::requests::bindings(o)?;
-    anyhow::ensure!(
-        bindings.iter().all(|b| b.source == bindings[0].source),
-        "Period offer source must be explicit and consistent."
-    );
+    if o.metadata.get("polarPaykitPeriodVersion") == Some(&json!(1)) {
+        anyhow::ensure!(
+            o.metadata.get("billingPeriod") == Some(&json!(period)),
+            "Legacy offer period does not match its parent."
+        );
+    } else {
+        anyhow::ensure!(
+            o.metadata.get("polarPaykitPeriodVersion") == Some(&json!(2)) && o.metadata.len() == 4,
+            "Unsupported or malformed period offer version."
+        );
+    }
+    offer_commitments(o)?;
     Ok(())
 }
 
@@ -710,5 +875,242 @@ mod tests {
         assert_eq!(proof_period(&r, Some(&record)).unwrap(), Some(1));
         record.ends_at = "2026-03-28T00:00:00Z".into();
         assert!(proof_period(&r, Some(&record)).is_err());
+    }
+    fn v2_offer(parent: &PaymentRequestRecord, index: u32) -> PaymentRequestRecord {
+        let legacy = offer(parent, index);
+        let commitments = offer_commitments(legacy.terms.as_ref().unwrap()).unwrap();
+        let mut record = legacy;
+        record.terms = Some(paykit_sdk::PaymentRequestTermsRecord::from(
+            &offer_terms(parent, index, commitments).unwrap(),
+        ));
+        record
+    }
+    #[test]
+    fn compact_offer_does_not_duplicate_invoice_and_both_rails_fit() {
+        let mut parent = parent();
+        parent.counterparty_receiver_path =
+            paykit_sdk::PaykitReceiverPath::new(format!("{}/wallet", "a".repeat(64))).unwrap();
+        parent.terms.as_mut().unwrap().amount.value = crate::payment_model::MAX_SATS.to_string();
+        parent
+            .terms
+            .as_mut()
+            .unwrap()
+            .recurrence
+            .as_mut()
+            .unwrap()
+            .unit = "minute".into();
+        parent
+            .terms
+            .as_mut()
+            .unwrap()
+            .accepted_payment_endpoint_identifiers
+            .push(crate::payment_model::BOLT11.into());
+        let invoice = "l".repeat(299);
+        let bindings = [
+            EndpointBinding {
+                source: "private".into(),
+                method: crate::payment_model::ONCHAIN.into(),
+                reservation_id: Uuid::new_v4().to_string(),
+                endpoint: "b".repeat(64),
+            },
+            EndpointBinding {
+                source: "private".into(),
+                method: crate::payment_model::BOLT11.into(),
+                reservation_id: Uuid::new_v4().to_string(),
+                endpoint: invoice.clone(),
+            },
+        ];
+        let terms = offer_terms(
+            &parent,
+            10_000,
+            bindings
+                .iter()
+                .map(EndpointCommitment::from_binding)
+                .collect(),
+        )
+        .unwrap();
+        ensure_offer_fits(&terms).unwrap();
+        let serialized = serialized_offer(&terms).unwrap();
+        assert!(!serialized.contains(&invoice));
+        assert!(!serialized.contains(parent.counterparty_receiver_path.as_str()));
+        let mut legacy = terms.clone();
+        legacy.metadata=json!({"polarPaykitPeriodVersion":1,"parentRequestId":parent.payment_request_id,"periodIndex":0,"billingPeriod":{"startsAt":"2026-01-31T00:00:00Z","endsAt":"2026-02-28T00:00:00Z"},"polarPaykitEndpoints":bindings,"description":"Subscription period endpoint offer"}).as_object().unwrap().clone();
+        assert!(ensure_offer_fits(&legacy).is_err());
+    }
+    #[test]
+    fn exact_sdk_noise_frame_boundary_is_checked_without_relaxing_limit() {
+        let parent = parent();
+        let record = v2_offer(&parent, 0);
+        let commitments = offer_commitments(record.terms.as_ref().unwrap()).unwrap();
+        let mut terms = offer_terms(&parent, 0, commitments).unwrap();
+        terms.metadata.insert("padding".into(), json!(""));
+        let overhead = serialized_offer(&terms).unwrap().len();
+        let limit = paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN;
+        assert_eq!(limit, 1000);
+        terms
+            .metadata
+            .insert("padding".into(), json!("x".repeat(limit - overhead)));
+        assert_eq!(serialized_offer(&terms).unwrap().len(), limit);
+        ensure_offer_fits(&terms).unwrap();
+        terms
+            .metadata
+            .insert("padding".into(), json!("x".repeat(limit - overhead + 1)));
+        assert!(ensure_offer_fits(&terms).is_err());
+    }
+    #[test]
+    fn v2_offer_rejects_peer_parent_period_source_and_malformed_hash() {
+        let parent = parent();
+        let original = v2_offer(&parent, 1);
+        validate_offer(&parent, &original, 1).unwrap();
+        for (field, value) in [
+            ("parentRequestId", json!(Uuid::new_v4())),
+            ("periodIndex", json!(2)),
+            ("polarPaykitPeriodVersion", json!(3)),
+        ] {
+            let mut bad = original.clone();
+            bad.terms
+                .as_mut()
+                .unwrap()
+                .metadata
+                .insert(field.into(), value);
+            assert!(validate_offer(&parent, &bad, 1).is_err());
+        }
+        let mut peer = original.clone();
+        peer.counterparty_receiver_path =
+            paykit_sdk::PaykitReceiverPath::new("other/wallet").unwrap();
+        assert!(validate_offer(&parent, &peer, 1).is_err());
+        for (field, value) in [
+            ("source", json!("automatic")),
+            ("endpointHash", json!("AB".repeat(32))),
+            ("reservationId", json!(Uuid::nil())),
+        ] {
+            let mut bad = original.clone();
+            bad.terms
+                .as_mut()
+                .unwrap()
+                .metadata
+                .get_mut("endpointCommitments")
+                .unwrap()[0][field] = value;
+            assert!(validate_offer(&parent, &bad, 1).is_err());
+        }
+    }
+    #[test]
+    fn restored_payee_claims_validate_legacy_and_compact_offers_identically() {
+        let mut parent = parent();
+        parent.local_role = Some(Role::Payee);
+        let legacy = offer(&parent, 0);
+        let bindings = super::super::requests::bindings(legacy.terms.as_ref().unwrap()).unwrap();
+        let commitments: Vec<_> = bindings
+            .iter()
+            .map(EndpointCommitment::from_binding)
+            .collect();
+        let mut compact = legacy.clone();
+        compact.terms = Some(paykit_sdk::PaymentRequestTermsRecord::from(
+            &offer_terms(&parent, 0, commitments.clone()).unwrap(),
+        ));
+        let mut state = SubscriptionState::default();
+        state.preparations.insert(
+            key(&parent.payment_request_id, 0),
+            Preparation {
+                command_id: Uuid::new_v4(),
+                request_id: parent.payment_request_id.clone(),
+                period_index: 0,
+                source: "private".into(),
+                expiry_seconds: 600,
+                bindings,
+            },
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let vault = crate::storage::Vault::new(dir.path().into(), [84; 32], "period-claims".into())
+            .unwrap();
+        vault.save(FILE, &state).unwrap();
+        let restored = vault.load(FILE).unwrap().unwrap();
+        let spends = SpendState::default();
+        let ledger = crate::wallet_adapter::Ledger::default();
+        let receiver = Uuid::new_v4();
+        for record in [&legacy, &compact] {
+            validate_offer(&parent, record, 0).unwrap();
+            let parsed = offer_commitments(record.terms.as_ref().unwrap()).unwrap();
+            assert_eq!(parsed, commitments);
+            assert_eq!(
+                full_period_bindings(&parent, 0, &parsed, &restored, &spends, &ledger, receiver)
+                    .unwrap()[0]
+                    .endpoint,
+                "bcrt1qfixture"
+            );
+        }
+        for field in ["hash", "source", "reservation"] {
+            let mut bad = commitments.clone();
+            match field {
+                "hash" => bad[0].endpoint_hash = "a".repeat(64),
+                "source" => bad[0].source = "public".into(),
+                _ => bad[0].reservation_id = Uuid::new_v4().to_string(),
+            }
+            assert!(
+                full_period_bindings(&parent, 0, &bad, &restored, &spends, &ledger, receiver)
+                    .is_err()
+            );
+        }
+        assert!(full_period_bindings(
+            &parent,
+            1,
+            &commitments,
+            &restored,
+            &spends,
+            &ledger,
+            receiver
+        )
+        .is_err());
+    }
+    #[test]
+    fn hash_preview_cannot_turn_into_an_endpoint_without_matching_explicit_resolution() {
+        let parent = parent();
+        let record = v2_offer(&parent, 0);
+        let commitments = offer_commitments(record.terms.as_ref().unwrap()).unwrap();
+        let mut ledger = crate::wallet_adapter::Ledger::default();
+        let receiver = Uuid::new_v4();
+        let state = SubscriptionState::default();
+        let spends = SpendState::default();
+        assert!(
+            full_period_bindings(&parent, 0, &commitments, &state, &spends, &ledger, receiver)
+                .unwrap()
+                .is_empty()
+        );
+        let mut resolution = crate::payment_model::ResolutionView {
+            id: Uuid::new_v4().to_string(),
+            peer_public_key: parent.counterparty.to_string(),
+            peer_receiver_path: parent.counterparty_receiver_path.to_string(),
+            source: "private".into(),
+            amount_sats: "5000".into(),
+            created_at: "2026-01-31T00:00:00Z".into(),
+            method: Some(crate::payment_model::ONCHAIN.into()),
+            endpoint: Some("wrong endpoint".into()),
+            version: Some("1".into()),
+            expires_at: None,
+            status: "payable".into(),
+            last_error: None,
+        };
+        ledger.resolutions.push(resolution.clone());
+        assert!(
+            full_period_bindings(&parent, 0, &commitments, &state, &spends, &ledger, receiver)
+                .unwrap()
+                .is_empty()
+        );
+        resolution.endpoint = Some("bcrt1qfixture".into());
+        ledger.resolutions.push(resolution.clone());
+        assert_eq!(
+            full_period_bindings(&parent, 0, &commitments, &state, &spends, &ledger, receiver)
+                .unwrap()[0]
+                .endpoint,
+            "bcrt1qfixture"
+        );
+        ledger.resolutions.clear();
+        resolution.source = "public".into();
+        ledger.resolutions.push(resolution);
+        assert!(
+            full_period_bindings(&parent, 0, &commitments, &state, &spends, &ledger, receiver)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

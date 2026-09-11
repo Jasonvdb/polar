@@ -241,6 +241,27 @@ export const isPaykitRequestEndpointBinding = (
     isUuid(binding.reservationId)
   );
 };
+export interface PaykitEndpointCommitment {
+  source: 'public' | 'private';
+  method: PaykitMethod;
+  reservationId: string;
+  endpointHash: string;
+}
+export const isPaykitEndpointCommitment = (
+  value: unknown,
+): value is PaykitEndpointCommitment => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const commitment = value as Record<string, unknown>;
+  return (
+    Object.keys(commitment).length === 4 &&
+    (commitment.source === 'public' || commitment.source === 'private') &&
+    paykitMethods.includes(commitment.method as PaykitMethod) &&
+    isUuid(commitment.reservationId) &&
+    commitment.reservationId === commitment.reservationId.toLowerCase() &&
+    typeof commitment.endpointHash === 'string' &&
+    /^[0-9a-f]{64}$/.test(commitment.endpointHash)
+  );
+};
 export const paykitRecurrenceUnits = [
   'minute',
   'hour',
@@ -261,6 +282,7 @@ export interface PaykitRecurrence {
   endsAt: string | null;
 }
 export interface PaykitSubscriptionPeriod extends PaykitBillingPeriod {
+  endpointCommitments?: PaykitEndpointCommitment[];
   index: number;
   status:
     | 'future'

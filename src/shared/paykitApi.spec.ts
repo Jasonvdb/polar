@@ -1,5 +1,6 @@
 import {
   isUuid,
+  isPaykitEndpointCommitment,
   isPaykitRequestEndpointBinding,
   newPaykitId,
   PaykitCommandRequest,
@@ -519,4 +520,26 @@ describe('recurring request and application clock boundaries', () => {
       }),
     ).toThrow('input');
   });
+});
+
+it('accepts only complete safe endpoint commitments with lowercase SHA-256 hashes', () => {
+  const commitment = {
+    source: 'private',
+    method: 'btc-lightning-bolt11',
+    reservationId: newPaykitId(),
+    endpointHash: 'a'.repeat(64),
+  };
+  expect(isPaykitEndpointCommitment(commitment)).toBe(true);
+  for (const invalid of [
+    null,
+    [],
+    { ...commitment, endpointHash: 'A'.repeat(64) },
+    { ...commitment, endpointHash: 'a'.repeat(63) },
+    { ...commitment, endpointHash: { key: 'secret' } },
+    { ...commitment, reservationId: '../other' },
+    { ...commitment, method: 'bolt12' },
+    { ...commitment, source: 'fallback' },
+    { ...commitment, sessionSecret: 'secret' },
+  ])
+    expect(isPaykitEndpointCommitment(invalid)).toBe(false);
 });

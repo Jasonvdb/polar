@@ -8,6 +8,16 @@ const stages = ['recurring-validation', 'recurring-onchain-manual', 'recurring-o
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const utc = value => new Date(value).toISOString().replace('.000Z', 'Z');
 function keys(value, expected) { assert.deepEqual(Object.keys(value).sort(), expected.split(' ').sort()); }
+function assertEndpointCommitment(commitment, binding, source, method) {
+  keys(commitment, 'source method reservationId endpointHash');
+  assert.equal(commitment.source, source); assert.equal(commitment.method, method);
+  assert.match(commitment.reservationId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.match(commitment.endpointHash, /^[0-9a-f]{64}$/);
+  assert.equal(binding.source, source); assert.equal(binding.method, method);
+  assert.equal(binding.reservationId, commitment.reservationId);
+  assert.equal(typeof binding.endpoint, 'string'); assert(binding.endpoint.length > 0);
+  assert.equal(createHash('sha256').update(binding.endpoint, 'utf8').digest('hex'), commitment.endpointHash, 'Actual endpoint differs from the selected period commitment');
+}
 function validateEvidence(evidence) {
   keys(evidence, 'version rails persistence failures clock'); assert.equal(evidence.version, 1);
   assert.equal(evidence.rails.length, 2);
@@ -78,14 +88,24 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
   const prepare = async (r, index, expirySeconds = 600) => {
     await command('subscription.prepare', { receiverId: r.payee.id, requestId: r.id, periodIndex: index, source: r.source, expirySeconds });
     await wait(s => period(workspace(s, r.payer), r.id, index)?.offerId);
-    return period(await view(r.payer), r.id, index);
+    const received = period(await view(r.payer), r.id, index);
+    const prepared = period(await view(r.payee), r.id, index);
+    assert.equal(received.endpointCommitments.length, 1);
+    assert.deepEqual(received.endpointCommitments, prepared.endpointCommitments);
+    assertEndpointCommitment(received.endpointCommitments[0], prepared.endpointBindings.find(b => b.source === r.source && b.method === r.method), r.source, r.method);
+    return received;
   };
   const selection = (r, index, walletId = fixture.walletIds.alice) => ({ receiverId: r.payer.id, requestId: r.id, periodIndex: index, walletId, source: r.source, method: r.method });
   const authorize = (r, walletId = fixture.walletIds.alice) => { const { periodIndex, ...input } = selection(r, 0, walletId); return command('subscription.authorize', input); };
   const disable = r => command('subscription.disable', { receiverId: r.payer.id, requestId: r.id });
   const finish = async (r, index, automatic = false) => {
     if (automatic) await wait(s => execution(workspace(s, r.payer), r.id, index)?.status === 'succeeded');
-    const spend = execution(await view(r.payer), r.id, index); assert.equal(spend?.status, 'succeeded');
+    const payerView = await view(r.payer);
+    const spend = execution(payerView, r.id, index); assert.equal(spend?.status, 'succeeded');
+    const paidPeriod = period(payerView, r.id, index);
+    const binding = paidPeriod.endpointBindings.find(b => b.source === r.source && b.method === r.method);
+    assertEndpointCommitment(paidPeriod.endpointCommitments.find(c => c.source === r.source && c.method === r.method), binding, r.source, r.method);
+    assert.equal(binding.endpoint, spend.endpoint, 'Execution must use the endpoint authenticated by the period commitment');
     if (!automatic) await command('proof.submit', { receiverId: r.payer.id, requestId: r.id, executionId: spend.id });
     await wait(s => workspace(s, r.payee).proofs.some(p => p.requestId === r.id && p.periodIndex === index));
     const proof = (await view(r.payee)).proofs.find(p => p.requestId === r.id && p.periodIndex === index);
@@ -126,13 +146,14 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
     await command('subscription.prepare', { receiverId: bob.id, requestId: r.id, periodIndex: 1, source: r.source, expirySeconds: 600 }, randomUUID(), 'failed');
     await command('payment.execute', selection(r, 1), randomUUID(), 'failed');
     const offer = await prepare(r, 0);
+    assert.deepEqual(offer.endpointBindings, [], 'Payer receives commitments before explicit endpoint resolution');
     assert(!(await view(alice)).requests.some(v => v.id === offer.offerId));
     await command('request.accept', { receiverId: alice.id, requestId: offer.offerId }, randomUUID(), 'failed');
     await command('payment.execute', { ...selection(r, 0), requestId: offer.offerId, periodIndex: undefined }, randomUUID(), 'failed');
     const noOptIn = await stableTicks(); assert.equal(execution(await view(alice), r.id, 0), undefined);
     let invoice;
     if (method === BOLT11) {
-      invoice = fixture.lnd(1, 'decodepayreq', offer.endpointBindings.find(b => b.method === method).endpoint);
+      invoice = fixture.lnd(1, 'decodepayreq', period(await view(bob), r.id, 0).endpointBindings.find(b => b.method === method).endpoint);
       assert(now / 1000 > Number(invoice.timestamp) + Number(invoice.expiry));
     } else await mine(1);
     await command('payment.execute', selection(r, 0));
@@ -193,8 +214,8 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
   assert.equal(execution(await view(alice), poor.id, 0)?.status, 'failed');
   const failedExecution = execution(await view(alice), poor.id, 0).id;
   await authorize(poor); await stableTicks(); assert.equal(execution(await view(alice), poor.id, 0).id, failedExecution); await disable(poor); await cancel(poor);
-  const expired = await create(BOLT11, '79'); const expiredOffer = await prepare(expired, 0, 3);
-  const actualExpiry = fixture.lnd(1, 'decodepayreq', expiredOffer.endpointBindings.find(b => b.method === BOLT11).endpoint);
+  const expired = await create(BOLT11, '79'); await prepare(expired, 0, 3);
+  const actualExpiry = fixture.lnd(1, 'decodepayreq', period(await view(bob), expired.id, 0).endpointBindings.find(b => b.method === BOLT11).endpoint);
   const frozenBeforeExpiry = (await view(alice)).applicationClock;
   await sleep(3500, signal);
   assert(Date.now() / 1000 >= Number(actualExpiry.timestamp) + Number(actualExpiry.expiry));
@@ -220,4 +241,4 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
   evidence.clock.resetRejected = true; stage('recurring-wallet-clock');
   return validateEvidence(evidence);
 }
-module.exports = { stages, run, validateEvidence };
+module.exports = { stages, run, validateEvidence, assertEndpointCommitment };

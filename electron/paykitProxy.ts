@@ -6,6 +6,7 @@ import { join, resolve, relative, isAbsolute } from 'path';
 import {
   isUuid,
   isPaykitUtcInstant,
+  isPaykitEndpointCommitment,
   isPaykitRequestEndpointBinding,
   safePaykitAvatar,
   newPaykitId,
@@ -642,6 +643,22 @@ export const publicWorkspace = (value: any) => ({
         'lastError',
       ]),
       endpointBindings: endpointBindings(period.endpointBindings),
+      ...(period.endpointCommitments === undefined
+        ? {}
+        : {
+            endpointCommitments: Array.isArray(period.endpointCommitments)
+              ? period.endpointCommitments
+                  .filter(isPaykitEndpointCommitment)
+                  .map((commitment: any) =>
+                    fields(commitment, [
+                      'source',
+                      'method',
+                      'reservationId',
+                      'endpointHash',
+                    ]),
+                  )
+              : [],
+          }),
     })),
   })),
   requests: list(value.requests, item => ({

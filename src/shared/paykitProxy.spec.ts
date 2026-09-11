@@ -838,3 +838,38 @@ it('projects recurring state through state and operation results without nested 
   expect(malformed.subscriptions[0].periods[0].endpointBindings).toEqual([]);
   expect(JSON.stringify(malformed)).not.toContain('hidden-secret');
 });
+
+it('projects only valid compact endpoint commitments and preserves absent versus invalid fields', () => {
+  const commitment = {
+    source: 'private',
+    method: 'btc-lightning-bolt11',
+    reservationId: envId,
+    endpointHash: 'a'.repeat(64),
+  };
+  const hidden = { sessionKey: 'hidden-secret', receiptKey: 'hidden-secret' };
+  const periods = [
+    {
+      endpointBindings: [],
+      endpointCommitments: [
+        commitment,
+        { ...commitment, ...hidden },
+        { ...commitment, endpointHash: 'A'.repeat(64) },
+        { ...commitment, endpointHash: 'a'.repeat(63) },
+        { ...commitment, endpointHash: hidden },
+        { ...commitment, reservationId: hidden },
+      ],
+    },
+    { endpointBindings: [], endpointCommitments: hidden },
+    { endpointBindings: [] },
+  ];
+  const workspace = {
+    receiverId: envId,
+    subscriptions: [{ requestId: envId, autopay: {}, periods }],
+  };
+  const projected = publicOperation({ result: { workspace } }).result!.workspace!
+    .subscriptions[0].periods;
+  expect(projected[0].endpointCommitments).toEqual([commitment]);
+  expect(projected[1].endpointCommitments).toEqual([]);
+  expect(projected[2]).not.toHaveProperty('endpointCommitments');
+  expect(JSON.stringify(projected)).not.toContain('hidden-secret');
+});

@@ -268,3 +268,84 @@ it('disables money and automation controls while operation acceptance is pending
   ).toBeDisabled();
   expect(view.getByText('Cancel subscription').closest('button')).toBeDisabled();
 });
+
+it('allows a committed BOLT11 period without a raw invoice and requires the committed source', () => {
+  const commitment = {
+    source: 'private' as const,
+    method: 'btc-lightning-bolt11' as const,
+    reservationId: newPaykitId(),
+    endpointHash: 'a'.repeat(64),
+  };
+  const subscription = workspace.subscriptions![0];
+  const view = setup({
+    ...workspace,
+    requests: [{ ...workspace.requests![0], acceptedMethods: ['btc-lightning-bolt11'] }],
+    paymentMethods: {
+      enabledMethods: ['btc-lightning-bolt11'],
+      preference: [],
+      wallets: [
+        {
+          id: 'lightning',
+          label: 'Alice Lightning',
+          supportedMethods: ['btc-lightning-bolt11'],
+          status: 'configured',
+        },
+      ],
+    },
+    subscriptions: [
+      {
+        ...subscription,
+        periods: [
+          {
+            ...subscription.periods[0],
+            endpointBindings: [],
+            endpointCommitments: [commitment],
+          },
+        ],
+      },
+    ],
+  });
+  view.chooseRequest();
+  expect(view.getByText(commitment.endpointHash)).toBeInTheDocument();
+  expect(
+    view.getByText(
+      'The wallet endpoint will be resolved and checked against this commitment before payment.',
+    ),
+  ).toBeInTheDocument();
+  const pay = view.getByText('Pay selected period manually').closest('button')!;
+  expect(pay).toBeDisabled();
+  view.select('Subscription spending wallet', 'Alice Lightning');
+  view.select('Subscription payment method', 'btc-lightning-bolt11');
+  view.select('Subscription endpoint source', 'Public');
+  expect(pay).toBeDisabled();
+  view.select('Subscription endpoint source', 'Private');
+  expect(pay).not.toBeDisabled();
+  fireEvent.click(pay);
+  expect(view.command).toHaveBeenLastCalledWith('payment.execute', {
+    receiverId,
+    requestId,
+    periodIndex: 0,
+    source: 'private',
+    walletId: 'lightning',
+    method: 'btc-lightning-bolt11',
+  });
+});
+
+it('does not fall back to full endpoints when the commitment field is explicitly empty', () => {
+  const subscription = workspace.subscriptions![0];
+  const view = setup({
+    ...workspace,
+    subscriptions: [
+      {
+        ...subscription,
+        periods: [{ ...subscription.periods[0], endpointCommitments: [] }],
+      },
+    ],
+  });
+  view.chooseRequest();
+  view.select('Subscription spending wallet', 'Alice wallet');
+  view.select('Subscription payment method', 'btc-onchain');
+  view.select('Subscription endpoint source', 'Private');
+  expect(view.getByText('Pay selected period manually').closest('button')).toBeDisabled();
+  expect(view.command).not.toHaveBeenCalled();
+});

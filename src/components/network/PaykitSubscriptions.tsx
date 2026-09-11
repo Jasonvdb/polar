@@ -60,7 +60,7 @@ const PaykitSubscriptions: React.FC<
     item =>
       selected?.acceptedMethods.includes(item) &&
       wallet?.supportedMethods.includes(item) &&
-      period?.endpointBindings.some(
+      (period?.endpointCommitments ?? period?.endpointBindings)?.some(
         binding => binding.source === source && binding.method === item,
       ),
   );
@@ -350,6 +350,29 @@ const PaykitSubscriptions: React.FC<
                         </Typography.Text>
                       </div>
                     ))}
+                    {item.endpointCommitments
+                      ?.filter(
+                        commitment =>
+                          !item.endpointBindings.some(
+                            binding =>
+                              binding.reservationId === commitment.reservationId &&
+                              binding.source === commitment.source &&
+                              binding.method === commitment.method,
+                          ),
+                      )
+                      .map(commitment => (
+                        <div key={commitment.reservationId}>
+                          <Tag>{commitment.source}</Tag>
+                          {commitment.method} · Endpoint SHA-256:{' '}
+                          <Typography.Text copyable style={{ overflowWrap: 'anywhere' }}>
+                            {commitment.endpointHash}
+                          </Typography.Text>
+                          <Typography.Paragraph type="secondary">
+                            The wallet endpoint will be resolved and checked against this
+                            commitment before payment.
+                          </Typography.Paragraph>
+                        </div>
+                      ))}
                     {item.lastError && <Alert type="error" message={item.lastError} />}
                     <Button
                       disabled={disabled}

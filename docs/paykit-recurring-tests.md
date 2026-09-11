@@ -6,6 +6,7 @@ The recurring stages exercise:
 
 - Explicit acceptance without payment, per-request wallet/source/method authorization, future-period rejection and hidden period-offer rejection by ordinary payment commands.
 - On-chain public payments and BOLT11 private payments: period 0 paid manually; period 1 automatically paid only after the payee prepares its endpoint offer; period 2 skipped while the payer is offline, prepared later without automatic collection, then paid manually.
+- Compact period commitments match the payee's exact endpoint bytes and the payer's later resolved execution endpoint. The payer initially sees commitments without raw endpoints; prepayment invoice clock checks read authenticated payee bindings.
 - Separate execution, proof submission and independent settlement records with exact billing boundaries, plus encrypted receipt issuance, access delivery and decryption for each rail.
 - Duplicate command IDs, repeated commands and actual background ticks without another wallet payment; enabled authorization, controlled clocks and history preserved through an environment restart; cancellation and receiver isolation.
 - Insufficient funds, an invoice expired by actual elapsed time, and a successful Lightning payment whose response is dropped. The uncertain attempt blocks another execution, survives receiver restart and reconciles by its original payment hash.

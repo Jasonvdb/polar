@@ -353,7 +353,14 @@ private source and endpoint expiry seconds. Existing receiving wallet and method
 configuration supplies fresh addresses or BOLT11 invoices. The receiver persists
 period claims before publishing the SDK Payment List and sends an encrypted SDK
 Payment Request containing an immutable period offer. Its parent ID, period,
-amount, exact endpoint bindings and sending identity/receiver are validated.
+amount, endpoint commitments and sending identity/receiver are validated. New v2
+offers carry SHA256 commitments instead of duplicating invoices; the actual SDK
+envelope is checked against its 1000-byte limit before issuance and again before
+publication. Existing v1 offers remain readable with their original full-binding
+validation. The payee retains full durable endpoint claims. The payer initially
+sees labeled commitments, then resolves the explicitly selected Payment List and
+checks the actual endpoint hash before persisting a wallet execution. Hashes are
+never treated as addresses or invoices.
 These internal offers appear under subscription periods and cannot be separately
 accepted, canceled, paid or proved through generic request commands.
 

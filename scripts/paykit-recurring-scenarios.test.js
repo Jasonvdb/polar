@@ -45,3 +45,15 @@ test('recurring diagnostics reject unrecognized or secret-bearing fields at ever
     assert.throws(() => validateEvidence(evidence));
   }
 });
+
+
+test('period commitments authenticate exact endpoint bytes, identity, source and method', () => {
+  const { createHash } = require('node:crypto');
+  const { assertEndpointCommitment } = require('./paykit-recurring-scenarios');
+  const binding = { source: 'private', method: 'btc-lightning-bolt11', reservationId: '95ac94e0-4857-5bea-8454-3b47ba8360dd', endpoint: 'invoice-fixture' };
+  const commitment = { source: binding.source, method: binding.method, reservationId: binding.reservationId, endpointHash: createHash('sha256').update(binding.endpoint, 'utf8').digest('hex') };
+  const check = (c, b) => assertEndpointCommitment(c, b, binding.source, binding.method);
+  assert.doesNotThrow(() => check(commitment, binding));
+  for (const patch of [{ endpoint: binding.endpoint + ' ' }, { reservationId: randomUUID() }, { source: 'public' }, { method: 'btc-onchain' }]) assert.throws(() => check(commitment, { ...binding, ...patch }));
+  for (const patch of [{ endpointHash: 'a'.repeat(64) }, { endpointHash: commitment.endpointHash.toUpperCase() }, { reservationId: '00000000-0000-0000-0000-000000000000' }, { source: 'public' }, { method: 'btc-onchain' }, { preimage: 'private' }]) assert.throws(() => check({ ...commitment, ...patch }, binding));
+});
