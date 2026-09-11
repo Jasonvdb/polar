@@ -91,6 +91,12 @@ impl SdkEventClock {
         }
     }
     pub(crate) fn ensure_valid(&self) -> paykit_sdk::Result<()> {
+        self.ensure_valid_with(|| self.application.sample())
+    }
+    fn ensure_valid_with(
+        &self,
+        sample: impl FnOnce() -> Result<(DateTime<Utc>, &'static str), ()>,
+    ) -> paykit_sdk::Result<()> {
         let mut state = self.logical.lock().map_err(|_| {
             match self.application.sample() {
                 Ok((observed, mode)) => {
@@ -102,11 +108,11 @@ impl SdkEventClock {
             }
             event_clock_error()
         })?;
-        let (observed, mode) = self.application.sample().expect("clock lock");
-        if state
-            .last
-            .is_some_and(|last| observed.timestamp() < last.timestamp())
-        {
+        let (observed, mode) = sample().expect("clock lock");
+        if state.last.is_some_and(|last| {
+            observed.timestamp() < last.timestamp()
+                && (state.persisted_seed || mode == "controlled")
+        }) {
             state.failure = Some(if state.persisted_seed {
                 "future_persisted_seed"
             } else {
@@ -122,6 +128,13 @@ impl SdkEventClock {
         }
     }
     fn serialized_now(&self, before_lock: impl FnOnce()) -> DateTime<Utc> {
+        self.serialized_now_with(before_lock, || self.application.sample())
+    }
+    fn serialized_now_with(
+        &self,
+        before_lock: impl FnOnce(),
+        sample: impl FnOnce() -> Result<(DateTime<Utc>, &'static str), ()>,
+    ) -> DateTime<Utc> {
         before_lock();
         let Ok(mut state) = self.logical.lock() else {
             return match self.application.sample() {
@@ -140,7 +153,7 @@ impl SdkEventClock {
                 }
             };
         };
-        let (now, mode) = self.application.sample().expect("clock lock");
+        let (now, mode) = sample().expect("clock lock");
         if state.failure.is_some() {
             return state.last.unwrap_or(now);
         }
@@ -148,7 +161,12 @@ impl SdkEventClock {
             Some(last) if last >= now => last.checked_add_signed(chrono::Duration::nanoseconds(1)),
             _ => Some(now),
         };
-        match next.filter(|next| next.timestamp() == now.timestamp()) {
+        match next.filter(|next| {
+            if state.persisted_seed && next.timestamp() > now.timestamp() {
+                return false;
+            }
+            mode == "system" || next.timestamp() == now.timestamp()
+        }) {
             Some(next) => {
                 state.last = Some(next);
                 state.persisted_seed = false;
@@ -373,6 +391,72 @@ mod tests {
             advanced_second + chrono::Duration::nanoseconds(1)
         );
         assert!(sdk.ensure_valid().is_ok());
+    }
+    #[test]
+    fn live_clock_keeps_causal_time_through_cross_second_wall_clock_correction() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault =
+            Vault::new(directory.path().into(), [48; 32], "live-correction".into()).unwrap();
+        let application = ApplicationClock::open(&vault).unwrap();
+        let sdk = SdkEventClock::new(application, &Default::default());
+        let emitted = DateTime::parse_from_rfc3339("2026-09-11T08:56:27.026026607Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let corrected = DateTime::parse_from_rfc3339("2026-09-11T08:56:26.848133592Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            emitted - corrected,
+            chrono::Duration::nanoseconds(177_893_015)
+        );
+        assert_eq!(
+            sdk.serialized_now_with(|| {}, || Ok((emitted, "system"))),
+            emitted
+        );
+        assert!(sdk.ensure_valid_with(|| Ok((corrected, "system"))).is_ok());
+        assert_eq!(
+            sdk.serialized_now_with(|| {}, || Ok((corrected, "system"))),
+            emitted + chrono::Duration::nanoseconds(1)
+        );
+    }
+    #[test]
+    fn restored_future_watermark_still_rejects_live_system_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault =
+            Vault::new(directory.path().into(), [49; 32], "future-watermark".into()).unwrap();
+        let application = ApplicationClock::open(&vault).unwrap();
+        let future = DateTime::parse_from_rfc3339("2026-09-11T08:56:27.026026607Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let observed = DateTime::parse_from_rfc3339("2026-09-11T08:56:26.848133592Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let state = paykit_sdk::storage::StorageState {
+            identity_state: Some(paykit_sdk::IdentityState {
+                local_pubky_public_key: None,
+                local_receiver_noise_public_key: None,
+                initialized_at: future,
+                sign_out_generation: 0,
+            }),
+            ..Default::default()
+        };
+        let validation = SdkEventClock::new(application.clone(), &state);
+        assert!(validation
+            .ensure_valid_with(|| Ok((observed, "system")))
+            .is_err());
+        assert_eq!(
+            validation.logical.lock().unwrap().failure,
+            Some("future_persisted_seed")
+        );
+        let emission = SdkEventClock::new(application, &state);
+        assert_eq!(
+            emission.serialized_now_with(|| {}, || Ok((observed, "system"))),
+            future
+        );
+        assert_eq!(
+            emission.logical.lock().unwrap().failure,
+            Some("future_persisted_seed")
+        );
     }
     #[test]
     fn private_clock_failure_kinds_distinguish_backward_and_exhausted_time() {
