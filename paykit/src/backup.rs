@@ -68,7 +68,7 @@ pub struct TransferUpload {
 
 impl TransferUpload {
     pub fn decode(bytes: &[u8]) -> Result<Self, PublicError> {
-        if bytes.len() > MAX_ARCHIVE_BYTES + MAX_PASSPHRASE_BYTES + 27 {
+        if bytes.len() > MAX_ARCHIVE_BYTES + MAX_PASSPHRASE_BYTES + 28 {
             return Err(backup_too_large());
         }
         let mut cursor = FrameCursor::new(bytes);
@@ -387,15 +387,7 @@ async fn capture_core_anchor(
     owner: &str,
 ) -> anyhow::Result<CoreHistoryAnchor> {
     let wallet_name = format!("paykit-{owner}");
-    let loaded = wallet
-        .core(None, "listwallets", serde_json::json!([]))
-        .await?;
-    anyhow::ensure!(
-        loaded
-            .as_array()
-            .is_some_and(|items| items.iter().any(|value| value == &wallet_name)),
-        "Bitcoin wallet must already be loaded for read-only backup"
-    );
+    ensure_history_wallet_loaded(wallet, &wallet_name, owner).await?;
     let info = wallet
         .core(Some(&wallet_name), "getwalletinfo", serde_json::json!([]))
         .await?;
@@ -458,6 +450,29 @@ async fn capture_core_anchor(
         transaction_count,
         known_outgoing_txids: outgoing.into_iter().collect(),
     })
+}
+
+async fn ensure_history_wallet_loaded(
+    wallet: &crate::wallet_rpc::Wallet,
+    wallet_name: &str,
+    owner: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        wallet_name == format!("paykit-{owner}"),
+        "Bitcoin wallet identity mismatch"
+    );
+    let directory = wallet
+        .core(None, "listwalletdir", serde_json::json!([]))
+        .await?;
+    anyhow::ensure!(
+        directory["wallets"].as_array().is_some_and(|items| {
+            items
+                .iter()
+                .any(|value| value["name"].as_str() == Some(wallet_name))
+        }),
+        "Bitcoin wallet is missing"
+    );
+    wallet.load_existing_core_wallet(wallet_name, owner).await
 }
 
 async fn capture_lnd_anchor(
@@ -1171,6 +1186,8 @@ struct RestoreJournal {
     live_wallet: std::path::PathBuf,
     staging_wallet: std::path::PathBuf,
     rollback_wallet: std::path::PathBuf,
+    live_receiver_existed: bool,
+    live_wallet_existed: bool,
 }
 
 fn activate_receiver(
@@ -1196,6 +1213,8 @@ fn activate_receiver(
         live_wallet: live_wallet.to_path_buf(),
         staging_wallet: staging_wallet.to_path_buf(),
         rollback_wallet: rollback_wallet.clone(),
+        live_receiver_existed: live.exists(),
+        live_wallet_existed: live_wallet.exists(),
     };
     save_journal(&journal_path, &journal)?;
     if live.exists() {
@@ -1253,13 +1272,7 @@ pub fn recover_restore_transaction(config: &crate::config::Config) -> anyhow::Re
     validate_journal_paths(config, &journal)?;
     match journal.phase.as_str() {
         "prepared" => rollback_receiver_swap(&journal)?,
-        "receiver_swapped" => {
-            if journal.rollback_receiver.exists() {
-                rollback_receiver_swap(&journal)?;
-            } else {
-                finish_wallet_swap(&journal)?;
-            }
-        }
+        "receiver_swapped" => rollback_receiver_swap(&journal)?,
         "wallet_swapped" | "committed" => finish_committed_restore(&journal)?,
         _ => anyhow::bail!("invalid restore journal phase"),
     }
@@ -1296,17 +1309,21 @@ fn validate_journal_paths(
 }
 
 fn rollback_receiver_swap(journal: &RestoreJournal) -> anyhow::Result<()> {
-    if journal.rollback_receiver.exists() {
+    if journal.live_receiver_existed && journal.rollback_receiver.exists() {
         if journal.live_receiver.exists() {
-            std::fs::rename(&journal.live_receiver, &journal.staging_receiver)?;
+            std::fs::remove_dir_all(&journal.live_receiver)?;
         }
         std::fs::rename(&journal.rollback_receiver, &journal.live_receiver)?;
+    } else if !journal.live_receiver_existed && journal.live_receiver.exists() {
+        std::fs::remove_dir_all(&journal.live_receiver)?;
     }
-    if journal.rollback_wallet.exists() {
+    if journal.live_wallet_existed && journal.rollback_wallet.exists() {
         if journal.live_wallet.exists() {
-            std::fs::rename(&journal.live_wallet, &journal.staging_wallet)?;
+            std::fs::remove_file(&journal.live_wallet)?;
         }
         std::fs::rename(&journal.rollback_wallet, &journal.live_wallet)?;
+    } else if !journal.live_wallet_existed && journal.live_wallet.exists() {
+        std::fs::remove_file(&journal.live_wallet)?;
     }
     if journal.staging_receiver.exists() {
         std::fs::remove_dir_all(&journal.staging_receiver)?;
@@ -1317,16 +1334,18 @@ fn rollback_receiver_swap(journal: &RestoreJournal) -> anyhow::Result<()> {
         }
     }
     sync_parent(&journal.live_receiver)?;
-    sync_parent(&journal.live_wallet)?;
+    sync_existing_parent(&journal.live_wallet)?;
     Ok(())
 }
 
-fn finish_wallet_swap(journal: &RestoreJournal) -> anyhow::Result<()> {
-    if journal.live_wallet.exists() {
-        std::fs::rename(&journal.live_wallet, &journal.rollback_wallet)?;
-    }
-    std::fs::rename(&journal.staging_wallet, &journal.live_wallet)?;
-    finish_committed_restore(journal)
+fn sync_existing_parent(path: &std::path::Path) -> anyhow::Result<()> {
+    let parent = path
+        .ancestors()
+        .skip(1)
+        .find(|value| value.is_dir())
+        .ok_or_else(|| anyhow::anyhow!("restore parent missing"))?;
+    std::fs::File::open(parent)?.sync_all()?;
+    Ok(())
 }
 
 fn finish_committed_restore(journal: &RestoreJournal) -> anyhow::Result<()> {
@@ -2003,6 +2022,25 @@ mod tests {
     }
 
     #[test]
+    fn frame_accepts_exact_maximum_restore_size() {
+        let receiver = Uuid::new_v4();
+        let passphrase = vec![b'a'; MAX_PASSPHRASE_BYTES];
+        let archive = vec![0u8; MAX_ARCHIVE_BYTES];
+        let mut frame = Vec::with_capacity(28 + passphrase.len() + archive.len());
+        frame.extend_from_slice(TRANSFER_MAGIC);
+        frame.push(TRANSFER_VERSION);
+        frame.push(TransferPurpose::Restore.byte());
+        frame.extend_from_slice(receiver.as_bytes());
+        frame.extend_from_slice(&(passphrase.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&(archive.len() as u32).to_be_bytes());
+        frame.extend_from_slice(&passphrase);
+        frame.extend_from_slice(&archive);
+        let decoded = TransferUpload::decode(&frame).unwrap();
+        assert_eq!(decoded.archive.len(), MAX_ARCHIVE_BYTES);
+        assert_eq!(decoded.passphrase.len(), MAX_PASSPHRASE_BYTES);
+    }
+
+    #[test]
     fn restore_inspection_is_repeatable_but_claim_consumes() {
         let receiver = Uuid::new_v4();
         let registry = TransferRegistry::default();
@@ -2139,6 +2177,8 @@ mod tests {
             live_wallet: wallet.clone(),
             staging_wallet: staged_wallet,
             rollback_wallet: wallet.with_extension(format!("rollback-{receiver_id}")),
+            live_receiver_existed: true,
+            live_wallet_existed: true,
         };
         save_journal(&directory.path().join("restore-transaction.cbor"), &journal).unwrap();
 
@@ -2147,5 +2187,104 @@ mod tests {
         assert_eq!(std::fs::read(live.join("state")).unwrap(), b"old");
         assert_eq!(std::fs::read(wallet).unwrap(), b"old-wallet");
         assert!(!directory.path().join("restore-transaction.cbor").exists());
+    }
+
+    #[test]
+    fn startup_removes_new_receiver_when_pre_restore_receiver_was_absent() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            environment_id: Uuid::new_v4(),
+            data_dir: directory.path().into(),
+            key: Zeroizing::new([7; 32]),
+            token: Zeroizing::new("a".repeat(64)),
+            listen: "127.0.0.1:0".into(),
+        };
+        let receiver_id = Uuid::new_v4();
+        let receivers = directory.path().join("receivers");
+        let live = receivers.join(receiver_id.to_string());
+        let staging = receivers.join(format!(".restore-{receiver_id}"));
+        let rollback = receivers.join(format!(".rollback-{receiver_id}"));
+        let wallet = receivers.join("wallet-execution/executions.cbor");
+        let staged_wallet =
+            receivers.join(format!(".restore-wallet-{receiver_id}/executions.cbor"));
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(staged_wallet.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(wallet.parent().unwrap()).unwrap();
+        std::fs::write(live.join("state"), b"new").unwrap();
+        std::fs::write(&wallet, b"old-wallet").unwrap();
+        std::fs::write(&staged_wallet, b"new-wallet").unwrap();
+        let journal = RestoreJournal {
+            receiver_id,
+            phase: "prepared".into(),
+            live_receiver: live.clone(),
+            staging_receiver: staging,
+            rollback_receiver: rollback,
+            live_wallet: wallet.clone(),
+            staging_wallet: staged_wallet,
+            rollback_wallet: wallet.with_extension(format!("rollback-{receiver_id}")),
+            live_receiver_existed: false,
+            live_wallet_existed: true,
+        };
+        save_journal(&directory.path().join("restore-transaction.cbor"), &journal).unwrap();
+        recover_restore_transaction(&config).unwrap();
+        assert!(!live.exists());
+        assert_eq!(std::fs::read(wallet).unwrap(), b"old-wallet");
+        assert!(!directory.path().join("restore-transaction.cbor").exists());
+    }
+
+    #[test]
+    fn startup_recovers_absent_receiver_and_wallet_at_each_rename_boundary() {
+        for (phase, receiver_swapped, wallet_swapped, committed) in [
+            ("prepared", false, false, false),
+            ("prepared", true, false, false),
+            ("receiver_swapped", true, false, false),
+            ("receiver_swapped", true, true, false),
+            ("wallet_swapped", true, true, true),
+            ("committed", true, true, true),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let config = crate::config::Config {
+                environment_id: Uuid::new_v4(),
+                data_dir: directory.path().into(),
+                key: Zeroizing::new([7; 32]),
+                token: Zeroizing::new("a".repeat(64)),
+                listen: "127.0.0.1:0".into(),
+            };
+            let receiver_id = Uuid::new_v4();
+            let receivers = directory.path().join("receivers");
+            let live = receivers.join(receiver_id.to_string());
+            let staging = receivers.join(format!(".restore-{receiver_id}"));
+            let rollback = receivers.join(format!(".rollback-{receiver_id}"));
+            let wallet = receivers.join("wallet-execution/executions.cbor");
+            let staged_wallet =
+                receivers.join(format!(".restore-wallet-{receiver_id}/executions.cbor"));
+            let rollback_wallet = wallet.with_extension(format!("rollback-{receiver_id}"));
+            let receiver_location = if receiver_swapped { &live } else { &staging };
+            std::fs::create_dir_all(receiver_location).unwrap();
+            std::fs::write(receiver_location.join("state"), b"new").unwrap();
+            let wallet_location = if wallet_swapped {
+                &wallet
+            } else {
+                &staged_wallet
+            };
+            std::fs::create_dir_all(wallet_location.parent().unwrap()).unwrap();
+            std::fs::write(wallet_location, b"new-wallet").unwrap();
+            let journal = RestoreJournal {
+                receiver_id,
+                phase: phase.into(),
+                live_receiver: live.clone(),
+                staging_receiver: staging,
+                rollback_receiver: rollback,
+                live_wallet: wallet.clone(),
+                staging_wallet: staged_wallet,
+                rollback_wallet,
+                live_receiver_existed: false,
+                live_wallet_existed: false,
+            };
+            save_journal(&directory.path().join("restore-transaction.cbor"), &journal).unwrap();
+            recover_restore_transaction(&config).unwrap();
+            assert_eq!(live.exists(), committed, "receiver phase {phase}");
+            assert_eq!(wallet.exists(), committed, "wallet phase {phase}");
+        }
     }
 }

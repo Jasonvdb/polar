@@ -16,6 +16,7 @@ function transferFrame({ purpose, receiverId, passphrase, archive = Buffer.alloc
   assert([1, 2].includes(purpose));
   const secret = Buffer.isBuffer(passphrase) ? passphrase : Buffer.from(passphrase);
   assert(secret.length >= 12 && secret.length <= 1024);
+  assert(Buffer.from(secret.toString('utf8'), 'utf8').equals(secret), 'Passphrase must be valid UTF-8');
   assert(Buffer.isBuffer(archive) && archive.length <= MAX_ARCHIVE);
   const header = Buffer.alloc(28);
   header.write('PKTR', 0, 'ascii'); header[4] = 1; header[5] = purpose;
@@ -23,6 +24,8 @@ function transferFrame({ purpose, receiverId, passphrase, archive = Buffer.alloc
   header.writeUInt16BE(secret.length, 22); header.writeUInt32BE(archive.length, 24 - 0);
   return Buffer.concat([header, secret, archive]);
 }
+
+function randomPassphrase() { return Buffer.from(randomBytes(32).toString('hex'), 'utf8'); }
 
 async function boundedFetch(url, options, signal, timeoutMs = 30000) {
   signal?.throwIfAborted();
@@ -69,7 +72,7 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
   const server = initial.receivers.find(value => value.participantId === bobParticipant.id && value.path.endsWith('/server'));
   const ownerKeys = ['Alice', 'Bob', 'Carol'].map(name => initial.participants.find(value => value.name === name).publicKey);
   const alice = requests.alice;
-  const passphrase = randomBytes(32); const alicePassphrase = randomBytes(32); let archive; let aliceArchive;
+  const passphrase = randomPassphrase(); const alicePassphrase = randomPassphrase(); let archive; let aliceArchive;
   try {
     await requests.link(bob, requests.carol);
     const linkedPeers = (await requests.view(bob)).links.filter(value => value.state === 'linked');
@@ -86,7 +89,7 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
 
     const histories = fixture.paymentHistory(ownerKeys);
     for (const candidate of [
-      { receiverId: bob.id, password: randomBytes(32), bytes: archive },
+      { receiverId: bob.id, password: randomPassphrase(), bytes: archive },
       { receiverId: bob.id, password: passphrase, bytes: Buffer.from(archive).fill(archive[archive.length - 1] ^ 1, archive.length - 1) },
       { receiverId: server.id, password: passphrase, bytes: archive },
     ]) {
@@ -193,4 +196,4 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
   } finally { passphrase.fill(0); alicePassphrase.fill(0); archive?.fill(0); aliceArchive?.fill(0); }
 }
 
-module.exports = { stages, run, transferFrame, createTransfer, downloadArchive, recoveryView, publicSnapshot, MAX_ARCHIVE };
+module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, MAX_ARCHIVE };

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transferFrame, createTransfer, downloadArchive, publicSnapshot, recoveryView, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
+const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, recoveryView, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
 
 const receiverId = '123e4567-e89b-42d3-a456-426614174000';
 const presetReceiverId = 'af9f976d-b4ff-5feb-af0e-4fad185109f1';
@@ -20,7 +20,16 @@ test('frame rejects invalid scope, secrets and archive bounds', () => {
   assert.throws(() => transferFrame({ purpose: 3, receiverId, passphrase: Buffer.alloc(12) }));
   assert.throws(() => transferFrame({ purpose: 1, receiverId: 'bad', passphrase: Buffer.alloc(12) }));
   assert.throws(() => transferFrame({ purpose: 1, receiverId, passphrase: Buffer.alloc(11) }));
+  assert.throws(() => transferFrame({ purpose: 1, receiverId, passphrase: Buffer.alloc(12, 0xff) }), /valid UTF-8/);
   assert.throws(() => transferFrame({ purpose: 2, receiverId, passphrase: Buffer.alloc(12), archive: Buffer.alloc(MAX_ARCHIVE + 1) }));
+});
+test('random passphrases are bounded UTF-8 bytes accepted by framing', () => {
+  for (let attempt = 0; attempt < 32; attempt++) {
+    const passphrase = randomPassphrase();
+    assert.equal(passphrase.length, 64); assert.match(passphrase.toString('utf8'), /^[a-f0-9]{64}$/);
+    assert.doesNotThrow(() => transferFrame({ purpose: 1, receiverId, passphrase }));
+    passphrase.fill(0);
+  }
 });
 test('transfer IDs remain UUIDv4-only', async () => {
   await assert.rejects(

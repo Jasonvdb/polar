@@ -103,7 +103,6 @@ async fn run(args: &[String]) -> anyhow::Result<()> {
 
 #[cfg(unix)]
 async fn backup_cli(args: &[String]) -> anyhow::Result<()> {
-    use std::io::Write;
     anyhow::ensure!(args.len() >= 3, "backup action and receiver UUID required");
     let action = args[1].as_str();
     anyhow::ensure!(
@@ -180,13 +179,22 @@ async fn backup_cli(args: &[String]) -> anyhow::Result<()> {
             .error_for_status()?
             .bytes()
             .await?;
-        let mut output = std::fs::OpenOptions::new()
-            .write(true)
-            .open(format!("/dev/fd/{archive_fd}"))?;
-        output.write_all(&bytes)?;
-        output.flush()?;
+        write_archive_fd(archive_fd, &bytes)?;
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_archive_fd(archive_fd: i32, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::os::fd::BorrowedFd;
+    // SAFETY: the CLI contract requires archive_fd to remain open for this call.
+    // Clone it so this function never closes the caller-owned descriptor.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(archive_fd) };
+    let mut output = std::fs::File::from(borrowed.try_clone_to_owned()?);
+    output.write_all(bytes)?;
+    output.flush()?;
     Ok(())
 }
 
@@ -396,6 +404,28 @@ fn ensure_loopback_url(base: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::private_receiver_error_enabled;
+
+    #[cfg(unix)]
+    #[test]
+    fn archive_writer_uses_and_preserves_inherited_descriptor() {
+        use std::io::{Read, Seek, Write};
+        use std::os::fd::AsRawFd;
+
+        let directory = tempfile::tempdir().unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(directory.path().join("archive"))
+            .unwrap();
+        super::write_archive_fd(file.as_raw_fd(), b"encrypted-archive").unwrap();
+        file.write_all(b"-parent-open").unwrap();
+        file.rewind().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"encrypted-archive-parent-open");
+    }
 
     #[test]
     fn detailed_receiver_error_requires_exact_private_child_contract() {
