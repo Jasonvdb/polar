@@ -43,6 +43,8 @@ struct LocalState {
     explicit_relink_peers: Vec<(String, String)>,
     #[serde(default)]
     recovery_reached_ready: bool,
+    #[serde(default)]
+    recovery_forced_delivery_pause: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct RecoveryPreparationAnchor {
@@ -78,6 +80,7 @@ pub(crate) fn with_recovery_gate(
     state.view.recovery = Some(recovery);
     state.recovery_preparations.clear();
     state.explicit_relink_peers.clear();
+    state.recovery_forced_delivery_pause = false;
     state.recovery_reached_ready = state.view.recovery.as_ref().is_some_and(|recovery| {
         recovery.sdk_validated
             && recovery.wallet_reconciled
@@ -93,7 +96,9 @@ pub(crate) fn save_recovery(vault: &Vault, recovery: crate::model::Recovery) -> 
         .load("workspace.cbor")?
         .ok_or_else(|| anyhow::anyhow!("receiver workspace missing"))?;
     let currently_safe = recovery_valid_for_explicit_relink(&recovery);
-    state.view.delivery_paused = recovery.automation_paused;
+    if recovery.automation_paused {
+        state.view.delivery_paused = true;
+    }
     state.view.recovery = Some(recovery);
     if state.view.recovery.as_ref().is_some_and(|recovery| {
         recovery.sdk_validated
@@ -149,6 +154,7 @@ impl Runtime {
             recovery_preparations: vec![],
             explicit_relink_peers: vec![],
             recovery_reached_ready: false,
+            recovery_forced_delivery_pause: false,
         });
         anyhow::ensure!(state.view.receiver_id == id, "workspace receiver mismatch");
         for intent in state
@@ -355,7 +361,10 @@ impl Runtime {
             }
         } else {
             match name {
-                "delivery.pause" => self.state.view.delivery_paused = true,
+                "delivery.pause" => {
+                    self.state.view.delivery_paused = true;
+                    self.state.recovery_forced_delivery_pause = false;
+                }
                 "delivery.resume" => {
                     if !self.recovery_allows_automation() {
                         return Err(PublicError::new(
@@ -365,6 +374,7 @@ impl Runtime {
                         .into());
                     }
                     self.state.view.delivery_paused = false;
+                    self.state.recovery_forced_delivery_pause = false;
                 }
                 "delivery.sync" => {
                     if self.state.view.delivery_paused {
@@ -916,11 +926,13 @@ impl Runtime {
             recovery.blocked_reasons.retain(|reason| {
                 *reason != crate::model::RecoveryBlockedReason::PeerRelinkRequired
             });
-            if recovery.wallet_reconciled && recovery.sdk_validated {
+            if recovery_valid_for_explicit_relink(recovery) {
                 recovery.phase = crate::model::RecoveryPhase::Ready;
                 recovery.automation_paused = false;
-                if recovery.grant_valid && recovery.marker_valid {
-                    self.state.recovery_reached_ready = true;
+                self.state.recovery_reached_ready = true;
+                if self.state.recovery_forced_delivery_pause {
+                    self.state.view.delivery_paused = false;
+                    self.state.recovery_forced_delivery_pause = false;
                 }
             }
         }
@@ -978,6 +990,9 @@ impl Runtime {
         }
         recovery.phase = crate::model::RecoveryPhase::RelinkRequired;
         recovery.automation_paused = true;
+        if !self.state.view.delivery_paused {
+            self.state.recovery_forced_delivery_pause = true;
+        }
         self.state.view.delivery_paused = true;
     }
     /// Clear abandoned responder slots before removing the block, so an initiator
@@ -1773,6 +1788,8 @@ mod tests {
         let target = (key.to_string(), path.to_string());
         runtime.state.view.recovery = Some(ready_recovery());
         runtime.require_recovery_peer(&target);
+        assert!(runtime.state.view.delivery_paused);
+        assert!(runtime.state.recovery_forced_delivery_pause);
 
         let mut peer = recovery_peer_record(&key, &path, LinkedPeerState::Linking);
         runtime.reconcile_local_link_recovery(&[peer.clone()]);
@@ -1816,6 +1833,8 @@ mod tests {
         assert!(matches!(recovery.phase, crate::model::RecoveryPhase::Ready));
         assert!(!recovery.automation_paused);
         assert!(recovery.peers_requiring_relink.is_empty());
+        assert!(!runtime.state.view.delivery_paused);
+        assert!(!runtime.state.recovery_forced_delivery_pause);
 
         runtime.state.view.delivery_paused = false;
         peer.state = LinkedPeerState::RecoveryRequired;
@@ -1828,6 +1847,62 @@ mod tests {
         assert!(recovery.automation_paused);
         assert_eq!(recovery.peers_requiring_relink.len(), 1);
         assert!(runtime.state.view.delivery_paused);
+        assert!(runtime.state.recovery_forced_delivery_pause);
+    }
+    #[test]
+    fn recovery_owned_delivery_pause_survives_restart_and_preserves_user_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let target = (key.to_string(), path.to_string());
+        let other_key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let other_path = PaykitReceiverPath::new("other/wallet").unwrap();
+        let other_target = (other_key.to_string(), other_path.to_string());
+        let mut runtime = open(dir.path(), receiver);
+        runtime.state.view.recovery = Some(ready_recovery());
+        runtime.state.recovery_reached_ready = true;
+        runtime.require_recovery_peer(&target);
+        runtime.require_recovery_peer(&other_target);
+        runtime.save().unwrap();
+        drop(runtime);
+
+        let mut reopened = open(dir.path(), receiver);
+        assert!(reopened.state.view.delivery_paused);
+        assert!(reopened.state.recovery_forced_delivery_pause);
+        reopened.mark_explicit_relink(&target);
+        let linked = recovery_peer_record(&key, &path, LinkedPeerState::Linked);
+        reopened.reconcile_local_link_recovery(std::slice::from_ref(&linked));
+        assert!(reopened.state.view.delivery_paused);
+        assert!(reopened.state.recovery_forced_delivery_pause);
+        assert_eq!(
+            reopened
+                .state
+                .view
+                .recovery
+                .as_ref()
+                .unwrap()
+                .peers_requiring_relink
+                .len(),
+            1
+        );
+        reopened.mark_explicit_relink(&other_target);
+        let other_linked = recovery_peer_record(&other_key, &other_path, LinkedPeerState::Linked);
+        reopened.reconcile_local_link_recovery(&[other_linked]);
+        assert!(!reopened.state.view.delivery_paused);
+        assert!(!reopened.state.recovery_forced_delivery_pause);
+        reopened.save().unwrap();
+        drop(reopened);
+        assert!(!open(dir.path(), receiver).state.view.delivery_paused);
+
+        let mut user_paused = open(dir.path(), receiver);
+        user_paused.state.view.delivery_paused = true;
+        user_paused.state.recovery_forced_delivery_pause = false;
+        user_paused.require_recovery_peer(&target);
+        user_paused.mark_explicit_relink(&target);
+        user_paused.reconcile_local_link_recovery(&[linked]);
+        assert!(user_paused.state.view.delivery_paused);
+        assert!(!user_paused.state.recovery_forced_delivery_pause);
     }
     #[tokio::test]
     async fn remote_first_explicit_relink_stays_paused_until_linked_after_restart() {
@@ -2280,6 +2355,7 @@ mod tests {
         assert!(restored.recovery_preparations.is_empty());
         assert!(restored.explicit_relink_peers.is_empty());
         assert!(restored.recovery_reached_ready);
+        assert!(!restored.recovery_forced_delivery_pause);
 
         let mut initial = ready_recovery();
         initial.phase = crate::model::RecoveryPhase::RelinkRequired;
@@ -2296,6 +2372,7 @@ mod tests {
         ciborium::into_writer(&gated, &mut bytes).unwrap();
         let restored: LocalState = ciborium::from_reader(bytes.as_slice()).unwrap();
         assert!(!restored.recovery_reached_ready);
+        assert!(!restored.recovery_forced_delivery_pause);
     }
     #[test]
     fn recovery_handshake_requires_complete_preparation_barrier() {
@@ -2720,6 +2797,7 @@ mod tests {
                     recovery_preparations: vec![],
                     explicit_relink_peers: vec![],
                     recovery_reached_ready: false,
+                    recovery_forced_delivery_pause: false,
                 },
             )
             .unwrap();
