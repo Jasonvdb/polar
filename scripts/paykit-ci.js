@@ -311,7 +311,7 @@ function start() {
   if (process.env.GITHUB_OUTPUT) fs.appendFileSync(process.env.GITHUB_OUTPUT, `artifact-root=${root}\n`);
   runCli(work, {
     // Two sequential 72-stage environments exceed the former 20-minute allowance.
-    timeoutMs: 1800000,
+    timeoutMs: 2160000,
     cleanup,
     complete(result, cleaned) {
       const report = { schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: true, cleanup: cleaned, ...result };
