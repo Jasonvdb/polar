@@ -102,7 +102,17 @@ pub(crate) fn finalize_staged_recovery(
     Ok(ciborium::Value::serialized(&state)?)
 }
 
-pub(crate) fn save_recovery(vault: &Vault, recovery: crate::model::Recovery) -> anyhow::Result<()> {
+pub(crate) fn persisted_delivery_paused(value: &ciborium::Value) -> anyhow::Result<bool> {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(value, &mut encoded)?;
+    let state: LocalState = ciborium::from_reader(encoded.as_slice())?;
+    Ok(state.view.delivery_paused)
+}
+
+pub(crate) fn save_recovery(
+    vault: &Vault,
+    recovery: crate::model::Recovery,
+) -> anyhow::Result<bool> {
     let mut state: LocalState = vault
         .load("workspace.cbor")?
         .ok_or_else(|| anyhow::anyhow!("receiver workspace missing"))?;
@@ -111,7 +121,9 @@ pub(crate) fn save_recovery(vault: &Vault, recovery: crate::model::Recovery) -> 
     if !currently_safe {
         state.explicit_relink_peers.clear();
     }
-    vault.save("workspace.cbor", &state)
+    let delivery_paused = state.view.delivery_paused;
+    vault.save("workspace.cbor", &state)?;
+    Ok(delivery_paused)
 }
 
 fn apply_recovery_state(state: &mut LocalState, recovery: crate::model::Recovery) {

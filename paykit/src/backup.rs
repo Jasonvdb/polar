@@ -839,13 +839,18 @@ fn validate_backup_bounds(backup: &ReceiverBackupV1) -> Result<(), PublicError> 
     Ok(())
 }
 
-pub async fn restore_receiver(
+pub(crate) struct RecoveryOutcome {
+    pub recovery: crate::model::Recovery,
+    pub delivery_paused: bool,
+}
+
+pub(crate) async fn restore_receiver(
     config: &crate::config::Config,
     state: &crate::model::AppState,
     receiver_id: Uuid,
     archive: &[u8],
     passphrase: &[u8],
-) -> Result<crate::model::Recovery, PublicError> {
+) -> Result<RecoveryOutcome, PublicError> {
     let clear = decrypt(archive, passphrase)?;
     let mut backup: ReceiverBackupV1 =
         ciborium::from_reader(clear.as_slice()).map_err(|_| backup_invalid())?;
@@ -1006,6 +1011,8 @@ pub async fn restore_receiver(
         recovery.clone(),
     )
     .map_err(|_| backup_invalid())?;
+    let delivery_paused = crate::workspace::persisted_delivery_paused(&gated_workspace)
+        .map_err(|_| backup_invalid())?;
     staging_vault
         .save("workspace.cbor", &gated_workspace)
         .map_err(|_| backup_invalid())?;
@@ -1033,14 +1040,17 @@ pub async fn restore_receiver(
             "Restore activation was interrupted and will be recovered at startup.",
         )
     })?;
-    Ok(recovery)
+    Ok(RecoveryOutcome {
+        recovery,
+        delivery_paused,
+    })
 }
 
-pub async fn reconcile_receiver(
+pub(crate) async fn reconcile_receiver(
     config: &crate::config::Config,
     state: &crate::model::AppState,
     receiver_id: Uuid,
-) -> anyhow::Result<crate::model::Recovery> {
+) -> anyhow::Result<RecoveryOutcome> {
     let receiver_root = config
         .data_dir
         .join("receivers")
@@ -1111,8 +1121,11 @@ pub async fn reconcile_receiver(
     } else {
         crate::model::RecoveryPhase::RelinkRequired
     };
-    crate::workspace::save_recovery(&receiver_vault, recovery.clone())?;
-    Ok(recovery)
+    let delivery_paused = crate::workspace::save_recovery(&receiver_vault, recovery.clone())?;
+    Ok(RecoveryOutcome {
+        recovery,
+        delivery_paused,
+    })
 }
 
 fn recovery_from_workspace(value: ciborium::Value) -> anyhow::Result<crate::model::Recovery> {

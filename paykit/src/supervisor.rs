@@ -407,7 +407,7 @@ impl Supervisor {
                     input.receiver_id,
                     self.config.token.trim(),
                 )?;
-                let recovery = crate::backup::restore_receiver(
+                let outcome = crate::backup::restore_receiver(
                     &self.config,
                     &self.repository.snapshot()?,
                     input.receiver_id,
@@ -415,14 +415,14 @@ impl Supervisor {
                     &claim.passphrase,
                 )
                 .await?;
+                let recovery = outcome.recovery.clone();
                 self.repository.update(|state| {
                     let workspace = state
                         .receiver_workspaces
                         .iter_mut()
                         .find(|value| value.receiver_id == input.receiver_id);
                     if let Some(workspace) = workspace {
-                        workspace.delivery_paused = recovery.automation_paused;
-                        workspace.recovery = Some(recovery.clone());
+                        project_recovery_outcome(workspace, &outcome);
                     }
                     Ok(())
                 })?;
@@ -437,17 +437,17 @@ impl Supervisor {
                     "receiver is running"
                 );
                 let snapshot = self.repository.snapshot()?;
-                let recovery =
+                let outcome =
                     crate::backup::reconcile_receiver(&self.config, &snapshot, input.receiver_id)
                         .await?;
+                let recovery = outcome.recovery.clone();
                 self.repository.update(|state| {
                     let workspace = state
                         .receiver_workspaces
                         .iter_mut()
                         .find(|value| value.receiver_id == input.receiver_id)
                         .ok_or_else(|| anyhow::anyhow!("receiver workspace missing"))?;
-                    workspace.delivery_paused = recovery.automation_paused;
-                    workspace.recovery = Some(recovery.clone());
+                    project_recovery_outcome(workspace, &outcome);
                     Ok(())
                 })?;
                 Ok(
@@ -907,6 +907,14 @@ impl Supervisor {
     }
 }
 
+fn project_recovery_outcome(
+    workspace: &mut crate::workspace_model::Workspace,
+    outcome: &crate::backup::RecoveryOutcome,
+) {
+    workspace.delivery_paused = outcome.delivery_paused;
+    workspace.recovery = Some(outcome.recovery.clone());
+}
+
 fn canonical_noise_for_binding(
     receiver_record: &ReceiverRecord,
     owner: &OwnerRecord,
@@ -941,6 +949,41 @@ fn decode<T: serde::de::DeserializeOwned>(command: &Command) -> anyhow::Result<T
 #[cfg(test)]
 mod diagnostic_tests {
     use super::*;
+
+    #[test]
+    fn stopped_recovery_projection_uses_persisted_delivery_preference() {
+        let recovery = crate::model::Recovery {
+            phase: crate::model::RecoveryPhase::Ready,
+            automation_paused: false,
+            sdk_validated: true,
+            wallet_reconciled: true,
+            identity_fingerprint: "identity".into(),
+            receiver_fingerprint: "receiver".into(),
+            grant_valid: true,
+            marker_valid: true,
+            terminal_execution_count: 0,
+            uncertain_execution_count: 0,
+            unknown_after_export_count: 0,
+            peers_requiring_relink: vec![],
+            unresolved_execution_ids: vec![],
+            blocked_reasons: vec![],
+            restored_at: None,
+            last_error: None,
+        };
+        for (prior, persisted) in [(false, true), (true, false)] {
+            let mut workspace = crate::workspace_model::Workspace {
+                delivery_paused: prior,
+                ..Default::default()
+            };
+            let outcome = crate::backup::RecoveryOutcome {
+                recovery: recovery.clone(),
+                delivery_paused: persisted,
+            };
+            project_recovery_outcome(&mut workspace, &outcome);
+            assert_eq!(workspace.delivery_paused, persisted);
+            assert!(!workspace.recovery.unwrap().automation_paused);
+        }
+    }
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
