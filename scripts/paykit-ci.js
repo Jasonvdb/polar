@@ -4,8 +4,8 @@ const assert = require('assert/strict');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { randomUUID, randomBytes } = require('crypto');
-const { execFileSync } = require('child_process');
+const { randomUUID, randomBytes, createHash } = require('crypto');
+const { execFileSync, spawnSync } = require('child_process');
 const { run } = require('./paykit-scenarios');
 const { createWalletFixture } = require('./paykit-wallet-fixture');
 const { createReceiptFixture, validateReceiptEvidence } = require('./paykit-receipt-fixture');
@@ -95,6 +95,35 @@ function assertRunningReceivers(receivers) {
   assert(statuses.length > 0 && statuses.every(r => r.status === 'running'), `Survivor receivers unavailable: ${JSON.stringify(statuses)}`);
 }
 
+const PRIVATE_DIAGNOSTIC_BYTES = 64 * 1024;
+function captureFailureDiagnostics({ root, runId, resources, inspect, stderr }) {
+  const directory = path.join(root, 'private-diagnostics');
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  fs.chmodSync(directory, 0o700);
+  return resources.environments.filter(environment => environment.service).map(environment => {
+    const id = environment.service;
+    const recorded = resources.containers.includes(id) && resources.containerDetails.some(container => container.id === id && container.owner === runId);
+    if (!recorded || !/^[a-f0-9]{64}$/.test(id)) throw new Error('Refusing diagnostics for an unowned service container');
+    const rawState = inspect(id);
+    if (rawState.owner !== runId || rawState.id !== id) throw new Error('Service diagnostic ownership mismatch');
+    const state = { status: rawState.status, running: rawState.running === true, paused: rawState.paused === true,
+      restarting: rawState.restarting === true, oomKilled: rawState.oomKilled === true, dead: rawState.dead === true,
+      exitCode: Number.isSafeInteger(rawState.exitCode) ? rawState.exitCode : null,
+      startedAt: rawState.startedAt, finishedAt: rawState.finishedAt };
+    const bytes = Buffer.from(stderr(id));
+    const retained = bytes.subarray(Math.max(0, bytes.length - PRIVATE_DIAGNOSTIC_BYTES));
+    const file = `${environment.suffix}-service-stderr.log`;
+    const destination = path.join(directory, file);
+    fs.writeFileSync(destination, retained, { mode: 0o600 }); fs.chmodSync(destination, 0o600);
+    return { suffix: environment.suffix, containerId: id, state, stderr: { file, bytes: retained.length,
+      truncated: bytes.length > retained.length, sha256: createHash('sha256').update(retained).digest('hex') } };
+  });
+}
+function captureFailureDiagnosticsSafely(options) {
+  try { return captureFailureDiagnostics(options); }
+  catch (_) { return [{ captureError: 'capture_failed' }]; }
+}
+
 function start() {
   const root = fs.mkdtempSync(path.join(process.env.RUNNER_TEMP || os.tmpdir(), 'polar-paykit-ci-'));
   const runId = randomUUID();
@@ -105,6 +134,7 @@ function start() {
   const walletFixtures = [];
   const receiptFixtures = [];
   let lastScenarioStage = 'run:started';
+  let failureDiagnostics = [];
   const image = process.env.PAYKIT_TEST_IMAGE || 'polar-paykit/service:pr2';
   const postgres = 'postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af';
   const record = () => fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(resources, null, 2));
@@ -172,25 +202,36 @@ function start() {
     return { base, tokenFile: path.join(secrets, 'api-token'), serviceContainer: service, postgresContainer: database, walletFixture, receiptFixture };
   }
   async function work(signal) {
-    const a = await environment('a', signal);
-    const b = await environment('b', signal);
-    const reportB = await run({ ...b, signal, progress: stage => progress(`b:${stage}`) });
-    const walletSurvivorBefore = b.walletFixture.walletSnapshot();
-    const reportA = await run({ ...a, signal, progress: stage => progress(`a:${stage}`) });
-    progress('isolation:survivor-check');
-    signal.throwIfAborted();
-    const survivorBase = serviceBase(b.serviceContainer, docker);
-    progress(`isolation:survivor-endpoint:${survivorBase}`);
-    const survivor = await requestJson(`${survivorBase}/v1/state`, { headers: { authorization: `Bearer ${fs.readFileSync(b.tokenFile, 'utf8').trim()}` } }, signal);
-    assert.equal(survivor.status, 200);
-    assert.deepEqual(survivor.data.participants.map(p => p.publicKey), reportB.participantKeys);
-    try { assertRunningReceivers(survivor.data.receivers); }
-    catch (error) {
-      fs.writeFileSync(path.join(root, 'survivor-receiver-statuses.json'), JSON.stringify(redactedReceiverStatuses(survivor.data.receivers), null, 2));
+    try {
+      const a = await environment('a', signal);
+      const b = await environment('b', signal);
+      const reportB = await run({ ...b, signal, progress: stage => progress(`b:${stage}`) });
+      const walletSurvivorBefore = b.walletFixture.walletSnapshot();
+      const reportA = await run({ ...a, signal, progress: stage => progress(`a:${stage}`) });
+      progress('isolation:survivor-check');
+      signal.throwIfAborted();
+      const survivorBase = serviceBase(b.serviceContainer, docker);
+      progress(`isolation:survivor-endpoint:${survivorBase}`);
+      const survivor = await requestJson(`${survivorBase}/v1/state`, { headers: { authorization: `Bearer ${fs.readFileSync(b.tokenFile, 'utf8').trim()}` } }, signal);
+      assert.equal(survivor.status, 200);
+      assert.deepEqual(survivor.data.participants.map(p => p.publicKey), reportB.participantKeys);
+      try { assertRunningReceivers(survivor.data.receivers); }
+      catch (error) {
+        fs.writeFileSync(path.join(root, 'survivor-receiver-statuses.json'), JSON.stringify(redactedReceiverStatuses(survivor.data.receivers), null, 2));
+        throw error;
+      }
+      assert.deepEqual(b.walletFixture.walletSnapshot(), walletSurvivorBefore, 'Environment B wallets changed while A ran');
+      return { environments: [reportA, reportB], survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true };
+    } catch (error) {
+      failureDiagnostics = captureFailureDiagnosticsSafely({ root, runId, resources,
+          inspect: id => JSON.parse(docker('inspect', '--format', '{"id":{{json .Id}},"owner":{{json (index .Config.Labels "polar-paykit.test-run")}},"status":{{json .State.Status}},"running":{{json .State.Running}},"paused":{{json .State.Paused}},"restarting":{{json .State.Restarting}},"oomKilled":{{json .State.OOMKilled}},"dead":{{json .State.Dead}},"exitCode":{{json .State.ExitCode}},"startedAt":{{json .State.StartedAt}},"finishedAt":{{json .State.FinishedAt}}}', id)),
+          stderr: id => {
+            const result = spawnSync('docker', ['logs', '--tail', '400', id], { encoding: null, timeout: 10000, killSignal: 'SIGTERM', maxBuffer: 256 * 1024, stdio: ['ignore', 'ignore', 'pipe'] });
+            if (result.error || result.status !== 0) throw new Error('Service stderr capture failed');
+            return result.stderr || Buffer.alloc(0);
+          } });
       throw error;
     }
-    assert.deepEqual(b.walletFixture.walletSnapshot(), walletSurvivorBefore, 'Environment B wallets changed while A ran');
-    return { environments: [reportA, reportB], survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true };
   }
   function cleanup() {
     progress('cleanup:started');
@@ -260,11 +301,11 @@ function start() {
       console.log('Both persistent Paykit environment scenarios passed.');
     },
     fail(error, cleaned) {
-      fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify({ schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: false, cleanup: cleaned, error: error.message, lastStage: lastScenarioStage }, null, 2));
+      fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify({ schemaVersion: 1, runId, startedAt, completedAt: new Date().toISOString(), passed: false, cleanup: cleaned, error: error.message, lastStage: lastScenarioStage, failureDiagnostics }, null, 2));
     },
   });
 }
-module.exports = { validateReport, requiredStages, redactedReceiverStatuses, assertRunningReceivers };
+module.exports = { validateReport, requiredStages, redactedReceiverStatuses, assertRunningReceivers, captureFailureDiagnostics, captureFailureDiagnosticsSafely, PRIVATE_DIAGNOSTIC_BYTES };
 if (require.main === module) {
   if (process.argv[2] === '--verify-report') {
     try { validateReport(process.argv[3]); console.log('Required Paykit completion report verified.'); }

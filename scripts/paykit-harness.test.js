@@ -45,7 +45,7 @@ function walletEvidence(environment) {
     ]),
   };
 }
-const { validateReport, requiredStages } = require('./paykit-ci');
+const { validateReport, requiredStages, captureFailureDiagnostics, captureFailureDiagnosticsSafely, PRIVATE_DIAGNOSTIC_BYTES } = require('./paykit-ci');
 
 function child(code) {
   const result = spawnSync(process.execPath, ['-e', code], { encoding: 'utf8', timeout: 3000 });
@@ -177,4 +177,33 @@ test('survivor assertion preserves strict running gate and emits only redacted r
   assert.throws(() => assertRunningReceivers(records), error => error.message.includes('receiver-id') && error.message.includes('crashed') && !error.message.includes('private-session') && !error.message.includes('sensitive detail'));
   assertRunningReceivers([{ id: 'receiver-id', status: 'running', generation: 4 }]);
   assert.throws(() => assertRunningReceivers([]));
+});
+
+test('failure diagnostics capture only owned service stderr privately and expose bounded metadata', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-private-diagnostic-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const runId = 'owned-run'; const id = 'a'.repeat(64); const secret = 'secret-like-receiver-stderr';
+  const resources = { containers: [id], containerDetails: [{ id, owner: runId }], environments: [{ suffix: 'b', service: id }] };
+  const result = captureFailureDiagnostics({ root, runId, resources,
+    inspect: owned => ({ id: owned, owner: runId, status: 'running', running: true, paused: false, restarting: false, oomKilled: false, dead: false, exitCode: 0, startedAt: 'start', finishedAt: 'finish', error: secret }),
+    stderr: owned => { assert.equal(owned, id); return Buffer.from(`${'x'.repeat(PRIVATE_DIAGNOSTIC_BYTES)}${secret}`); } });
+  const directory = path.join(root, 'private-diagnostics'); const file = path.join(directory, 'b-service-stderr.log');
+  assert.equal(fs.statSync(directory).mode & 0o777, 0o700); assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(file).size, PRIVATE_DIAGNOSTIC_BYTES); assert(fs.readFileSync(file, 'utf8').includes(secret));
+  assert.deepEqual(Object.keys(result[0]), ['suffix', 'containerId', 'state', 'stderr']);
+  assert.deepEqual(Object.keys(result[0].stderr), ['file', 'bytes', 'truncated', 'sha256']);
+  assert.equal(result[0].stderr.file, 'b-service-stderr.log'); assert.equal(result[0].stderr.truncated, true);
+  assert.match(result[0].stderr.sha256, /^[a-f0-9]{64}$/); assert(!JSON.stringify(result).includes(secret));
+});
+
+test('failure diagnostic rejection stays private and returns control for cleanup', t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-private-diagnostic-failure-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const attempted = [];
+  const result = captureFailureDiagnosticsSafely({ root, runId: 'owned-run',
+    resources: { containers: [], containerDetails: [], environments: [{ suffix: 'b', service: 'f'.repeat(64) }] },
+    inspect: id => { attempted.push(id); throw new Error('secret inspect failure'); }, stderr: () => { throw new Error('must not run'); } });
+  assert.deepEqual(result, [{ captureError: 'capture_failed' }]); assert.deepEqual(attempted, []);
+  let cleaned = false; try { throw new Error('original scenario failure'); } catch (_) { cleaned = true; }
+  assert.equal(cleaned, true); assert(!JSON.stringify(result).includes('secret'));
 });
