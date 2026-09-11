@@ -317,11 +317,7 @@ async fn capture_environment_anchors(
             .iter()
             .find(|wallet| wallet.id == funded.wallet_id)
             .ok_or_else(|| anyhow::anyhow!("funded wallet configuration missing"))?;
-        let owner = state
-            .participants
-            .iter()
-            .find(|participant| participant.public.name == funded.participant)
-            .ok_or_else(|| anyhow::anyhow!("funded wallet participant missing"))?;
+        let owner = resolve_funded_wallet_owner(config, &state.participants, funded)?;
         anchors.push(WalletHistoryAnchor {
             wallet_id: wallet.id.clone(),
             rail: crate::payment_model::ONCHAIN.into(),
@@ -340,6 +336,25 @@ async fn capture_environment_anchors(
         }
     }
     Ok(anchors)
+}
+
+fn resolve_funded_wallet_owner<'a>(
+    config: &crate::config::Config,
+    participants: &'a [crate::model::OwnerRecord],
+    funded: &crate::request_model::FundedWallet,
+) -> anyhow::Result<&'a crate::model::OwnerRecord> {
+    anyhow::ensure!(
+        matches!(funded.participant.as_str(), "Alice" | "Bob" | "Carol"),
+        "funded wallet preset identity is invalid"
+    );
+    let participant_id = Uuid::new_v5(
+        &config.environment_id,
+        format!("preset:{}", funded.participant).as_bytes(),
+    );
+    participants
+        .iter()
+        .find(|participant| participant.public.id == participant_id)
+        .ok_or_else(|| anyhow::anyhow!("funded wallet owner missing"))
 }
 
 async fn capture_wallet_anchors(
@@ -1977,6 +1992,55 @@ mod tests {
         assert_eq!(sdk_public.z32(), pubky_z32);
         assert_ne!(sdk_public.to_string(), pubky_z32);
         assert_eq!(crate::receiver::noise_public_key(secret), pubky_z32);
+    }
+
+    #[test]
+    fn funded_owner_resolution_uses_stable_preset_id_after_rename_and_name_reuse() {
+        let environment_id = Uuid::new_v4();
+        let directory = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            environment_id,
+            data_dir: directory.path().into(),
+            key: Zeroizing::new([1; 32]),
+            token: Zeroizing::new("a".repeat(64)),
+            listen: "127.0.0.1:0".into(),
+        };
+        let preset_key = pubky::Keypair::random();
+        let reused_key = pubky::Keypair::random();
+        let participants = vec![
+            crate::model::OwnerRecord {
+                public: crate::model::Participant {
+                    id: Uuid::new_v5(&environment_id, b"preset:Bob"),
+                    name: "Renamed Bob".into(),
+                    public_key: preset_key.public_key().z32(),
+                },
+                secret: preset_key.secret(),
+                registered: true,
+            },
+            crate::model::OwnerRecord {
+                public: crate::model::Participant {
+                    id: Uuid::new_v4(),
+                    name: "Bob".into(),
+                    public_key: reused_key.public_key().z32(),
+                },
+                secret: reused_key.secret(),
+                registered: true,
+            },
+        ];
+        let funded = crate::request_model::FundedWallet {
+            participant: "Bob".into(),
+            wallet_id: "wallet".into(),
+            onchain_balance_sats: "1".into(),
+            lightning_balance_sats: "1".into(),
+        };
+        let resolved = resolve_funded_wallet_owner(&config, &participants, &funded).unwrap();
+        assert_eq!(
+            resolved.public.id,
+            Uuid::new_v5(&environment_id, b"preset:Bob")
+        );
+        let mut invalid = funded;
+        invalid.participant = "Renamed Bob".into();
+        assert!(resolve_funded_wallet_owner(&config, &participants, &invalid).is_err());
     }
 
     #[test]
