@@ -64,13 +64,19 @@ function validateReport(root) {
       const restored = events.findIndex(event => event.phase === 'guest' && !event.active && ['originalFile', 'absent'].includes(event.observed) && (!execution || event.uid > 0 && event.writable === true));
       assert(blocked >= 0 && restored > blocked, 'Missing confirmed guest ledger boundaries');
     }
-    const localLosses = activeHostFaults.filter(event => event.boundary === 'receiver backup local loss');
-    assert(localLosses.length > 0, 'Missing receiver backup local loss evidence');
-    for (const loss of localLosses) {
-      const started = wallets.storageFaults.indexOf(loss);
-      const restored = wallets.storageFaults.findIndex((event, index) => index > started && event.phase === 'host' && !event.active && event.boundary === loss.boundary && event.receiverId === loss.receiverId);
-      assert(restored > started, 'Receiver backup local loss was not restored');
+    const pendingLocalLosses = new Set(); let completedLocalLosses = 0;
+    for (const event of wallets.storageFaults.filter(value => value.boundary === 'receiver backup local loss')) {
+      assert.equal(event.phase, 'host', 'Receiver backup local loss must be host evidence');
+      if (event.active) {
+        assert(!pendingLocalLosses.has(event.receiverId), 'Receiver backup local losses cannot overlap');
+        pendingLocalLosses.add(event.receiverId);
+      } else {
+        assert(pendingLocalLosses.delete(event.receiverId), 'Receiver backup local loss restoration has no matching start');
+        completedLocalLosses += 1;
+      }
     }
+    assert(completedLocalLosses > 0, 'Missing receiver backup local loss evidence');
+    assert.equal(pendingLocalLosses.size, 0, 'Receiver backup local loss was not restored');
     assert.deepEqual(wallets.coreLifecycle.map(e => e.action), ['stopIntent','stopped','startIntent','started','stopIntent','stopped','startIntent','started']);
     for (let cycle = 0; cycle < 2; cycle++) {
       const events = wallets.coreLifecycle.slice(cycle * 4, cycle * 4 + 4);
