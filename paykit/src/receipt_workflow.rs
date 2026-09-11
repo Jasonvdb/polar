@@ -288,8 +288,7 @@ fn receipt_draft(
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("receipt terms missing"))?;
     anyhow::ensure!(
-        terms.recurrence.is_none()
-            && terms.amount.asset == "sat"
+        terms.amount.asset == "sat"
             && terms
                 .accepted_payment_endpoint_identifiers
                 .iter()
@@ -306,13 +305,23 @@ fn receipt_draft(
         receipt_input::text_valid(description, false),
         "invalid description"
     );
-    Ok(paykit_sdk::ReceiptDraftBuilder::new(&terms.payment_reference)?
+    let proof_record = request
+        .payment_proofs
+        .iter()
+        .find(|p| p.event_id == input.proof_id.to_string())
+        .ok_or_else(|| anyhow::anyhow!("receipt proof missing"))?;
+    super::subscription_workflow::proof_period(request, proof_record.billing_period.as_ref())?;
+    let mut builder = paykit_sdk::ReceiptDraftBuilder::new(&terms.payment_reference)?
         .with_receipt_id(paykit_lib::ReceiptId::new(id.to_string())?)
         .with_payment_request_id(paykit_lib::PaymentRequestId::new(input.request_id.to_string())?)
         .with_payment_endpoint_identifier_text(proof.method())?
         .with_amount_text(&terms.amount.value, "sat")?
-        .with_metadata(json!({"polarPaykitReceiptVersion":1,"proofId":input.proof_id.to_string(),"description":description,"note":input.note}).as_object().expect("object").clone())
-        .build()?)
+        .with_metadata(json!({"polarPaykitReceiptVersion":1,"proofId":input.proof_id.to_string(),"description":description,"note":input.note}).as_object().expect("object").clone());
+    if let Some(period) = &proof_record.billing_period {
+        builder = builder
+            .with_billing_period(crate::recurrence::BillingPeriod::from_record(period).sdk());
+    }
+    Ok(builder.build()?)
 }
 fn issuance_view(
     receiver: Uuid,
@@ -353,9 +362,18 @@ fn issuance_view(
             && access.payment_reference.as_str() == record.payment_reference
             && plaintext.payment_request_id.as_ref().map(|v| v.as_str()) == Some(request.as_str())
             && access.payment_request_id.as_ref().map(|v| v.as_str()) == Some(request.as_str())
-            && plaintext.billing_period.is_none()
-            && access.billing_period.is_none()
-            && record.billing_period.is_none()
+            && plaintext.billing_period == access.billing_period
+            && plaintext
+                .billing_period
+                .as_ref()
+                .map(|p| crate::recurrence::BillingPeriod {
+                    starts_at: p.starts_at.clone(),
+                    ends_at: p.ends_at.clone()
+                })
+                == record
+                    .billing_period
+                    .as_ref()
+                    .map(crate::recurrence::BillingPeriod::from_record)
             && plaintext
                 .payment_endpoint_identifier
                 .as_ref()
@@ -368,6 +386,10 @@ fn issuance_view(
         "invalid receipt provenance"
     );
     Ok(ReceiptIssuanceView {
+        billing_period: record
+            .billing_period
+            .as_ref()
+            .map(crate::recurrence::BillingPeriod::from_record),
         id: record.receipt_id.clone(),
         request_id: request,
         proof_id: proof,
@@ -426,6 +448,10 @@ fn access_view(record: &paykit_sdk::ReceiptAccessView) -> ReceiptAccessView {
         _ => ("failed", Some("Receipt retrieval or decryption failed. Check issuer access and local services, then retry.".into())),
     };
     ReceiptAccessView {
+        billing_period: record
+            .billing_period
+            .as_ref()
+            .map(crate::recurrence::BillingPeriod::from_record),
         receipt_id: record.receipt_id.clone(),
         peer_public_key: record.counterparty.to_string(),
         peer_receiver_path: record.counterparty_receiver_path.to_string(),
@@ -441,6 +467,10 @@ fn access_view(record: &paykit_sdk::ReceiptAccessView) -> ReceiptAccessView {
 }
 fn decrypted_view(record: &paykit_sdk::ReceiptRecord) -> DecryptedReceiptView {
     DecryptedReceiptView {
+        billing_period: record
+            .billing_period
+            .as_ref()
+            .map(crate::recurrence::BillingPeriod::from_record),
         id: record.receipt_id.clone(),
         issuer_public_key: record.issuer.to_string(),
         issuer_receiver_path: record.issuer_receiver_path.to_string(),
@@ -542,6 +572,8 @@ fn known_receipt_matches(
         .iter()
         .find(|p| Some(&p.event_id) == proof_id.as_ref())
         .ok_or_else(|| anyhow::anyhow!("known proof missing"))?;
+    super::subscription_workflow::proof_period(request, proof.billing_period.as_ref())?;
+    let billing_period = proof.billing_period.clone();
     let proof: crate::request_model::Proof = serde_json::from_value(json!(proof.proof))?;
     proof.validate()?;
     anyhow::ensure!(
@@ -555,8 +587,7 @@ fn known_receipt_matches(
                 .accepted_payment_endpoint_identifiers
                 .iter()
                 .any(|m| m == proof.method())
-            && receipt.billing_period.is_none()
-            && terms.recurrence.is_none(),
+            && receipt.billing_period == billing_period,
         "receipt contradicts known request"
     );
     Ok(())

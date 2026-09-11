@@ -11,6 +11,8 @@ pub struct EndpointBinding {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RequestView {
+    #[serde(default)]
+    pub recurrence: Option<crate::recurrence::Recurrence>,
     pub id: String,
     pub peer_public_key: String,
     pub peer_receiver_path: String,
@@ -29,6 +31,10 @@ pub struct RequestView {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExecutionView {
+    #[serde(default)]
+    pub period_index: Option<u32>,
+    #[serde(default)]
+    pub billing_period: Option<crate::recurrence::BillingPeriod>,
     pub id: String,
     pub request_id: String,
     pub wallet_id: String,
@@ -98,6 +104,10 @@ impl Proof {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProofView {
+    #[serde(default)]
+    pub period_index: Option<u32>,
+    #[serde(default)]
+    pub billing_period: Option<crate::recurrence::BillingPeriod>,
     pub id: String,
     pub request_id: String,
     pub method: String,
@@ -108,6 +118,10 @@ pub struct ProofView {
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettlementView {
+    #[serde(default)]
+    pub period_index: Option<u32>,
+    #[serde(default)]
+    pub billing_period: Option<crate::recurrence::BillingPeriod>,
     pub proof_id: String,
     pub request_id: String,
     pub status: String,

@@ -139,7 +139,15 @@ it('resets receiver drafts on selection and preserves uncertain peer-command ide
   fireEvent.change(view.getByLabelText('Receipt note'), {
     target: { value: 'First receiver receipt draft' },
   });
+  fireEvent.change(view.getByLabelText('Subscription description'), {
+    target: { value: 'Receiver one subscription' },
+  });
+  fireEvent.change(view.getByLabelText('Receiver application UTC time'), {
+    target: { value: '2099-01-01T00:00:00Z' },
+  });
   select('Receiver', 'Receiver 2 (running)');
+  expect(view.getByLabelText('Subscription description')).toHaveValue('');
+  expect(view.getByLabelText('Receiver application UTC time')).toHaveValue('');
   expect(view.getByLabelText('Receipt note')).toHaveValue('');
   expect(view.getByLabelText('Link peer public key')).toHaveValue('');
   expect(view.getByLabelText('Profile display name')).toHaveValue('');
@@ -354,4 +362,65 @@ it('retries uncertain receipt acceptance with its original ID and terminal failu
   expect(service.command.mock.calls[2][1].input).toEqual(
     service.command.mock.calls[1][1].input,
   );
+});
+
+it('retains clock command identity after uncertain acceptance and blocks actions until its operation is terminal', async () => {
+  const participantId = newPaykitId();
+  const receiverId = newPaykitId();
+  const operationId = newPaykitId();
+  const current: PaykitState = {
+    ...state,
+    participants: [{ id: participantId, name: 'Clock Bob', publicKey: 'y'.repeat(52) }],
+    receivers: [
+      {
+        id: receiverId,
+        participantId,
+        name: 'Clock wallet',
+        path: 'clock/wallet',
+        status: 'running',
+        generation: 1,
+        noisePublicKey: 'public',
+      },
+    ],
+    receiverWorkspaces: [
+      {
+        receiverId,
+        deliveryPaused: false,
+        links: [],
+        contacts: [],
+        discoveries: [],
+        profiles: [],
+        applicationClock: { mode: 'system', now: '2026-09-11T00:00:00Z' },
+      },
+    ],
+  };
+  service.state.mockResolvedValue(current);
+  service.command
+    .mockRejectedValueOnce(new Error('Paykit service is unavailable'))
+    .mockResolvedValueOnce({ operationId });
+  const view = setup();
+  await waitFor(() =>
+    expect(
+      view.getByText('Create Alice / Bob / Carol preset').closest('button'),
+    ).not.toBeDisabled(),
+  );
+  fireEvent.mouseDown(view.getByRole('combobox', { name: 'Participant' }));
+  fireEvent.click(view.getByText('Clock Bob'));
+  fireEvent.mouseDown(view.getByRole('combobox', { name: 'Receiver' }));
+  fireEvent.click(view.getByText('Clock wallet (running)'));
+  fireEvent.change(view.getByLabelText('Receiver application UTC time'), {
+    target: { value: '2099-01-01T00:00:00Z' },
+  });
+  const button = view.getByText('Set receiver application time').closest('button')!;
+  fireEvent.click(button);
+  fireEvent.click(await view.findByText('Retry command'));
+  await waitFor(() => expect(service.command).toHaveBeenCalledTimes(2));
+  expect(service.command.mock.calls[0]).toEqual(service.command.mock.calls[1]);
+  await waitFor(() => expect(view.queryByText('Retry command')).not.toBeInTheDocument());
+  expect(button).toBeDisabled();
+  service.state.mockResolvedValue({
+    ...current,
+    operations: [{ id: operationId, command: 'clock.set', status: 'succeeded' }],
+  });
+  await waitFor(() => expect(button).not.toBeDisabled(), { timeout: 2500 });
 });

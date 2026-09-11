@@ -5,6 +5,21 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const helper = require.resolve('./paykit-harness');
+function recurringEvidence() {
+  const { randomUUID } = require('node:crypto');
+  const hash = 'a'.repeat(64);
+  return {
+    version: 1,
+    rails: ['btc-onchain', 'btc-lightning-bolt11'].map(method => ({
+      requestId: randomUUID(), method, source: method === 'btc-onchain' ? 'public' : 'private', amountSats: '701', receiptId: randomUUID(), canceled: true,
+      periods: [0, 1, 2].map(index => ({ index, startsAt: `2030-01-01T00:0${index}:00Z`, endsAt: `2030-01-01T00:0${index + 1}:00Z`, executionId: randomUUID(), proofId: randomUUID(), paymentReference: String(index).repeat(64), mode: index === 1 ? 'automatic' : 'manual', verified: true })),
+      missedBefore: hash, missedAfter: hash, duplicateBefore: hash, duplicateAfter: hash,
+    })),
+    persistence: { before: hash, after: hash, clocksRetained: true, receiverIsolated: true },
+    failures: { insufficientFunds: true, expiredInvoice: true, uncertainReconciled: true, uncertainPaymentReference: hash, uncertainBefore: hash, uncertainAfter: hash },
+    clock: { blockBefore: hash, blockAfter: hash, invoiceTimestamp: 1700000000, invoiceExpiry: 600, applicationNow: '2030-01-01T00:00:00Z', invoicePaid: true, resetRejected: true },
+  };
+}
 function receiptEvidence(environmentId) {
   const { randomUUID } = require('node:crypto');
   return ['delete', 'corrupt', 'wrong-key'].flatMap(action => {
@@ -93,12 +108,13 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
   const ledger = { runId: 'current', cleanup, environments: ['a', 'b'].map(environmentId => ({ environmentId, wallets: walletEvidence(environmentId), receiptEvidence: receiptEvidence(environmentId) })) };
   fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(ledger));
   assert.throws(() => validateReport(root));
-  const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
+  const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, recurringEvidence: recurringEvidence(), participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
   const write = value => fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(value));
   write(report); assert.equal(validateReport(root).passed, true);
-  assert.equal(requiredStages.length, 60);
+  assert.equal(requiredStages.length, 70);
+  assert.equal(new Set(requiredStages).size, 70);
   write({ ...report, survivingWalletEnvironmentVerified: false }); assert.throws(() => validateReport(root));
-  for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery']) {
+  for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery', 'recurring-onchain-manual', 'recurring-lightning-autopay', 'recurring-failure-safety']) {
     write({ ...report, environments: report.environments.map(environment => ({ ...environment, stages: environment.stages.filter(stage => stage !== missing) })) });
     assert.throws(() => validateReport(root));
   }

@@ -345,3 +345,48 @@ async fn preparation_omits_dust_change_and_keeps_exact_payment_across_reopen() {
         task.abort();
     }
 }
+
+#[test]
+fn recurring_execution_identity_and_endpoint_guards_survive_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = vault(dir.path());
+    let mut state = SpendState::default();
+    let mut first = entry("owner");
+    first.view.period_index = Some(0);
+    first.view.status = "succeeded".into();
+    state.reserve(&store, first.clone()).unwrap();
+    let mut reopened = SpendState::open(&store).unwrap();
+    let mut duplicate = first.clone();
+    duplicate.view.id = Uuid::new_v4().to_string();
+    duplicate.view.endpoint = "different-endpoint".into();
+    assert!(reopened.reserve(&store, duplicate).is_err());
+    let mut next = first.clone();
+    next.view.id = Uuid::new_v4().to_string();
+    next.view.period_index = Some(1);
+    assert!(reopened.reserve(&store, next.clone()).is_err());
+    next.view.endpoint = "fresh-endpoint".into();
+    reopened.reserve(&store, next).unwrap();
+    assert_eq!(reopened.executions.len(), 2);
+    assert!(reopened
+        .existing_period(first.receiver_id, &first.view.request_id, Some(0))
+        .is_some());
+    assert!(reopened
+        .existing(first.receiver_id, &first.view.request_id)
+        .is_none());
+}
+
+#[test]
+fn settled_period_rejects_another_proof_and_original_proof_cannot_pay_another_period() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = vault(dir.path());
+    let mut state = SpendState::default();
+    state
+        .settlements
+        .insert("btc:proof-one:0".into(), "receiver:request:0".into());
+    state.save(&store).unwrap();
+    let restored = SpendState::open(&store).unwrap();
+    assert!(!restored.settlement_conflicts("btc:proof-one:0", "receiver:request:0"));
+    assert!(restored.settlement_conflicts("btc:proof-two:0", "receiver:request:0"));
+    assert!(restored.settlement_conflicts("btc:proof-one:0", "receiver:request:1"));
+    assert!(!restored.settlement_conflicts("btc:proof-two:0", "receiver:request:1"));
+}

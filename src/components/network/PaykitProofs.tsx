@@ -20,6 +20,7 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
   disabled,
   command,
 }) => {
+  const [periodIndex, setPeriodIndex] = useState('0');
   const [requestId, setRequest] = useState('');
   const [mode, setMode] = useState<'prepared' | 'manual'>('prepared');
   const [executionId, setExecution] = useState('');
@@ -32,7 +33,8 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
   const requests = workspace?.requests || [];
   const selectedRequest = requests.find(item => item.id === requestId);
   const eligibleRequest =
-    selectedRequest?.role === 'payer' && selectedRequest.lifecycle === 'accepted';
+    selectedRequest?.role === 'payer' &&
+    ['accepted', 'activeRecurring'].includes(selectedRequest.lifecycle);
   const acceptedMethods = paykitMethods.filter(item =>
     selectedRequest?.acceptedMethods.includes(item),
   );
@@ -67,6 +69,7 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
           onChange={id => {
             setRequest(id);
             setExecution('');
+            setPeriodIndex('0');
             const request = requests.find(item => item.id === id);
             setMethod(
               paykitMethods.find(item => request?.acceptedMethods.includes(item)) ||
@@ -76,7 +79,11 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
           style={{ minWidth: 320 }}
         >
           {requests
-            .filter(item => item.role === 'payer' && item.lifecycle === 'accepted')
+            .filter(
+              item =>
+                item.role === 'payer' &&
+                ['accepted', 'activeRecurring'].includes(item.lifecycle),
+            )
             .map(item => (
               <Select.Option key={item.id} value={item.id}>
                 {item.description} · {item.amountSats} sats
@@ -92,6 +99,14 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
           <Select.Option value="prepared">Prepared execution proof</Select.Option>
           <Select.Option value="manual">Enter proof manually</Select.Option>
         </Select>
+        {mode === 'manual' && selectedRequest?.recurrence && (
+          <Input
+            aria-label="Proof billing period index"
+            addonBefore="Period index"
+            value={periodIndex}
+            onChange={event => setPeriodIndex(event.target.value)}
+          />
+        )}
         {mode === 'prepared' ? (
           <Select
             aria-label="Proof execution"
@@ -110,6 +125,8 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
               .map(item => (
                 <Select.Option key={item.id} value={item.id}>
                   {item.id} · {item.method}
+                  {item.billingPeriod &&
+                    ` · Period ${item.periodIndex}: ${item.billingPeriod.startsAt} → ${item.billingPeriod.endsAt}`}
                 </Select.Option>
               ))}
           </Select>
@@ -166,7 +183,14 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
             command('proof.submit', {
               receiverId,
               requestId,
-              ...(mode === 'prepared' ? { executionId } : { proof }),
+              ...(mode === 'prepared'
+                ? { executionId }
+                : {
+                    proof,
+                    ...(selectedRequest?.recurrence
+                      ? { periodIndex: Number(periodIndex) }
+                      : {}),
+                  }),
             })
           }
         >
@@ -194,6 +218,12 @@ const PaykitProofs: React.FC<PaykitReceiverPanelProps> = ({
                     <Descriptions.Item label="Request">
                       {item.requestId}
                     </Descriptions.Item>
+                    {item.billingPeriod && (
+                      <Descriptions.Item label="Billing period">
+                        Period {item.periodIndex}: {item.billingPeriod.startsAt} →{' '}
+                        {item.billingPeriod.endsAt}
+                      </Descriptions.Item>
+                    )}
                     <Descriptions.Item label="Proof delivery">
                       <Tag>{item.deliveryStatus}</Tag>
                     </Descriptions.Item>

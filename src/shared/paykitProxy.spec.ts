@@ -709,3 +709,132 @@ it('projects exact receipt DTOs in state and operation results without SDK recor
   );
   expect(JSON.stringify(result)).not.toContain('hidden');
 });
+
+it('projects recurring state through state and operation results without nested SDK secrets', () => {
+  const hidden = {
+    session: 'hidden-secret',
+    noiseKey: 'hidden-secret',
+    receiptKey: 'hidden-secret',
+  };
+  const billingPeriod = {
+    startsAt: '2099-01-31T00:00:00Z',
+    endsAt: '2099-02-28T00:00:00Z',
+  };
+  const binding = {
+    source: 'private',
+    method: 'btc-onchain',
+    endpoint: 'bcrt1period',
+    reservationId: envId,
+  };
+  const recurrence = {
+    every: 1,
+    unit: 'month',
+    startsAt: billingPeriod.startsAt,
+    anchor: billingPeriod.startsAt,
+    endsAt: null,
+  };
+  const workspace = {
+    receiverId: envId,
+    applicationClock: { mode: 'controlled', now: billingPeriod.endsAt, ...hidden },
+    requests: [
+      {
+        id: envId,
+        recurrence: { ...recurrence, ...hidden },
+        acceptedMethods: ['btc-onchain'],
+        endpointBindings: [],
+      },
+    ],
+    subscriptions: [
+      {
+        requestId: envId,
+        currentPeriodIndex: 1,
+        ...hidden,
+        autopay: {
+          enabled: true,
+          walletId: 'wallet',
+          source: 'private',
+          method: 'btc-onchain',
+          status: 'waiting',
+          lastError: null,
+          ...hidden,
+        },
+        periods: [
+          {
+            index: 0,
+            ...billingPeriod,
+            status: 'prepared',
+            offerId: envId,
+            executionId: null,
+            proofId: null,
+            lastError: null,
+            endpointBindings: [binding, { ...binding, ...hidden }],
+            offer: hidden,
+            encryptedOffer: hidden,
+          },
+        ],
+      },
+    ],
+    executions: [
+      { id: envId, periodIndex: 0, billingPeriod: { ...billingPeriod, ...hidden } },
+    ],
+    proofs: [
+      {
+        id: envId,
+        periodIndex: 0,
+        billingPeriod: { ...billingPeriod, ...hidden },
+        proof: { method: 'btc-onchain', txid: 'a'.repeat(64), outputIndex: 0 },
+      },
+    ],
+    settlements: [{ periodIndex: 0, billingPeriod: { ...billingPeriod, ...hidden } }],
+    receiptIssuances: [{ id: envId, billingPeriod: { ...billingPeriod, ...hidden } }],
+    receiptAccess: [{ receiptId: envId, billingPeriod: { ...billingPeriod, ...hidden } }],
+    receipts: [{ id: envId, billingPeriod: { ...billingPeriod, ...hidden } }],
+  };
+  const state = publicState(
+    {
+      apiVersion: 1,
+      environmentId: envId,
+      participants: [],
+      receivers: [],
+      operations: [],
+      receiverWorkspaces: [workspace],
+    },
+    envId,
+  );
+  const operation = publicOperation({ result: { workspace } });
+  for (const projected of [state.receiverWorkspaces[0], operation.result!.workspace!]) {
+    expect(JSON.stringify(projected)).not.toContain('hidden-secret');
+    expect(projected.applicationClock).toEqual({
+      mode: 'controlled',
+      now: billingPeriod.endsAt,
+    });
+    expect(projected.requests[0].recurrence).toEqual(recurrence);
+    expect(projected.subscriptions[0].periods[0].endpointBindings).toEqual([binding]);
+    expect(projected.subscriptions[0].autopay.enabled).toBe(true);
+    for (const key of [
+      'executions',
+      'proofs',
+      'settlements',
+      'receiptIssuances',
+      'receiptAccess',
+      'receipts',
+    ] as const)
+      expect(projected[key][0].billingPeriod).toEqual(billingPeriod);
+    expect(projected.proofs[0].periodIndex).toBe(0);
+  }
+  const malformed = publicOperation({
+    result: {
+      workspace: {
+        applicationClock: { mode: 'controlled', now: hidden },
+        subscriptions: [
+          { autopay: { walletId: hidden }, periods: [{ endpointBindings: [hidden] }] },
+        ],
+        receipts: [{ billingPeriod: { startsAt: hidden, endsAt: hidden } }],
+      },
+    },
+  }).result!.workspace!;
+  expect(malformed).not.toHaveProperty('applicationClock');
+  expect(malformed.receipts[0].billingPeriod).toBeNull();
+  expect(malformed.subscriptions[0].periods[0].endpointBindings).toEqual([]);
+  expect(JSON.stringify(malformed)).not.toContain('hidden-secret');
+});

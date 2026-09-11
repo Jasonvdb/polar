@@ -9,7 +9,7 @@ use crate::{
 };
 use bitcoin::hashes::{sha256, Hash};
 use paykit_sdk::{
-    storage::StorageAdapter, OutboundPrivateMessageStatus, PaykitReceiverPath,
+    storage::StorageAdapter, Clock, OutboundPrivateMessageStatus, PaykitReceiverPath,
     PaymentAmountContext, PrivatePaymentResolutionState, PrivatePaymentResolutionStatus,
     PubkyPublicKey, PublicPaymentResolutionStatus,
 };
@@ -220,7 +220,7 @@ impl Runtime {
         );
         Ok(())
     }
-    async fn retire_public(&self, status: &str) -> anyhow::Result<()> {
+    pub(super) async fn retire_public(&self, status: &str) -> anyhow::Result<()> {
         if let Some(list) = self.payments.snapshot()?.public_list {
             if matches!(list.status.as_str(), "issuing" | "active" | "uncertain") {
                 self.payments.retire_list(&list.id, status)?;
@@ -229,14 +229,14 @@ impl Runtime {
         self.withdraw_public().await?;
         self.cleanup_retired().await
     }
-    async fn publish_current(&self) -> anyhow::Result<()> {
+    pub(super) async fn publish_current(&self) -> anyhow::Result<()> {
         let list = self
             .payments
             .snapshot()?
             .public_list
             .ok_or_else(|| anyhow::anyhow!("public list missing"))?;
         anyhow::ensure!(
-            chrono::DateTime::parse_from_rfc3339(&list.expires_at)? > chrono::Utc::now(),
+            chrono::DateTime::parse_from_rfc3339(&list.expires_at)? > self.clock.now(),
             "public list expired before publication"
         );
         let report = self.sdk.sync_public_endpoints().await;
@@ -249,7 +249,12 @@ impl Runtime {
         );
         Ok(())
     }
-    async fn queue_current(&self, key: &str, path: &str, list: &str) -> anyhow::Result<()> {
+    pub(super) async fn queue_current(
+        &self,
+        key: &str,
+        path: &str,
+        list: &str,
+    ) -> anyhow::Result<()> {
         let peer = PubkyPublicKey::new(key)?;
         let receiver_path = PaykitReceiverPath::new(path)?;
         let entries: Vec<_> = self
@@ -263,7 +268,7 @@ impl Runtime {
             !entries.is_empty()
                 && entries.iter().all(|r| r.view.status == "active"
                     && chrono::DateTime::parse_from_rfc3339(&r.view.expires_at)
-                        .is_ok_and(|t| t > chrono::Utc::now())),
+                        .is_ok_and(|t| t > self.clock.now())),
             "private list issuance incomplete"
         );
         if self
@@ -410,7 +415,7 @@ impl Runtime {
                 .iter()
                 .all(|r| r.view.list_id == entries[0].view.list_id
                     && chrono::DateTime::parse_from_rfc3339(&r.view.expires_at)
-                        .is_ok_and(|time| time > chrono::Utc::now())),
+                        .is_ok_and(|time| time > self.clock.now())),
             "private publication requires recovery"
         );
         self.reconcile_private_publication(
@@ -420,7 +425,7 @@ impl Runtime {
         )
         .await
     }
-    async fn cleanup_retired(&self) -> anyhow::Result<()> {
+    pub(super) async fn cleanup_retired(&self) -> anyhow::Result<()> {
         let records = self.payments.snapshot()?.records;
         let mut failed = false;
         for r in records
@@ -453,7 +458,7 @@ impl Runtime {
         Ok(())
     }
     pub(super) async fn payment_maintenance(&self) -> anyhow::Result<()> {
-        let now = chrono::Utc::now();
+        let now = self.clock.now();
         let expired: Vec<_> = self
             .payments
             .snapshot()?
@@ -573,7 +578,7 @@ impl Runtime {
             peer_receiver_path: i.peer_receiver_path.clone(),
             source: i.source.clone(),
             amount_sats: i.amount_sats.clone(),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: self.clock.now().to_rfc3339(),
             method: i.method,
             endpoint: None,
             version: None,
@@ -671,11 +676,13 @@ mod publication_recovery_tests {
         );
         let provider = crate::receiver::SessionProvider::without_access(vault.clone());
         let payments = WalletAdapter::open(vault.clone(), receiver, "test".into()).unwrap();
-        let sdk = PaykitSdk::new(
+        let clock = payments.clock();
+        let sdk = PaykitSdk::try_with_clock(
             storage.clone(),
             provider.clone(),
             payments.clone(),
             paykit_sdk::PaykitSdkConfig::new(PaykitReceiverPath::new("test/wallet").unwrap()),
+            clock.clone(),
         )
         .unwrap();
         Runtime::new(

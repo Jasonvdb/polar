@@ -336,3 +336,67 @@ hashes, ciphertext, raw access JSON, arbitrary metadata and raw stored errors.
 Only bounded description/note/proof metadata and supported typed amount/method
 fields are displayed. SDK receipt secrets remain solely in receiver-scoped encrypted
 `sdk.cbor`; no second secret ledger or key store is introduced.
+
+## Recurring requests and application time
+
+`request.create` accepts optional `recurrence` with positive `every` (1–1000),
+`unit` (`minute`, `hour`, `day`, `week`, `month`, `year`), `startsAt`, `anchor`,
+and nullable `endsAt`. Times use UTC second precision with `Z`; start and anchor
+must match. Dates are bounded to 2020–2100 and period indices to 0–10000.
+Every calendar boundary is calculated from the original anchor, so a January 31
+monthly schedule clamps February and returns to March 31. End dates must be
+whole-period boundaries. There is no proration or automatic backlog collection.
+
+Accept and cancel use the existing request commands. After acceptance the payee
+calls `subscription.prepare` with request ID, period index, explicit public or
+private source and endpoint expiry seconds. Existing receiving wallet and method
+configuration supplies fresh addresses or BOLT11 invoices. The receiver persists
+period claims before publishing the SDK Payment List and sends an encrypted SDK
+Payment Request containing an immutable period offer. Its parent ID, period,
+amount, exact endpoint bindings and sending identity/receiver are validated.
+These internal offers appear under subscription periods and cannot be separately
+accepted, canceled, paid or proved through generic request commands.
+
+The payer uses `payment.execute` with an explicit `periodIndex`, or opts in using
+`subscription.authorize` with the recurring request ID and exact wallet, source
+and method. The receiver background worker pays only its current period once an
+offer arrives. A persisted observed-period watermark and attempt marker prevent
+backlog collection and repeated automatic attempts after restart. Successful
+automatic execution submits its proof. `subscription.disable` stops automation
+while allowing manual payment. Missed periods require explicit manual preparation
+and payment. Cancellation disables local authorization before the SDK event is
+queued; another receiver learns cancellation through normal encrypted delivery.
+An already authorized wallet outcome remains subject to reconciliation.
+
+`proof.submit` derives the period from a referenced execution, or requires
+`periodIndex` with a supplied recurring proof. `proof.verify` and receipt commands
+retain their existing inputs. Proof, settlement, receipt issuance, access and
+plaintext receipt views expose `billingPeriod`; executions, proofs and settlements
+also expose `periodIndex`. Execution uniqueness and settlement proof ownership
+include the canonical period. Endpoints cannot be reused across executions of
+recurring payments. A settlement proof from one period cannot settle another.
+
+`clock.set` freezes one receiver's persisted SDK/application clock at a forward
+UTC instant. `clock.reset` returns to system time only once real time has caught
+up, and never rewinds time. Query `workspace.applicationClock`; related receivers
+must be advanced explicitly when exercising a scenario. SDK reservation expiry
+uses application time, while invoice creation/expiry checks and Bitcoin wallet
+RPCs continue to use real wallet time. Setting application time never mines a
+block or extends an invoice.
+
+Period preparations are immutable and cannot silently replace a lost, expired or
+uncertain endpoint. If a prepared BOLT11 invoice expires before execution, that
+period remains blocked with its original offer; create a new subscription rather
+than reusing or replacing that invoice. A missed period which has never been
+prepared can still receive fresh endpoints and be paid manually. Failed automatic
+attempts are visible and are not retried every background tick. Existing uncertain
+wallet executions block further spending until reconciled. Interrupted period
+preparations retain their claims and require state/reservation diagnostics.
+
+Receiver `subscriptions.cbor` stores period preparation intents, reservation
+claims, authorization and automatic attempt history. `clock.cbor` stores controlled
+time. Both use the existing authenticated atomic Vault. SDK request/offer/proof/
+receipt records continue to use encrypted `sdk.cbor`; signed transactions remain
+in the shared encrypted execution ledger. The workspace projects the latest 128
+periods plus recorded older periods, capped at 256; explicit older indices remain
+accepted by commands within the supported schedule bounds.

@@ -300,7 +300,8 @@ const PaykitPaymentMethods: React.FC<
         renderItem={reservation => {
           const eligible =
             reservation.status === 'active' &&
-            Date.parse(reservation.expiresAt) > Date.now();
+            Date.parse(reservation.expiresAt) >
+              Date.parse(workspace?.applicationClock?.now || new Date().toISOString());
           return (
             <List.Item>
               <div style={{ width: '100%', overflowWrap: 'anywhere' }}>
@@ -421,7 +422,10 @@ const PaykitPaymentMethods: React.FC<
                     disabled ||
                     resolution.status !== 'payable' ||
                     (!!resolution.expiresAt &&
-                      Date.parse(resolution.expiresAt) <= Date.now())
+                      Date.parse(resolution.expiresAt) <=
+                        Date.parse(
+                          workspace?.applicationClock?.now || new Date().toISOString(),
+                        ))
                   }
                   onClick={() =>
                     command('paymentList.consume', {

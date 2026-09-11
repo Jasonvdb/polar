@@ -141,6 +141,8 @@ fn open(directory: &Path, receiver: Uuid) -> Runtime {
                     proposals: Default::default(),
                     transitions: Default::default(),
                     settlements: vec![crate::request_model::SettlementView {
+                        period_index: None,
+                        billing_period: None,
                         request_id: i.request_id.to_string(),
                         proof_id: i.proof_id.to_string(),
                         status: "verified".into(),
@@ -163,11 +165,13 @@ fn open(directory: &Path, receiver: Uuid) -> Runtime {
     let payments =
         crate::wallet_adapter::WalletAdapter::open(vault.clone(), receiver, owner().to_string())
             .unwrap();
-    let sdk = paykit_sdk::PaykitSdk::new(
+    let clock = payments.clock();
+    let sdk = paykit_sdk::PaykitSdk::try_with_clock(
         storage.clone(),
         sessions.clone(),
         payments.clone(),
         paykit_sdk::PaykitSdkConfig::new(path()),
+        clock.clone(),
     )
     .unwrap();
     Runtime::new(sdk, storage, vault, receiver, owner(), sessions, payments).unwrap()
@@ -645,4 +649,32 @@ async fn payer_role_cannot_issue_a_receipt_for_its_own_proof() {
     );
     assert!(runtime.prepare_receipt(input(receiver)).await.is_err());
     assert!(runtime.sdk.issued_receipts().await.unwrap().is_empty());
+}
+
+#[test]
+fn recurring_receipt_copies_exact_proof_period_and_rejects_misalignment() {
+    let input = input(Uuid::new_v4());
+    let mut request = request(&input);
+    request.terms.as_mut().unwrap().recurrence = Some(paykit_sdk::PaymentRequestRecurrenceRecord {
+        every: 1,
+        unit: "month".into(),
+        starts_at: "2026-01-31T00:00:00Z".into(),
+        anchor: "2026-01-31T00:00:00Z".into(),
+        ends_at: None,
+    });
+    request.payment_proofs[0].billing_period = Some(paykit_sdk::BillingPeriodRecord {
+        starts_at: "2026-02-28T00:00:00Z".into(),
+        ends_at: "2026-03-31T00:00:00Z".into(),
+    });
+    let draft = receipt_draft(&request, &proof(), &input, Uuid::new_v4()).unwrap();
+    assert_eq!(
+        draft.billing_period.unwrap().ends_at,
+        "2026-03-31T00:00:00Z"
+    );
+    request.payment_proofs[0]
+        .billing_period
+        .as_mut()
+        .unwrap()
+        .ends_at = "2026-03-28T00:00:00Z".into();
+    assert!(receipt_draft(&request, &proof(), &input, Uuid::new_v4()).is_err());
 }

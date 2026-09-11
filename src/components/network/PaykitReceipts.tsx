@@ -65,6 +65,8 @@ const PaykitReceipts: React.FC<PaykitReceiverPanelProps> = ({
             <Select.Option key={proof.id} value={proof.id}>
               {request.description} · {request.amountSats} sats · {proof.method} ·{' '}
               {proof.id}
+              {proof.billingPeriod &&
+                ` · ${proof.billingPeriod.startsAt} → ${proof.billingPeriod.endsAt}`}
             </Select.Option>
           ))}
         </Select>
@@ -73,6 +75,12 @@ const PaykitReceipts: React.FC<PaykitReceiverPanelProps> = ({
             <Descriptions.Item label="Receipt request">
               {selected.request.id}
             </Descriptions.Item>
+            {selected.proof.billingPeriod && (
+              <Descriptions.Item label="Billing period">
+                {selected.proof.billingPeriod.startsAt} →{' '}
+                {selected.proof.billingPeriod.endsAt}
+              </Descriptions.Item>
+            )}
             <Descriptions.Item label="Receipt recipient">
               {selected.request.peerPublicKey} / {selected.request.peerReceiverPath}
             </Descriptions.Item>
@@ -124,6 +132,11 @@ const PaykitReceipts: React.FC<PaykitReceiverPanelProps> = ({
             <List.Item>
               <div style={{ width: '100%' }}>
                 <Descriptions size="small" column={1}>
+                  {item.billingPeriod && (
+                    <Descriptions.Item label="Billing period">
+                      {item.billingPeriod.startsAt} → {item.billingPeriod.endsAt}
+                    </Descriptions.Item>
+                  )}
                   <Descriptions.Item label="Receipt ID">{item.id}</Descriptions.Item>
                   <Descriptions.Item label="Request / proof">
                     {item.requestId} / {item.proofId}
@@ -197,6 +210,11 @@ const PaykitReceipts: React.FC<PaykitReceiverPanelProps> = ({
             <List.Item>
               <div style={{ width: '100%' }}>
                 <Descriptions size="small" column={1}>
+                  {item.billingPeriod && (
+                    <Descriptions.Item label="Billing period">
+                      {item.billingPeriod.startsAt} → {item.billingPeriod.endsAt}
+                    </Descriptions.Item>
+                  )}
                   <Descriptions.Item label="Receipt ID">
                     {item.receiptId}
                   </Descriptions.Item>
@@ -260,6 +278,11 @@ const PaykitReceipts: React.FC<PaykitReceiverPanelProps> = ({
           renderItem={item => (
             <List.Item>
               <Descriptions size="small" column={1}>
+                {item.billingPeriod && (
+                  <Descriptions.Item label="Billing period">
+                    {item.billingPeriod.startsAt} → {item.billingPeriod.endsAt}
+                  </Descriptions.Item>
+                )}
                 <Descriptions.Item label="Receipt ID">{item.id}</Descriptions.Item>
                 <Descriptions.Item label="Issuer">
                   {item.issuerPublicKey} / {item.issuerReceiverPath}
