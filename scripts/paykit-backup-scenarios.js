@@ -91,6 +91,11 @@ function assertWrongReceiverPreview(result, receiverId, transferId) {
   assert.equal(result.receiverMatches, false); assert.equal(result.restorable, false);
 }
 
+function receiverForPeer(initial, peer) {
+  return initial.receivers.find(receiver => receiver.path === peer.peerReceiverPath
+    && initial.participants.find(participant => participant.id === receiver.participantId)?.publicKey === peer.peerPublicKey);
+}
+
 async function run({ initial, state, command, stage, signal, walletFixture: fixture, base, token, requests }) {
   assert(fixture?.loseReceiverState && fixture?.pruneBackupExecutions && fixture?.markPeerUnsafe && fixture?.backupJournalProjection, 'PR8 backup fixture capabilities are required');
   const bobParticipant = initial.participants.find(value => value.name === 'Bob');
@@ -160,12 +165,16 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     assert.equal(serverAfter.noisePublicKey, serverBefore.noisePublicKey); assert.equal(serverAfter.participantId, serverBefore.participantId);
     stage('backup-invalid-archives');
 
+    await command('receiver.start', { receiverId: bob.id });
+    const unsafeRemote = receiverForPeer(initial, linkedPeer);
+    assert(unsafeRemote, 'Unsafe checkpoint peer no longer resolves to one configured receiver');
+    await requests.relinkAfterRestart(bob, unsafeRemote);
     await command('receiver.stop', { receiverId: alice.id });
     const aliceExportId = await createTransfer({ base, token, purpose: 1, receiverId: alice.id, passphrase: alicePassphrase, signal });
     await command('backup.export', { receiverId: alice.id, transferId: aliceExportId });
     aliceArchive = await downloadArchive({ base, token, transferId: aliceExportId, signal });
     const journalBeforePayments = fixture.backupJournalProjection();
-    await command('receiver.start', { receiverId: alice.id }); await command('receiver.start', { receiverId: bob.id });
+    await command('receiver.start', { receiverId: alice.id });
     const core = await requests.createPaid('btc-onchain');
     const lightning = await requests.createPaid('btc-lightning-bolt11');
     const payer = await requests.view(alice);
@@ -221,35 +230,47 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     assert.deepEqual(fixture.paymentHistory(ownerKeys), paidHistory);
     restoreJournal(); stage('backup-empty-oracle');
 
-    for (const receiver of initial.receivers) await command('receiver.start', { receiverId: receiver.id });
+    for (const receiver of initial.receivers.filter(value => value.id !== alice.id)) await command('receiver.start', { receiverId: receiver.id });
     const beforeAliceReconcile = fixture.paymentHistory(ownerKeys);
     await command('recovery.reconcile', { receiverId: alice.id });
     assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeAliceReconcile, 'Own-receiver reconciliation replayed a financial send');
     const aliceReady = recoveryView(await state(), alice.id);
     assert.equal(aliceReady.unknownAfterExportCount, 0); assert.equal(aliceReady.phase, 'ready'); assert.equal(aliceReady.automationPaused, false);
+    await command('receiver.start', { receiverId: alice.id });
     const beforeReplay = fixture.paymentHistory(ownerKeys); const journalBeforeReplay = fixture.backupJournalProjection();
     await command('payment.execute', core.executionInput); await command('payment.execute', lightning.executionInput);
     assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeReplay, 'Replayed durable execution intent sent another payment');
     assert.deepEqual(fixture.backupJournalProjection(), journalBeforeReplay, 'Replayed durable execution intent duplicated journal state');
+    await command('receiver.stop', { receiverId: bob.id });
     await command('recovery.reconcile', { receiverId: bob.id });
     restored = await state(); const recovery = recoveryView(restored, bob.id);
     assert.equal(recovery.sdkValidated, true); assert.equal(recovery.walletReconciled, true);
     assert(recovery.peersRequiringRelink.some(value => value.peerPublicKey === linkedPeer.peerPublicKey && value.peerReceiverPath === linkedPeer.peerReceiverPath));
     assert(!recovery.peersRequiringRelink.some(value => value.peerPublicKey === safePeer.peerPublicKey && value.peerReceiverPath === safePeer.peerReceiverPath));
+    await command('receiver.start', { receiverId: bob.id });
     const safeLink = (await requests.view(bob)).links.find(value => value.peerPublicKey === safePeer.peerPublicKey && value.peerReceiverPath === safePeer.peerReceiverPath);
     assert.equal(safeLink.state, 'linked');
-    await command('reservation.create', { receiverId: bob.id, peerPublicKey: safePeer.peerPublicKey, peerReceiverPath: safePeer.peerReceiverPath, amountSats: '123', expirySeconds: 600 });
-    await command('delivery.sync', { receiverId: bob.id });
-    assert.equal((await requests.view(bob)).links.find(value => value.peerPublicKey === safePeer.peerPublicKey && value.peerReceiverPath === safePeer.peerReceiverPath).state, 'linked');
+    const safeReservation = { receiverId: bob.id, peerPublicKey: safePeer.peerPublicKey, peerReceiverPath: safePeer.peerReceiverPath, amountSats: '123', expirySeconds: 600 };
+    const beforeBlockedSafePeer = fixture.paymentHistory(ownerKeys);
+    const blockedSafePeer = await command('reservation.create', safeReservation, undefined, 'failed');
+    assert.equal(blockedSafePeer.operation.error.code, 'recovery_required');
+    assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeBlockedSafePeer, 'Global recovery gate triggered a financial action');
     assert.equal(recovery.automationPaused, true); stage('backup-relink');
-    const remote = initial.receivers.find(value => value.path === linkedPeer.peerReceiverPath && initial.participants.find(p => p.id === value.participantId)?.publicKey === linkedPeer.peerPublicKey);
-    assert(remote); await requests.relinkAfterRestart(bob, remote);
+    await requests.relinkAfterRestart(bob, unsafeRemote);
+    await command('receiver.stop', { receiverId: bob.id });
     await command('recovery.reconcile', { receiverId: bob.id });
     const ready = recoveryView(await state(), bob.id);
-    assert.equal(ready.phase, 'ready'); assert.equal(ready.automationPaused, false); assert.equal(ready.unknownAfterExportCount, 0);
-    assert.deepEqual(fixture.paymentHistory(ownerKeys), paidHistory); stage('backup-ready');
+    assert.equal(ready.phase, 'ready'); assert.equal(ready.automationPaused, false); assert.equal(ready.unknownAfterExportCount, 0); assert.deepEqual(ready.peersRequiringRelink, []);
+    await command('receiver.start', { receiverId: bob.id });
+    const beforeReadySafePeer = fixture.paymentHistory(ownerKeys);
+    await command('delivery.resume', { receiverId: bob.id });
+    await command('reservation.create', safeReservation); await command('delivery.sync', { receiverId: bob.id });
+    assert.equal((await requests.view(bob)).links.find(value => value.peerPublicKey === safePeer.peerPublicKey && value.peerReceiverPath === safePeer.peerReceiverPath).state, 'linked');
+    assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeReadySafePeer, 'Ready safe-peer workflow changed outgoing wallet history');
+    assert.deepEqual(fixture.paymentHistory(ownerKeys), paidHistory);
+    assert((await state()).receivers.every(value => value.status === 'running')); stage('backup-ready');
     return { restoredReceiverId: bob.id, preservedCoreTxid: coreExecution.txid, preservedLightningHash: lightningExecution.paymentHash };
   } finally { passphrase.fill(0); alicePassphrase.fill(0); archive?.fill(0); aliceArchive?.fill(0); }
 }
 
-module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertPublicSnapshot, assertWrongReceiverPreview, MAX_ARCHIVE };
+module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertPublicSnapshot, assertWrongReceiverPreview, receiverForPeer, MAX_ARCHIVE };

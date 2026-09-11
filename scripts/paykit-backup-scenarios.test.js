@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, assertPublicSnapshot, recoveryView, assertWrongReceiverPreview, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
+const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, assertPublicSnapshot, recoveryView, assertWrongReceiverPreview, receiverForPeer, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
 
 const receiverId = '123e4567-e89b-42d3-a456-426614174000';
 const presetReceiverId = 'af9f976d-b4ff-5feb-af0e-4fad185109f1';
@@ -74,4 +74,11 @@ test('wrong receiver preview is diagnostic and never claims restorability', () =
     { receiverId, transferId, identityMatches: true, receiverMatches: true, restorable: false },
     { receiverId, transferId, identityMatches: true, receiverMatches: false, restorable: true },
   ]) assert.throws(() => assertWrongReceiverPreview(invalid, receiverId, transferId));
+});
+test('unsafe checkpoint repair and later relink resolve the exact same configured peer', () => {
+  const initial = { participants: [{ id: 'participant', publicKey: 'peer-key' }], receivers: [{ id: receiverId, participantId: 'participant', path: 'peer/wallet' }] };
+  const peer = { peerPublicKey: 'peer-key', peerReceiverPath: 'peer/wallet' };
+  assert.equal(receiverForPeer(initial, peer), initial.receivers[0]);
+  assert.equal(receiverForPeer(initial, { ...peer, peerPublicKey: 'other' }), undefined);
+  assert.equal(receiverForPeer(initial, { ...peer, peerReceiverPath: 'other/path' }), undefined);
 });
