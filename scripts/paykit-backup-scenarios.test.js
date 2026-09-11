@@ -136,3 +136,28 @@ test('exact recovery exposes stale failure and safely retries the marker before 
     ['delivery.resume', 'remote', 'succeeded'],
   ]);
 });
+test('exact recovery advances from current time when stale-marker handling is slow', async () => {
+  const local = { id: 'local', participantId: 'local-owner', path: 'local/wallet' };
+  const remote = { id: 'remote', participantId: 'remote-owner', path: 'remote/wallet' };
+  const initial = { participants: [{ id: 'local-owner', publicKey: 'local-key' }, { id: 'remote-owner', publicKey: 'remote-key' }] };
+  let wallTime = Date.parse('2026-09-11T16:00:00Z'); let prepared = 0; let repaired = false; let paused = false;
+  const clocks = [];
+  const links = receiver => [{ peerPublicKey: receiver === local ? 'remote-key' : 'local-key', peerReceiverPath: receiver === local ? remote.path : local.path,
+    state: repaired ? 'linked' : 'recoveryRequired', recoveryPreparation: { readyForHandshake: prepared === 3 } }];
+  const requests = {
+    view: async receiver => ({ deliveryPaused: receiver === remote && paused, applicationClock: { mode: 'system', now: new Date(wallTime).toISOString() } }),
+    wait: async predicate => { const snapshot = { receiverWorkspaces: [{ receiverId: local.id, links: links(local) }, { receiverId: remote.id, links: links(remote) }] }; assert(predicate(snapshot)); return snapshot; },
+  };
+  const command = async (name, input, commandId, expected = 'succeeded') => {
+    if (name === 'clock.set') clocks.push(Date.parse(input.now));
+    if (name === 'link.prepareRecovery' && expected === 'failed') return { operation: { error: { code: 'receiver_operation_failed', message: 'The peer recovery marker is stale. Pause delivery on this healthy peer, advance the application clock beyond its last link checkpoint if fixed, then retry the recovery marker on the recovering peer.' } } };
+    if (name === 'link.prepareRecovery') prepared += 1;
+    if (name === 'delivery.pause') { paused = true; wallTime += 10000; }
+    if (name === 'delivery.resume') paused = false;
+    if (name === 'link.accept') repaired = true;
+    return { operation: { result: { state: 'recoveryRequired', readyForHandshake: name === 'link.retryRecoveryMarker' ? false : prepared === 3 } } };
+  };
+  await prepareExactRecovery(command, requests, initial, local, remote, () => wallTime);
+  assert(clocks[1] > wallTime, 'Recovery clock must be recomputed after delayed stale-marker handling');
+  assert(clocks[1] > clocks[0]);
+});

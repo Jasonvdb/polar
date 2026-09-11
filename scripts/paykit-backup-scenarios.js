@@ -103,12 +103,14 @@ async function withUnsafePeerArchive(fixture, receiverId, peerPublicKey, peerRec
   finally { unsafe.restore(); }
 }
 
-async function prepareExactRecovery(command, requests, initial, restored, healthy) {
+async function prepareExactRecovery(command, requests, initial, restored, healthy, now = Date.now) {
   const owner = receiver => initial.participants.find(participant => participant.id === receiver.participantId).publicKey;
   const exact = (workspace, peer) => workspace.links.find(link => link.peerPublicKey === owner(peer) && link.peerReceiverPath === peer.path);
   const peer = (local, remote) => ({ receiverId: local.id, peerPublicKey: owner(remote), peerReceiverPath: remote.path });
   const effective = receiver => Date.parse(receiver.applicationClock?.now || '') || 0;
-  const checkpointTime = Math.ceil(Math.max(Date.now(), effective(await requests.view(healthy)), effective(await requests.view(restored))) / 1000) * 1000 + 2000;
+  const futureTime = async (...minimums) => Math.ceil(Math.max(now(), ...minimums,
+    effective(await requests.view(healthy)), effective(await requests.view(restored))) / 1000) * 1000 + 2000;
+  const checkpointTime = await futureTime();
   const utc = value => new Date(value).toISOString().replace('.000Z', 'Z');
   await command('clock.set', { receiverId: healthy.id, now: utc(checkpointTime) });
   await command('delivery.sync', { receiverId: healthy.id });
@@ -119,7 +121,7 @@ async function prepareExactRecovery(command, requests, initial, restored, health
   assert.equal(stale.operation.error.message, 'The peer recovery marker is stale. Pause delivery on this healthy peer, advance the application clock beyond its last link checkpoint if fixed, then retry the recovery marker on the recovering peer.');
   await command('delivery.pause', { receiverId: healthy.id });
   assert.equal((await requests.view(healthy)).deliveryPaused, true);
-  await command('clock.set', { receiverId: restored.id, now: utc(checkpointTime + 2000) });
+  await command('clock.set', { receiverId: restored.id, now: utc(await futureTime(checkpointTime)) });
   const retry = await command('link.retryRecoveryMarker', peer(restored, healthy));
   assert.equal(retry.operation.result.state, 'recoveryRequired');
   assert.equal(retry.operation.result.readyForHandshake, false);
