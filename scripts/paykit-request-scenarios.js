@@ -12,6 +12,26 @@ function assertPaidExecution({ op, execution }) {
     operationErrorCode: op.error?.code, executionId: execution?.id, executionStatus: execution?.status,
     executionErrorCode: errorCode })}`);
 }
+const operationDiagnostic = operation => ({ id: operation.id, command: operation.command, status: operation.status,
+  ...(operation.error ? { error: { code: operation.error.code, message: operation.error.message } } : {}) });
+const receiverDiagnostic = receiver => receiver && ({ id: receiver.id, status: receiver.status, generation: receiver.generation,
+  ...(receiver.lastError ? { lastError: receiver.lastError } : {}) });
+const linkDiagnostic = link => link && ({ state: link.state, generation: link.generation, handshakeRole: link.handshakeRole,
+  pendingMessages: link.pendingMessages, failureCount: link.failureCount, lastSyncAt: link.lastSyncAt,
+  lastReceiveAt: link.lastReceiveAt, ...(link.lastError ? { lastError: link.lastError } : {}) });
+function relinkDiagnostic(snapshot, local, remote, owner, operations) {
+  const workspace = receiver => snapshot.receiverWorkspaces.find(value => value.receiverId === receiver.id);
+  const exactLink = (receiver, peer) => workspace(receiver)?.links.find(value => value.peerPublicKey === owner(peer) && value.peerReceiverPath === peer.path);
+  return { receivers: { local: receiverDiagnostic(snapshot.receivers.find(value => value.id === local.id)), remote: receiverDiagnostic(snapshot.receivers.find(value => value.id === remote.id)) },
+    links: { local: linkDiagnostic(exactLink(local, remote)), remote: linkDiagnostic(exactLink(remote, local)) },
+    operations: operations.map(operationDiagnostic) };
+}
+async function waitForRequestState({ state, predicate, sleep, signal, diagnostic, timeoutMs = 150000, intervalMs = 300, now = Date.now }) {
+  const deadline = now() + timeoutMs; let snapshot;
+  while (now() < deadline) { snapshot = await state(); if (predicate(snapshot)) return snapshot; await sleep(intervalMs, signal); }
+  const suffix = snapshot && diagnostic ? `: ${JSON.stringify(diagnostic(snapshot))}` : '';
+  throw new Error(`Request scenario state condition timed out${suffix}`);
+}
 async function run({ initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture: fixture }) {
   assert(fixture, 'Real funded wallet fixture required');
   const participant = name => initial.participants.find(p => p.name === name);
@@ -21,7 +41,7 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   const peer = (local, remote) => ({ receiverId: local.id, peerPublicKey: owner(remote), peerReceiverPath: remote.path });
   const workspace = (s, r) => s.receiverWorkspaces.find(w => w.receiverId === r.id);
   const view = async r => workspace(await state(), r);
-  const wait = async predicate => { const deadline = Date.now() + 150000; while (Date.now() < deadline) { const s = await state(); if (predicate(s)) return s; await sleep(300, signal); } throw new Error('Request scenario state condition timed out'); };
+  const wait = (predicate, diagnostic) => waitForRequestState({ state, predicate, sleep, signal, diagnostic });
   const settleCommand = async (name, input, id = randomUUID()) => {
     const response = await request('/v1/commands', { commandId: id, command: name, input }); assert.equal(response.status, 202);
     const deadline = Date.now() + 180000;
@@ -31,8 +51,9 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   const configure = async (r, walletId, methods = [ONCHAIN, BOLT11]) => command('method.configure', { receiverId: r.id, walletId, enabledMethods: methods, preference: methods });
   const link = async (a, b) => {
     if ((await view(a)).links.some(l => l.peerPublicKey === owner(b) && l.peerReceiverPath === b.path && l.state === 'linked')) return;
-    await command('link.initiate', peer(a, b)); await command('link.accept', peer(b, a));
-    await wait(s => [a, b].every((r, i) => workspace(s, r).links.some(l => l.peerPublicKey === owner(i ? a : b) && l.peerReceiverPath === (i ? a : b).path && l.state === 'linked')));
+    const initiated = await command('link.initiate', peer(a, b)); const accepted = await command('link.accept', peer(b, a));
+    await wait(s => [a, b].every((r, i) => workspace(s, r).links.some(l => l.peerPublicKey === owner(i ? a : b) && l.peerReceiverPath === (i ? a : b).path && l.state === 'linked')),
+      s => relinkDiagnostic(s, a, b, owner, [initiated.operation, accepted.operation]));
   };
   const unlinkLocally = async (local, remote) => {
     await command('link.block', peer(local, remote));
@@ -260,4 +281,4 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
     },
   };
 }
-module.exports = { stages, run, assertPaidExecution };
+module.exports = { stages, run, assertPaidExecution, relinkDiagnostic, waitForRequestState };
