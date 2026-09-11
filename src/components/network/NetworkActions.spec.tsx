@@ -1,5 +1,5 @@
 import React from 'react';
-import { fireEvent, waitFor } from '@testing-library/react';
+import { act, fireEvent, waitFor } from '@testing-library/react';
 import { Status } from 'shared/types';
 import { initChartFromNetwork } from 'utils/chart';
 import {
@@ -143,11 +143,16 @@ describe('NetworkActions Component', () => {
 
   describe('Sync Chart button', () => {
     it('should display an error if syncing the chart fails', async () => {
-      lightningServiceMock.getInfo.mockRejectedValue(new Error('failed to get info'));
+      let rejectInfo: (error: Error) => void = () => undefined;
+      const info = new Promise<never>((_resolve, reject) => {
+        rejectInfo = reject;
+      });
+      lightningServiceMock.getInfo.mockReturnValue(info);
       const { getByLabelText, findByText } = renderComponent(Status.Started);
       fireEvent.click(getByLabelText('reload'));
+      await waitFor(() => expect(lightningServiceMock.getInfo).toBeCalledTimes(4));
+      await act(async () => rejectInfo(new Error('failed to get info')));
       expect(await findByText('failed to get info')).toBeInTheDocument();
-      expect(lightningServiceMock.getInfo).toBeCalledTimes(4);
     });
 
     it('should sync the chart from LND nodes', async () => {

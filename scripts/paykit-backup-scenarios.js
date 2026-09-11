@@ -61,8 +61,28 @@ function recoveryView(snapshot, receiverId) {
 
 function publicSnapshot(snapshot, receiverId) {
   const receivers = receiverId ? snapshot.receivers.filter(value => value.id === receiverId) : snapshot.receivers;
-  const workspaces = receiverId ? snapshot.receiverWorkspaces.filter(value => value.receiverId === receiverId) : snapshot.receiverWorkspaces;
+  const selected = receiverId ? snapshot.receiverWorkspaces.filter(value => value.receiverId === receiverId) : snapshot.receiverWorkspaces;
+  const workspaces = selected.map(workspace => ({ ...workspace,
+    ...(workspace.applicationClock?.mode === 'system' ? { applicationClock: { ...workspace.applicationClock, now: '<derived-system-time>' } } : {}),
+  }));
   return JSON.stringify({ receivers, workspaces });
+}
+
+function changedPaths(actual, expected, path = '', changes = []) {
+  if (changes.length >= 12 || Object.is(actual, expected)) return changes;
+  if (typeof actual !== typeof expected || actual === null || expected === null || typeof actual !== 'object') {
+    changes.push(path || '<root>'); return changes;
+  }
+  const keys = new Set([...Object.keys(actual), ...Object.keys(expected)]);
+  for (const key of keys) changedPaths(actual[key], expected[key], `${path}${Array.isArray(actual) ? `[${key}]` : `${path ? '.' : ''}${key}`}`, changes);
+  return changes;
+}
+
+function assertPublicSnapshot(snapshot, expected, receiverId, label) {
+  const actual = publicSnapshot(snapshot, receiverId);
+  if (actual === expected) return;
+  const paths = changedPaths(JSON.parse(actual), JSON.parse(expected));
+  throw new Error(`${label} changed public state at ${paths.join(', ') || '<unknown>'}`);
 }
 
 function assertWrongReceiverPreview(result, receiverId, transferId) {
@@ -93,39 +113,49 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     archive = await downloadArchive({ base, token, transferId: exportId, signal });
     stage('backup-export');
 
-    const histories = fixture.paymentHistory(ownerKeys);
-    for (const candidate of [
-      { receiverId: bob.id, password: randomPassphrase(), bytes: archive },
-      { receiverId: bob.id, password: passphrase, bytes: Buffer.from(archive).fill(archive[archive.length - 1] ^ 1, archive.length - 1) },
-    ]) {
-      const beforeAll = publicSnapshot(await state());
-      const beforeTarget = publicSnapshot(await state(), candidate.receiverId);
-      const transferId = await createTransfer({ base, token, purpose: 2, receiverId: candidate.receiverId, passphrase: candidate.password, archive: candidate.bytes, signal });
-      const failed = await command('backup.inspect', { receiverId: candidate.receiverId, transferId }, undefined, 'failed');
-      assert.equal(failed.operation.error.code, 'backup_invalid');
-      const after = await state(); assert.equal(publicSnapshot(after), beforeAll); assert.equal(publicSnapshot(after, candidate.receiverId), beforeTarget);
-      assert.deepEqual(fixture.paymentHistory(ownerKeys), histories);
-      if (candidate.password !== passphrase) candidate.password.fill(0);
-    }
-    const serverBefore = (await state()).receivers.find(value => value.id === server.id);
+    const receiversBeforeNegatives = (await state()).receivers;
+    const serverBefore = receiversBeforeNegatives.find(value => value.id === server.id);
     assert.equal(serverBefore.status, 'running');
-    await command('receiver.stop', { receiverId: server.id });
+    const resumeAfterNegatives = receiversBeforeNegatives.filter(value => value.status === 'running');
+    for (const receiver of resumeAfterNegatives) await command('receiver.stop', { receiverId: receiver.id });
     try {
+      const histories = fixture.paymentHistory(ownerKeys);
+      for (const candidate of [
+        { receiverId: bob.id, password: randomPassphrase(), bytes: archive },
+        { receiverId: bob.id, password: passphrase, bytes: Buffer.from(archive).fill(archive[archive.length - 1] ^ 1, archive.length - 1) },
+      ]) {
+        try {
+          const beforeAll = publicSnapshot(await state()); const beforeTarget = publicSnapshot(await state(), candidate.receiverId);
+          const transferId = await createTransfer({ base, token, purpose: 2, receiverId: candidate.receiverId, passphrase: candidate.password, archive: candidate.bytes, signal });
+          const failed = await command('backup.inspect', { receiverId: candidate.receiverId, transferId }, undefined, 'failed');
+          assert.equal(failed.operation.error.code, 'backup_invalid');
+          const after = await state(); assertPublicSnapshot(after, beforeAll, undefined, 'Invalid backup inspect'); assertPublicSnapshot(after, beforeTarget, candidate.receiverId, 'Invalid backup target inspect');
+          assert.deepEqual(fixture.paymentHistory(ownerKeys), histories);
+        } finally {
+          if (candidate.password !== passphrase) candidate.password.fill(0);
+        }
+      }
       const beforeAll = publicSnapshot(await state()); const beforeTarget = publicSnapshot(await state(), server.id);
       const beforeJournal = fixture.backupJournalProjection(); const beforeHistories = fixture.paymentHistory(ownerKeys);
       const transferId = await createTransfer({ base, token, purpose: 2, receiverId: server.id, passphrase, archive, signal });
       const inspected = await command('backup.inspect', { receiverId: server.id, transferId });
       assertWrongReceiverPreview(inspected.operation.result, server.id, transferId);
-      assert.equal(publicSnapshot(await state()), beforeAll); assert.equal(publicSnapshot(await state(), server.id), beforeTarget);
+      let after = await state(); assertPublicSnapshot(after, beforeAll, undefined, 'Wrong-receiver preview'); assertPublicSnapshot(after, beforeTarget, server.id, 'Wrong-receiver target preview');
       assert.deepEqual(fixture.backupJournalProjection(), beforeJournal); assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeHistories);
       const rejected = await command('backup.restore', { receiverId: server.id, transferId }, undefined, 'failed');
       assert.equal(rejected.operation.error.code, 'backup_invalid');
-      assert.equal(publicSnapshot(await state()), beforeAll); assert.equal(publicSnapshot(await state(), server.id), beforeTarget);
+      after = await state(); assertPublicSnapshot(after, beforeAll, undefined, 'Wrong-receiver restore rejection'); assertPublicSnapshot(after, beforeTarget, server.id, 'Wrong-receiver target restore rejection');
       assert.deepEqual(fixture.backupJournalProjection(), beforeJournal); assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeHistories);
     } finally {
-      await command('receiver.start', { receiverId: server.id });
+      for (const receiver of resumeAfterNegatives) await command('receiver.start', { receiverId: receiver.id });
     }
-    const serverAfter = (await state()).receivers.find(value => value.id === server.id);
+    const receiversAfterNegatives = (await state()).receivers;
+    for (const before of receiversBeforeNegatives) {
+      const after = receiversAfterNegatives.find(value => value.id === before.id);
+      assert.equal(after.status, before.status); assert.equal(after.path, before.path);
+      assert.equal(after.noisePublicKey, before.noisePublicKey); assert.equal(after.participantId, before.participantId);
+    }
+    const serverAfter = receiversAfterNegatives.find(value => value.id === server.id);
     assert.equal(serverAfter.status, 'running'); assert.equal(serverAfter.path, serverBefore.path);
     assert.equal(serverAfter.noisePublicKey, serverBefore.noisePublicKey); assert.equal(serverAfter.participantId, serverBefore.participantId);
     stage('backup-invalid-archives');
@@ -222,4 +252,4 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
   } finally { passphrase.fill(0); alicePassphrase.fill(0); archive?.fill(0); aliceArchive?.fill(0); }
 }
 
-module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertWrongReceiverPreview, MAX_ARCHIVE };
+module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertPublicSnapshot, assertWrongReceiverPreview, MAX_ARCHIVE };

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, recoveryView, assertWrongReceiverPreview, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
+const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, assertPublicSnapshot, recoveryView, assertWrongReceiverPreview, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
 
 const receiverId = '123e4567-e89b-42d3-a456-426614174000';
 const presetReceiverId = 'af9f976d-b4ff-5feb-af0e-4fad185109f1';
@@ -53,6 +53,17 @@ test('public state oracle selects only the receiver and its recovery view', () =
   assert.equal(recoveryView(snapshot, receiverId).phase, 'ready');
   assert.deepEqual(JSON.parse(publicSnapshot(snapshot, receiverId)), { receivers: [snapshot.receivers[0]], workspaces: [snapshot.receiverWorkspaces[0]] });
   assert.equal(JSON.parse(publicSnapshot(snapshot)).receivers.length, 2);
+});
+test('public state oracle normalizes only derived system time and reports changed record paths', () => {
+  const before = { receivers: [{ id: receiverId, status: 'stopped' }], receiverWorkspaces: [{ receiverId, applicationClock: { mode: 'system', now: '2026-09-11T16:00:00Z' }, requests: [{ id: 'request', lifecycle: 'accepted' }] }] };
+  const expected = publicSnapshot(before);
+  const later = structuredClone(before); later.receiverWorkspaces[0].applicationClock.now = '2026-09-11T16:01:00Z';
+  assert.doesNotThrow(() => assertPublicSnapshot(later, expected, undefined, 'Clock-only query'));
+  later.receiverWorkspaces[0].requests[0].lifecycle = 'proofSubmitted';
+  assert.throws(() => assertPublicSnapshot(later, expected, undefined, 'Mutation'), error => {
+    assert.equal(error.message, 'Mutation changed public state at workspaces[0].requests[0].lifecycle');
+    assert(!error.message.includes('proofSubmitted') && !error.message.includes('accepted')); return true;
+  });
 });
 test('wrong receiver preview is diagnostic and never claims restorability', () => {
   const transferId = '123e4567-e89b-42d3-a456-426614174001';
