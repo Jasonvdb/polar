@@ -4,6 +4,14 @@ const { randomUUID, createHash } = require('crypto');
 const { sleep } = require('./paykit-harness');
 const ONCHAIN = 'btc-onchain'; const BOLT11 = 'btc-lightning-bolt11';
 const stages = ['funded-preset', 'request-lifecycle', 'onchain-execution', 'onchain-settlement', 'lightning-execution', 'lightning-settlement', 'invalid-payment-proofs', 'execution-idempotence', 'payment-failures', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery', 'request-receiver-isolation'];
+function assertPaidExecution({ op, execution }) {
+  if (execution?.status === 'succeeded') return;
+  const errorCode = execution?.lastError === 'Insufficient confirmed funds including transaction fee.'
+    ? 'insufficient_confirmed_funds' : undefined;
+  assert.fail(`Receipt payment setup failed: ${JSON.stringify({ operationId: op.id, operationStatus: op.status,
+    operationErrorCode: op.error?.code, executionId: execution?.id, executionStatus: execution?.status,
+    executionErrorCode: errorCode })}`);
+}
 async function run({ initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture: fixture }) {
   assert(fixture, 'Real funded wallet fixture required');
   const participant = name => initial.participants.find(p => p.name === name);
@@ -230,12 +238,15 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
     invalid: { requestId: wrongId, proof: workspace(await state(), bob).proofs.find(p => p.requestId === wrongId) },
     unpaidRequestId: blockedId,
     createPaid: async (method, amountSats = '5000') => {
+      // The preceding lost-response payment leaves Alice's change unconfirmed.
+      // Confirm that input before creating the new, still-unconfirmed test payment.
+      if (method === ONCHAIN) await mine(1);
       const requestId = await accepted(bob, alice, amountSats, method);
       const result = await execute(requestId, alice, fixture.walletIds.alice, method);
-      assert.equal(result.execution.status, 'succeeded');
+      assertPaidExecution(result);
       const proof = await submit(requestId, result.execution);
       return { requestId, proof, method };
     },
   };
 }
-module.exports = { stages, run };
+module.exports = { stages, run, assertPaidExecution };

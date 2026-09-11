@@ -8,3 +8,14 @@ test('receipt comparison rejects changed amount, proof, identity and secret-bear
   for (const field of ['amountSats', 'proofId', 'recipientPublicKey']) assert.throws(() => assertReceipt({ ...receipt, [field]: 'different' }, issuance, 'alice'));
   for (const field of ['key', 'accessKey', 'location', 'metadata', 'encryptedReceipt']) assert.throws(() => assertReceipt({ ...receipt, [field]: 'private' }, issuance, 'alice'));
 });
+
+test('payment setup failure retains identifiers and codes without raw wallet or SDK data', () => {
+  const { assertPaidExecution } = require('./paykit-request-scenarios');
+  const result = { op: { id: 'operation-id', status: 'succeeded', error: { code: 'public_code', message: 'secret-error' }, result: { signedTransaction: 'secret-transaction' } }, execution: { id: 'execution-id', status: 'failed', lastError: 'Insufficient confirmed funds including transaction fee.', preimage: 'secret-preimage' } };
+  assert.throws(() => assertPaidExecution(result), error => {
+    assert.match(error.message, /operation-id/); assert.match(error.message, /execution-id/);
+    assert.match(error.message, /insufficient_confirmed_funds/); assert.match(error.message, /public_code/);
+    assert(!error.message.includes('secret-')); return true;
+  });
+  assert.doesNotThrow(() => assertPaidExecution({ ...result, execution: { status: 'succeeded' } }));
+});
