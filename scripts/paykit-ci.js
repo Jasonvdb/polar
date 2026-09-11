@@ -9,8 +9,9 @@ const { execFileSync, spawnSync } = require('child_process');
 const { run } = require('./paykit-scenarios');
 const { createWalletFixture } = require('./paykit-wallet-fixture');
 const { createReceiptFixture, validateReceiptEvidence } = require('./paykit-receipt-fixture');
+const { createBackupFixture } = require('./paykit-backup-fixture');
 const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
-const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, ...require('./paykit-recurring-scenarios').stages, 'complete'];
+const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-backup-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, ...require('./paykit-recurring-scenarios').stages, 'complete'];
 
 function validateReport(root) {
   const report = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));
@@ -206,6 +207,12 @@ function start() {
       '-e', `PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS=${PRIVATE_RECEIVER_DIAGNOSTIC_NAME}`,
       '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', '-e', 'PAYKIT_WALLET_CONFIG_FILE=/run/paykit/wallet-config.json', image).trim();
     entry.service = service; recordContainer(service);
+    const backupFixture = createBackupFixture({ data, secrets, environmentId, runId, uid, docker, recordContainer,
+      serviceContainer: service, image: process.env.PAYKIT_BACKUP_FIXTURE_IMAGE,
+      recordEvidence: evidence => { entry.backupEvidence = evidence; record(); } });
+    walletFixture.pruneBackupExecutions = backupFixture.pruneExecutions;
+    walletFixture.markPeerUnsafe = backupFixture.markPeerUnsafe;
+    walletFixture.backupJournalProjection = backupFixture.journalProjection;
     const receiptFixture = createReceiptFixture({ data, secrets, environmentId, runId, uid, docker,
       recordContainer, serviceContainer: service, image: process.env.PAYKIT_RECEIPT_FIXTURE_IMAGE,
       recordEvidence: evidence => { entry.receiptEvidence = evidence; record(); } });

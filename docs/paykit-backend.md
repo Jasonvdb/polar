@@ -26,6 +26,16 @@ Electron provisions credentials outside network/export directories. No renderer-
 
 The service creates the database connection string internally for the embedded testnet and removes it before spawning receivers. API tokens, grants, owner keys, Noise keys and decrypted SDK snapshots are never public DTOs or log messages. The local testnet deliberately uses open signup and its documented deterministic test homeserver identity. It must stay in the isolated Docker environment.
 
+Receiver backup/recovery scenarios require the separately built non-shipping fixture in addition to the production service and receipt fixture:
+
+```sh
+docker build --target backup-fixture -t polar-paykit/backup-fixture:local -f paykit/Dockerfile paykit
+PAYKIT_BACKUP_FIXTURE_IMAGE=polar-paykit/backup-fixture:local \
+PAYKIT_RECEIPT_FIXTURE_IMAGE=polar-paykit/receipt-fixture:local node scripts/paykit-ci.js
+```
+
+The backup fixture is limited to the disposable runner's owned data root. It can remove exactly one named receiver's two test-created post-export execution records (one Core txid and one Lightning payment hash), or mark one existing linked checkpoint unsafe. The runner keeps exact rollback copies, rejects symlinks and foreign containers, and stops receiver children while changing the encrypted journal. Passwords and archive bytes remain in bounded in-memory HTTP bodies and never enter CLI arguments, environment variables, logs, or reports.
+
 ## Commands, queries and events
 
 `GET /health` returns `{apiVersion:1,ready}` with 200 or 503. Readiness covers startup/reconciliation and durable application storage; it is not a continuous PostgreSQL probe. Later service outages surface through failed backend operations and receiver errors. All `/v1/*` routes require `Authorization: Bearer TOKEN`.

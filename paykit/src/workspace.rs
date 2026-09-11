@@ -47,6 +47,27 @@ pub struct Runtime {
     sessions: crate::receiver::SessionProvider,
     payments: crate::wallet_adapter::WalletAdapter,
 }
+
+pub(crate) fn with_recovery_gate(
+    value: ciborium::Value,
+    recovery: crate::model::Recovery,
+) -> anyhow::Result<ciborium::Value> {
+    let mut encoded = Vec::new();
+    ciborium::into_writer(&value, &mut encoded)?;
+    let mut state: LocalState = ciborium::from_reader(encoded.as_slice())?;
+    state.view.delivery_paused = true;
+    state.view.recovery = Some(recovery);
+    Ok(ciborium::Value::serialized(&state)?)
+}
+
+pub(crate) fn save_recovery(vault: &Vault, recovery: crate::model::Recovery) -> anyhow::Result<()> {
+    let mut state: LocalState = vault
+        .load("workspace.cbor")?
+        .ok_or_else(|| anyhow::anyhow!("receiver workspace missing"))?;
+    state.view.delivery_paused = recovery.automation_paused;
+    state.view.recovery = Some(recovery);
+    vault.save("workspace.cbor", &state)
+}
 impl Runtime {
     pub(crate) fn new(
         sdk: Sdk,
@@ -151,6 +172,17 @@ impl Runtime {
     }
     async fn dispatch(&mut self, command: &Command) -> anyhow::Result<Value> {
         let name = command.command.as_str();
+        if self.state.view.recovery.is_some()
+            && !self.recovery_allows_automation()
+            && !name.starts_with("link.")
+            && name != "delivery.pause"
+        {
+            return Err(PublicError::new(
+                "recovery_required",
+                "Finish receiver recovery before changing receiver or payment state.",
+            )
+            .into());
+        }
         if crate::subscription_input::is_command(name) {
             return self.subscription_command(command).await;
         }
@@ -199,6 +231,7 @@ impl Runtime {
                     .await?;
                     self.sdk.initiate_link_with_peer(key, path).await?;
                     self.state.uncertain_peers.retain(|p| p != &peer);
+                    self.complete_recovery_peer(&peer);
                 }
                 "link.accept" => {
                     self.prepare_explicit_relink(
@@ -209,6 +242,7 @@ impl Runtime {
                     .await?;
                     self.sdk.accept_link_with_peer(key, path).await?;
                     self.state.uncertain_peers.retain(|p| p != &peer);
+                    self.complete_recovery_peer(&peer);
                 }
                 "link.advance" => {
                     self.sdk.advance_link_handshake(key, path).await?;
@@ -235,7 +269,16 @@ impl Runtime {
         } else {
             match name {
                 "delivery.pause" => self.state.view.delivery_paused = true,
-                "delivery.resume" => self.state.view.delivery_paused = false,
+                "delivery.resume" => {
+                    if !self.recovery_allows_automation() {
+                        return Err(PublicError::new(
+                            "recovery_required",
+                            "Finish receiver recovery before resuming private delivery.",
+                        )
+                        .into());
+                    }
+                    self.state.view.delivery_paused = false;
+                }
                 "delivery.sync" => {
                     if self.state.view.delivery_paused {
                         return Err(PublicError::new(
@@ -352,6 +395,34 @@ impl Runtime {
             }
         }
         Ok(json!({"receiverId":self.state.view.receiver_id}))
+    }
+
+    pub(super) fn recovery_allows_automation(&self) -> bool {
+        self.state.view.recovery.as_ref().is_none_or(|recovery| {
+            recovery.sdk_validated
+                && recovery.wallet_reconciled
+                && recovery.grant_valid
+                && recovery.marker_valid
+                && matches!(recovery.phase, crate::model::RecoveryPhase::Ready)
+        })
+    }
+
+    fn complete_recovery_peer(&mut self, peer: &(String, String)) {
+        let Some(recovery) = self.state.view.recovery.as_mut() else {
+            return;
+        };
+        recovery
+            .peers_requiring_relink
+            .retain(|value| value.peer_public_key != peer.0 || value.peer_receiver_path != peer.1);
+        if recovery.peers_requiring_relink.is_empty() {
+            recovery.blocked_reasons.retain(|reason| {
+                *reason != crate::model::RecoveryBlockedReason::PeerRelinkRequired
+            });
+            if recovery.wallet_reconciled && recovery.sdk_validated {
+                recovery.phase = crate::model::RecoveryPhase::Ready;
+                recovery.automation_paused = false;
+            }
+        }
     }
     /// Clear abandoned responder slots before removing the block, so an initiator
     /// cannot consume a previous handshake while a human is deciding to accept.
@@ -1125,6 +1196,49 @@ mod tests {
         let mut view = serde_json::to_value(Workspace::default()).unwrap();
         view["noiseSecret"] = "must-not-cross".into();
         assert!(serde_json::from_value::<Workspace>(view).is_err());
+    }
+
+    #[test]
+    fn recovery_gate_survives_receiver_service_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver_id = Uuid::new_v4();
+        let vault = Vault::new(dir.path().into(), [7; 32], receiver_id.to_string()).unwrap();
+        vault
+            .save(
+                "workspace.cbor",
+                &LocalState {
+                    view: Workspace {
+                        receiver_id,
+                        ..Workspace::default()
+                    },
+                    intents: BTreeMap::new(),
+                    uncertain_peers: vec![],
+                    owned_avatars: vec![],
+                },
+            )
+            .unwrap();
+        let recovery = crate::model::Recovery {
+            phase: crate::model::RecoveryPhase::WalletReconciliationRequired,
+            automation_paused: true,
+            sdk_validated: true,
+            wallet_reconciled: false,
+            identity_fingerprint: "identity".into(),
+            receiver_fingerprint: "receiver".into(),
+            grant_valid: true,
+            marker_valid: true,
+            terminal_execution_count: 2,
+            uncertain_execution_count: 1,
+            unknown_after_export_count: 0,
+            peers_requiring_relink: vec![],
+            unresolved_execution_ids: vec!["execution".into()],
+            blocked_reasons: vec![crate::model::RecoveryBlockedReason::WalletUncertain],
+            restored_at: Some("2026-09-11T00:00:00Z".into()),
+            last_error: None,
+        };
+        save_recovery(&vault, recovery.clone()).unwrap();
+        let reopened: LocalState = vault.load("workspace.cbor").unwrap().unwrap();
+        assert!(reopened.view.delivery_paused);
+        assert!(reopened.view.recovery == Some(recovery));
     }
 }
 

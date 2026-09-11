@@ -4,6 +4,8 @@ use uuid::Uuid;
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<crate::model::Recovery>,
     #[serde(default)]
     pub application_clock: Option<crate::clock::ClockView>,
     #[serde(default)]

@@ -39,6 +39,10 @@ impl SpendState {
         Ok(vault.load(FILE)?.unwrap_or_default())
     }
     pub fn save(&self, vault: &Vault) -> anyhow::Result<()> {
+        let _lock = vault.lock("recovery.lock")?;
+        self.save_under_lock(vault)
+    }
+    pub(crate) fn save_under_lock(&self, vault: &Vault) -> anyhow::Result<()> {
         vault.save(FILE, self)
     }
     pub fn index(&self, id: &str) -> anyhow::Result<usize> {
@@ -105,6 +109,99 @@ impl SpendState {
             .map(|e| e.view.clone())
             .collect()
     }
+}
+
+pub(crate) struct MergeReport {
+    pub imported: usize,
+    pub retained_live: usize,
+    pub terminal: usize,
+    pub uncertain: usize,
+}
+
+pub(crate) fn merge_backup(
+    live: &SpendState,
+    archived_executions: Vec<Execution>,
+    archived_settlements: BTreeMap<String, String>,
+) -> anyhow::Result<(SpendState, MergeReport)> {
+    let mut merged = live.clone();
+    let retained_live = live.executions.len();
+    let mut imported = 0;
+    for archived in archived_executions {
+        let collisions = merged
+            .executions
+            .iter()
+            .filter(|current| execution_keys_collide(current, &archived))
+            .collect::<Vec<_>>();
+        if collisions.is_empty() {
+            merged.executions.push(archived);
+            imported += 1;
+            continue;
+        }
+        anyhow::ensure!(
+            collisions.len() == 1 && immutable_execution_matches(collisions[0], &archived),
+            "wallet execution conflict"
+        );
+    }
+    for (proof, binding) in archived_settlements {
+        anyhow::ensure!(
+            !merged.settlement_conflicts(&proof, &binding),
+            "wallet settlement conflict"
+        );
+        merged.settlements.entry(proof).or_insert(binding);
+    }
+    let terminal = merged
+        .executions
+        .iter()
+        .filter(|value| matches!(value.view.status.as_str(), "succeeded" | "failed"))
+        .count();
+    let report = MergeReport {
+        imported,
+        retained_live,
+        terminal,
+        uncertain: merged.executions.len() - terminal,
+    };
+    Ok((merged, report))
+}
+
+fn execution_keys_collide(current: &Execution, archived: &Execution) -> bool {
+    current.view.id == archived.view.id
+        || (current.receiver_id == archived.receiver_id
+            && current.view.request_id == archived.view.request_id
+            && current.view.period_index == archived.view.period_index)
+        || (archived.view.period_index.is_some() && current.view.endpoint == archived.view.endpoint)
+        || option_key_collides(&current.view.txid, &archived.view.txid)
+        || option_key_collides(&current.view.payment_hash, &archived.view.payment_hash)
+        || current
+            .inputs
+            .iter()
+            .any(|input| archived.inputs.contains(input))
+}
+
+fn option_key_collides(left: &Option<String>, right: &Option<String>) -> bool {
+    left.as_ref()
+        .zip(right.as_ref())
+        .is_some_and(|(left, right)| left == right)
+}
+
+fn immutable_execution_matches(current: &Execution, archived: &Execution) -> bool {
+    current.receiver_id == archived.receiver_id
+        && current.view.id == archived.view.id
+        && current.view.request_id == archived.view.request_id
+        && current.view.period_index == archived.view.period_index
+        && current.view.wallet_id == archived.view.wallet_id
+        && current.view.method == archived.view.method
+        && current.view.endpoint == archived.view.endpoint
+        && current.view.amount_sats == archived.view.amount_sats
+        && current.view.status == archived.view.status
+        && current.view.txid == archived.view.txid
+        && current.view.output_index == archived.view.output_index
+        && current.view.payment_hash == archived.view.payment_hash
+        && current.unsigned == archived.unsigned
+        && current.signed == archived.signed
+        && current.inputs == archived.inputs
+        && current.outputs == archived.outputs
+        && current.authorized == archived.authorized
+        && current.proof == archived.proof
 }
 fn same_wallet(a: &Execution, b: &Execution) -> bool {
     a.owner == b.owner

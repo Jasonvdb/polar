@@ -336,6 +336,123 @@ impl Supervisor {
                 self.preset().await?;
                 crate::funding::fund(&self.config, &self.repository).await
             }
+            "backup.export" => {
+                let input: commands::BackupTransfer = decode(command)?;
+                let transfer_id: Uuid = input.transfer_id.parse()?;
+                anyhow::ensure!(
+                    !self.children.contains_key(&input.receiver_id),
+                    "receiver is running"
+                );
+                let bearer = self.config.token.trim();
+                let passphrase = self.repository.transfers.claim_export(
+                    transfer_id,
+                    input.receiver_id,
+                    bearer,
+                )?;
+                let archive = crate::backup::export_receiver(
+                    &self.config,
+                    &self.repository.snapshot()?,
+                    input.receiver_id,
+                    &passphrase,
+                )
+                .await?;
+                let byte_length = archive.len();
+                let sha256 = {
+                    use bitcoin::hashes::{sha256, Hash};
+                    sha256::Hash::hash(&archive).to_string()
+                };
+                self.repository.transfers.finish_export(
+                    transfer_id,
+                    input.receiver_id,
+                    bearer,
+                    archive.to_vec(),
+                )?;
+                Ok(
+                    json!({"receiverId":input.receiver_id,"transferId":transfer_id,"archiveVersion":1,"byteLength":byte_length,"sha256":sha256,"createdAt":chrono::Utc::now()}),
+                )
+            }
+            "backup.inspect" => {
+                let input: commands::BackupTransfer = decode(command)?;
+                let transfer_id: Uuid = input.transfer_id.parse()?;
+                anyhow::ensure!(
+                    !self.children.contains_key(&input.receiver_id),
+                    "receiver is running"
+                );
+                let claim = self.repository.transfers.inspect(
+                    transfer_id,
+                    input.receiver_id,
+                    self.config.token.trim(),
+                )?;
+                crate::backup::inspect_receiver(
+                    &self.config,
+                    &self.repository.snapshot()?,
+                    input.receiver_id,
+                    transfer_id,
+                    &claim.archive,
+                    &claim.passphrase,
+                )
+                .await
+                .map_err(Into::into)
+            }
+            "backup.restore" => {
+                let input: commands::BackupTransfer = decode(command)?;
+                let transfer_id: Uuid = input.transfer_id.parse()?;
+                anyhow::ensure!(
+                    !self.children.contains_key(&input.receiver_id),
+                    "receiver is running"
+                );
+                let claim = self.repository.transfers.claim_restore(
+                    transfer_id,
+                    input.receiver_id,
+                    self.config.token.trim(),
+                )?;
+                let recovery = crate::backup::restore_receiver(
+                    &self.config,
+                    &self.repository.snapshot()?,
+                    input.receiver_id,
+                    &claim.archive,
+                    &claim.passphrase,
+                )
+                .await?;
+                self.repository.update(|state| {
+                    let workspace = state
+                        .receiver_workspaces
+                        .iter_mut()
+                        .find(|value| value.receiver_id == input.receiver_id);
+                    if let Some(workspace) = workspace {
+                        workspace.delivery_paused = recovery.automation_paused;
+                        workspace.recovery = Some(recovery.clone());
+                    }
+                    Ok(())
+                })?;
+                Ok(
+                    json!({"receiverId":input.receiver_id,"transferId":transfer_id,"archiveVersion":1,"restoredAt":recovery.restored_at,"blockedReasons":recovery.blocked_reasons}),
+                )
+            }
+            "recovery.reconcile" => {
+                let input: commands::ReceiverId = decode(command)?;
+                anyhow::ensure!(
+                    !self.children.contains_key(&input.receiver_id),
+                    "receiver is running"
+                );
+                let snapshot = self.repository.snapshot()?;
+                let recovery =
+                    crate::backup::reconcile_receiver(&self.config, &snapshot, input.receiver_id)
+                        .await?;
+                self.repository.update(|state| {
+                    let workspace = state
+                        .receiver_workspaces
+                        .iter_mut()
+                        .find(|value| value.receiver_id == input.receiver_id)
+                        .ok_or_else(|| anyhow::anyhow!("receiver workspace missing"))?;
+                    workspace.delivery_paused = recovery.automation_paused;
+                    workspace.recovery = Some(recovery.clone());
+                    Ok(())
+                })?;
+                Ok(
+                    json!({"receiverId":input.receiver_id,"status":if recovery.automation_paused{"blocked"}else{"ready"},"blockedReasons":recovery.blocked_reasons}),
+                )
+            }
             value if commands::workspace_command(value) => self.receiver_command(command).await,
             _ => anyhow::bail!("unsupported command"),
         }

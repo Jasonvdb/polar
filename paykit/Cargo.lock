@@ -3302,6 +3302,7 @@ name = "polar-paykit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2",
  "async-stream",
  "async-trait",
  "axum",

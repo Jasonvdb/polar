@@ -92,6 +92,10 @@ export const paykitCommands = [
   'receipt.prepare',
   'receipt.process',
   'receipt.retrieve',
+  'backup.export',
+  'backup.inspect',
+  'backup.restore',
+  'recovery.reconcile',
 ] as const;
 export type PaykitCommand = (typeof paykitCommands)[number];
 export interface PaykitCommandRequest {
@@ -106,6 +110,20 @@ export type PaykitRequest = {
   | { action: 'operation'; operationId: string }
   | { action: 'command'; request: PaykitCommandRequest }
 );
+export type PaykitTransferRequest =
+  | {
+      networkId: number;
+      action: 'prepareExport' | 'prepareRestore';
+      receiverId: string;
+      passphrase: string;
+    }
+  | { networkId: number; action: 'downloadExport'; transferId: string }
+  | { networkId: number; action: 'cancel'; transferId: string };
+export interface PaykitTransfer {
+  transferId: string;
+  purpose: 'export' | 'restore';
+  expiresAt: string;
+}
 export const isUuid = (value: unknown): value is string =>
   typeof value === 'string' &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -457,6 +475,25 @@ export interface PaykitFunding {
   lastError: string | null;
 }
 export interface PaykitOperationResult {
+  transferId?: string;
+  archiveVersion?: number;
+  createdAt?: string;
+  byteLength?: number;
+  sha256?: string;
+  identityFingerprint?: string;
+  receiverFingerprint?: string;
+  identityMatches?: boolean;
+  receiverMatches?: boolean;
+  grantValid?: boolean;
+  markerValid?: boolean;
+  sdkValidationPending?: boolean;
+  safeCheckpointCount?: number;
+  unsafeCheckpointCount?: number;
+  restorable?: boolean;
+  sdkCounts?: Record<string, number>;
+  peersRequiringRelink?: PaykitRecoveryPeer[];
+  wallet?: PaykitRecoveryWallet;
+  blockedReasons?: PaykitRecoveryBlockedReason[];
   receiptId?: string;
   participantId?: string;
   receiverId?: string;
@@ -474,6 +511,7 @@ export interface PaykitOperationResult {
   resolution?: PaykitResolution;
 }
 export interface PaykitReceiverWorkspace {
+  recovery?: PaykitRecovery | null;
   applicationClock?: { mode: 'system' | 'controlled'; now: string };
   subscriptions?: PaykitSubscription[];
   receiverId: string;
@@ -496,6 +534,49 @@ export interface PaykitReceiverWorkspace {
   receipts?: PaykitDecryptedReceipt[];
   lastError?: string;
   updatedAt?: string;
+}
+export type PaykitRecoveryBlockedReason =
+  | 'sdk_validation'
+  | 'grant_invalid'
+  | 'marker_invalid'
+  | 'wallet_uncertain'
+  | 'wallet_history_unknown'
+  | 'peer_relink_required'
+  | 'activation_incomplete';
+export interface PaykitRecoveryPeer {
+  peerPublicKey: string;
+  peerReceiverPath: string;
+}
+export interface PaykitRecoveryWallet {
+  imported: number;
+  retainedLive: number;
+  terminal: number;
+  uncertain: number;
+  unknownAfterExport: number;
+}
+export interface PaykitRecovery {
+  phase:
+    | 'inspectable'
+    | 'activating'
+    | 'walletReconciliationRequired'
+    | 'relinkRequired'
+    | 'ready'
+    | 'failed';
+  automationPaused: boolean;
+  sdkValidated: boolean;
+  walletReconciled: boolean;
+  identityFingerprint: string;
+  receiverFingerprint: string;
+  grantValid: boolean;
+  markerValid: boolean;
+  terminalExecutionCount: number;
+  uncertainExecutionCount: number;
+  unknownAfterExportCount: number;
+  peersRequiringRelink: PaykitRecoveryPeer[];
+  unresolvedExecutionIds: string[];
+  blockedReasons: PaykitRecoveryBlockedReason[];
+  restoredAt?: string;
+  lastError?: string;
 }
 const peerFields = ['receiverId', 'peerPublicKey', 'peerReceiverPath'];
 export const paykitCommandFields: Record<PaykitCommand, string[]> = {
@@ -571,6 +652,10 @@ export const paykitCommandFields: Record<PaykitCommand, string[]> = {
   'receipt.prepare': ['receiverId', 'requestId', 'proofId', 'note'],
   'receipt.process': ['receiverId', 'receiptId'],
   'receipt.retrieve': [...peerFields, 'receiptId'],
+  'backup.export': ['receiverId', 'transferId'],
+  'backup.inspect': ['receiverId', 'transferId'],
+  'backup.restore': ['receiverId', 'transferId'],
+  'recovery.reconcile': ['receiverId'],
 };
 export const isPaykitPublicKey = (value: string) =>
   /^[ybndrfg8ejkmcpqxot1uwisza345h769]{51}[yo]$/.test(value);
@@ -720,6 +805,16 @@ export const validatePaykitCommand = (request: PaykitCommandRequest) => {
     }
     if (field === 'proof') {
       validatePaykitProof(value);
+      continue;
+    }
+    if (field === 'transferId') {
+      if (
+        typeof value !== 'string' ||
+        !isUuid(value) ||
+        value !== value.toLowerCase() ||
+        value[14] !== '4'
+      )
+        throw new Error('Invalid Paykit transferId');
       continue;
     }
     if (field === 'requiredConfirmations') {

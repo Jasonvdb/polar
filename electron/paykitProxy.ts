@@ -1,8 +1,10 @@
 import { createHash, randomBytes } from 'crypto';
+import { constants as fsConstants } from 'fs';
 import { promises as fs } from 'fs';
 import { request as httpRequest } from 'http';
 import { createServer } from 'net';
 import { join, resolve, relative, isAbsolute } from 'path';
+import { dialog } from 'electron';
 import {
   isUuid,
   isPaykitUtcInstant,
@@ -12,6 +14,8 @@ import {
   newPaykitId,
   PaykitEnvironment,
   PaykitRequest,
+  PaykitTransfer,
+  PaykitTransferRequest,
   validatePaykitCommand,
   validatePaykitProof,
 } from '../src/shared/paykitApi';
@@ -446,6 +450,302 @@ export async function callService(
   });
 }
 
+const MAX_BACKUP_BYTES = 24 * 1024 * 1024;
+const exportDestinations = new Map<string, { path: string; expiresAt: number }>();
+const uuidBytes = (value: string) => {
+  if (!isUuid(value) || value !== value.toLowerCase() || value[14] !== '4')
+    throw new Error('Invalid Paykit receiver ID');
+  return Buffer.from(value.replace(/-/g, ''), 'hex');
+};
+const transferPath = (transferId: string, suffix = '') => {
+  if (
+    !isUuid(transferId) ||
+    transferId !== transferId.toLowerCase() ||
+    transferId[14] !== '4'
+  )
+    throw new Error('Invalid Paykit transfer ID');
+  return `/v1/transfers/${transferId}${suffix}`;
+};
+async function callTransfer(
+  binding: PaykitEnvironment,
+  method: 'POST' | 'GET' | 'DELETE',
+  path: string,
+  body?: Buffer,
+): Promise<{ status: number; body: Buffer; contentType?: string }> {
+  const token = await fs.readFile(
+    join(credentialsRoot(), binding.environmentId, 'api-token'),
+    'utf8',
+  );
+  if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('Invalid Paykit API credential');
+  return new Promise((resolveRequest, reject) => {
+    const req = httpRequest(
+      {
+        hostname: '127.0.0.1',
+        port: binding.servicePort,
+        path,
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          ...(body
+            ? {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': body.length,
+              }
+            : {}),
+        },
+      },
+      res => {
+        let size = 0;
+        const chunks: Buffer[] = [];
+        res.on('data', (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > MAX_BACKUP_BYTES) {
+            reject(new Error('Paykit transfer response exceeded size limit'));
+            req.destroy();
+          } else chunks.push(chunk);
+        });
+        res.on('error', () => reject(new Error('Paykit transfer response interrupted')));
+        res.on('end', () => {
+          const response = Buffer.concat(chunks);
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            let code = 'transfer_invalid';
+            try {
+              const parsed = JSON.parse(response.toString('utf8'));
+              if (typeof parsed?.error?.code === 'string')
+                code = parsed.error.code.slice(0, 64);
+            } catch (_) {}
+            reject(new Error(`Paykit transfer failed: ${code}`));
+            return;
+          }
+          resolveRequest({
+            status: res.statusCode,
+            body: response,
+            contentType: `${res.headers['content-type'] || ''}`,
+          });
+        });
+      },
+    );
+    const timeout = setTimeout(() => {
+      reject(new Error('Paykit transfer timed out'));
+      req.destroy();
+    }, 30000);
+    req.once('close', () => clearTimeout(timeout));
+    req.on('error', () =>
+      reject(
+        new Error(
+          'Paykit service is unavailable. Start the network or check its service logs.',
+        ),
+      ),
+    );
+    req.end(body);
+  });
+}
+export async function regularArchive(path: string): Promise<Buffer> {
+  let handle;
+  try {
+    const stat = await fs.lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_BACKUP_BYTES)
+      throw new Error('Backup must be a regular file no larger than 24 MiB');
+    handle = await fs.open(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0));
+    const current = await handle.stat();
+    if (
+      !current.isFile() ||
+      current.dev !== stat.dev ||
+      current.ino !== stat.ino ||
+      current.size !== stat.size ||
+      current.mtimeMs !== stat.mtimeMs
+    )
+      throw new Error('Backup file changed while opening');
+    if (current.size > MAX_BACKUP_BYTES)
+      throw new Error('Backup must be a regular file no larger than 24 MiB');
+
+    const chunks: Buffer[] = [];
+    const readLimit = Math.min(MAX_BACKUP_BYTES + 1, current.size + 1);
+    let size = 0;
+    while (size < readLimit) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, readLimit - size));
+      const { bytesRead } = await handle.read(chunk, 0, chunk.length, null);
+      if (bytesRead === 0) break;
+      size += bytesRead;
+      chunks.push(bytesRead === chunk.length ? chunk : chunk.subarray(0, bytesRead));
+    }
+    if (size > current.size) throw new Error('Backup file changed while reading');
+
+    const final = await handle.stat();
+    if (
+      !final.isFile() ||
+      final.dev !== current.dev ||
+      final.ino !== current.ino ||
+      final.size !== current.size ||
+      final.mtimeMs !== current.mtimeMs ||
+      size !== current.size
+    )
+      throw new Error('Backup file changed while reading');
+    return Buffer.concat(chunks, size);
+  } catch (error: any) {
+    if (
+      error?.message === 'Backup must be a regular file no larger than 24 MiB' ||
+      error?.message === 'Backup file changed while opening' ||
+      error?.message === 'Backup file changed while reading'
+    )
+      throw error;
+    throw new Error('Unable to read the selected backup file');
+  } finally {
+    if (handle) {
+      try {
+        await handle.close();
+      } catch (_) {}
+    }
+  }
+}
+export function frameTransfer(
+  purpose: 1 | 2,
+  receiverId: string,
+  passphrase: string,
+  archive: Buffer,
+) {
+  const password = Buffer.from(passphrase, 'utf8');
+  if (password.length < 12 || password.length > 1024) {
+    password.fill(0);
+    throw new Error('Passphrase must be 12 to 1024 UTF-8 bytes');
+  }
+  const header = Buffer.alloc(28);
+  header.write('PKTR');
+  header[4] = 1;
+  header[5] = purpose;
+  uuidBytes(receiverId).copy(header, 6);
+  header.writeUInt16BE(password.length, 22);
+  header.writeUInt32BE(archive.length, 24);
+  const framed = Buffer.concat([header, password, archive]);
+  password.fill(0);
+  return framed;
+}
+export async function paykitTransferProxy(
+  args: PaykitTransferRequest,
+): Promise<PaykitTransfer | boolean> {
+  if (
+    !args ||
+    !Number.isSafeInteger(args.networkId) ||
+    args.networkId < 1 ||
+    !['prepareExport', 'prepareRestore', 'downloadExport', 'cancel'].includes(
+      args.action,
+    ) ||
+    Object.keys(args).some(
+      key =>
+        ![
+          'networkId',
+          'action',
+          'receiverId',
+          'passphrase',
+          'transferId',
+          'replyTo',
+        ].includes(key),
+    )
+  )
+    throw new Error('Invalid Paykit transfer request');
+  if (
+    (args.action === 'prepareExport' || args.action === 'prepareRestore') &&
+    (typeof args.receiverId !== 'string' || typeof args.passphrase !== 'string')
+  )
+    throw new Error('Invalid Paykit transfer request');
+  const network = await getNetwork(args.networkId);
+  const binding = await getBinding(args.networkId);
+  if (
+    !network.paykit ||
+    network.paykit.apiVersion !== 1 ||
+    network.paykit.environmentId !== binding.environmentId ||
+    network.paykit.servicePort !== binding.servicePort
+  )
+    throw new Error('Paykit environment binding does not match this network');
+  if (args.action === 'cancel') {
+    exportDestinations.delete(args.transferId);
+    await callTransfer(binding, 'DELETE', transferPath(args.transferId));
+    return true;
+  }
+  if (args.action === 'downloadExport') {
+    const destination = exportDestinations.get(args.transferId);
+    exportDestinations.delete(args.transferId);
+    if (!destination || destination.expiresAt < Date.now())
+      throw new Error('Paykit transfer failed: transfer_expired');
+    const response = await callTransfer(
+      binding,
+      'GET',
+      transferPath(args.transferId, '/archive'),
+    );
+    if (!response.contentType?.startsWith('application/octet-stream'))
+      throw new Error('Invalid Paykit archive response');
+    const temporary = `${destination.path}.${newPaykitId()}.tmp`;
+    try {
+      const target = await fs
+        .lstat(destination.path)
+        .catch((error: any) =>
+          error.code === 'ENOENT' ? undefined : Promise.reject(error),
+        );
+      if (target?.isSymbolicLink() || (target && !target.isFile()))
+        throw new Error('Backup destination must be a regular file');
+      await fs.writeFile(temporary, response.body, { flag: 'wx', mode: 0o600 });
+      await fs.rename(temporary, destination.path);
+    } finally {
+      response.body.fill(0);
+      await fs.rm(temporary, { force: true });
+    }
+    return true;
+  }
+  const password = args.passphrase;
+  let archive = Buffer.alloc(0);
+  let destination: string | undefined;
+  try {
+    if (args.action === 'prepareRestore') {
+      const selected = await dialog.showOpenDialog({
+        title: 'Open encrypted Paykit backup',
+        properties: ['openFile'],
+        filters: [{ name: 'Paykit backup', extensions: ['paykit-backup'] }],
+      });
+      if (selected.canceled || selected.filePaths.length !== 1)
+        throw new Error('Backup selection cancelled');
+      archive = await regularArchive(selected.filePaths[0]);
+    } else {
+      const selected = await dialog.showSaveDialog({
+        title: 'Save encrypted Paykit backup',
+        defaultPath: 'receiver.paykit-backup',
+        filters: [{ name: 'Paykit backup', extensions: ['paykit-backup'] }],
+      });
+      if (selected.canceled || !selected.filePath)
+        throw new Error('Backup selection cancelled');
+      destination = selected.filePath;
+    }
+    const framed = frameTransfer(
+      args.action === 'prepareExport' ? 1 : 2,
+      args.receiverId,
+      password,
+      archive,
+    );
+    try {
+      const response = await callTransfer(binding, 'POST', '/v1/transfers', framed);
+      const transfer = JSON.parse(response.body.toString('utf8')) as PaykitTransfer;
+      if (
+        !isUuid(transfer.transferId) ||
+        transfer.transferId !== transfer.transferId.toLowerCase() ||
+        transfer.transferId[14] !== '4' ||
+        !['export', 'restore'].includes(transfer.purpose) ||
+        transfer.purpose !== (args.action === 'prepareExport' ? 'export' : 'restore') ||
+        !Number.isFinite(Date.parse(transfer.expiresAt))
+      )
+        throw new Error('Invalid Paykit transfer response');
+      if (destination)
+        exportDestinations.set(transfer.transferId, {
+          path: destination,
+          expiresAt: Date.parse(transfer.expiresAt),
+        });
+      return transfer;
+    } finally {
+      framed.fill(0);
+    }
+  } finally {
+    archive.fill(0);
+  }
+}
+
 // Project known public fields, even if a future backend accidentally adds secrets.
 const fields = (value: any, names: string[]) =>
   Object.fromEntries(
@@ -461,6 +761,48 @@ const list = (value: unknown, project: (item: any) => any) =>
   Array.isArray(value)
     ? value.filter(item => item && typeof item === 'object').map(project)
     : [];
+const recoveryReasons = (value: unknown) =>
+  strings(value).filter(item =>
+    [
+      'sdk_validation',
+      'grant_invalid',
+      'marker_invalid',
+      'wallet_uncertain',
+      'wallet_history_unknown',
+      'peer_relink_required',
+      'activation_incomplete',
+    ].includes(item),
+  );
+const publicRecoveryPeers = (value: unknown) =>
+  list(value, item => fields(item, ['peerPublicKey', 'peerReceiverPath']));
+const publicRecoveryWallet = (value: any) =>
+  fields(value, [
+    'imported',
+    'retainedLive',
+    'terminal',
+    'uncertain',
+    'unknownAfterExport',
+  ]);
+const publicRecovery = (value: any) => ({
+  ...fields(value, [
+    'phase',
+    'automationPaused',
+    'sdkValidated',
+    'walletReconciled',
+    'identityFingerprint',
+    'receiverFingerprint',
+    'grantValid',
+    'markerValid',
+    'terminalExecutionCount',
+    'uncertainExecutionCount',
+    'unknownAfterExportCount',
+    'restoredAt',
+    'lastError',
+  ]),
+  peersRequiringRelink: publicRecoveryPeers(value?.peersRequiringRelink),
+  unresolvedExecutionIds: strings(value?.unresolvedExecutionIds),
+  blockedReasons: recoveryReasons(value?.blockedReasons),
+});
 const publicProfile = (value: any) => ({
   ...fields(value, [
     'peerPublicKey',
@@ -587,6 +929,11 @@ const receiptFields = (value: any, names: string[], nullable: string[] = []) =>
   );
 export const publicWorkspace = (value: any) => ({
   ...fields(value, ['receiverId', 'deliveryPaused', 'lastError', 'updatedAt']),
+  ...(value.recovery === null
+    ? { recovery: null }
+    : value.recovery && typeof value.recovery === 'object'
+    ? { recovery: publicRecovery(value.recovery) }
+    : {}),
   ...(value.paymentMethods && typeof value.paymentMethods === 'object'
     ? {
         paymentMethods: {
@@ -835,7 +1182,36 @@ export const publicOperation = (value: any) => ({
             'status',
             'path',
             'imageUri',
+            'transferId',
+            'archiveVersion',
+            'createdAt',
+            'byteLength',
+            'sha256',
+            'identityFingerprint',
+            'receiverFingerprint',
+            'identityMatches',
+            'receiverMatches',
+            'grantValid',
+            'markerValid',
+            'sdkValidationPending',
+            'safeCheckpointCount',
+            'unsafeCheckpointCount',
+            'restorable',
           ]),
+          ...(value.result.sdkCounts && typeof value.result.sdkCounts === 'object'
+            ? {
+                sdkCounts: Object.fromEntries(
+                  Object.entries(value.result.sdkCounts).filter(
+                    ([, count]) => Number.isSafeInteger(count) && (count as number) >= 0,
+                  ),
+                ),
+              }
+            : {}),
+          ...(value.result.wallet && typeof value.result.wallet === 'object'
+            ? { wallet: publicRecoveryWallet(value.result.wallet) }
+            : {}),
+          peersRequiringRelink: publicRecoveryPeers(value.result.peersRequiringRelink),
+          blockedReasons: recoveryReasons(value.result.blockedReasons),
           ...receiptFields(value.result, ['receiptId']),
           ...(value.result.funding && typeof value.result.funding === 'object'
             ? { funding: publicFunding(value.result.funding) }

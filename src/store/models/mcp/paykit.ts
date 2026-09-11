@@ -19,7 +19,7 @@ interface PaykitArgs {
 export const paykitDefinition: McpToolDefinition = {
   name: 'paykit',
   description:
-    'Enable a persistent Paykit environment on a stopped network, query public state or an operation, or submit a command. Commands return an operationId immediately; poll operation/state for completion. Reuse commandId when retrying an uncertain submission. Secrets are never returned.',
+    'Enable a persistent Paykit environment on a stopped network, query public state or an operation, or submit a command. Commands return an operationId immediately; poll operation/state for completion. Reuse commandId when retrying an uncertain submission. Backup commands accept only a receiverId and an opaque transferId already staged through the local UI; MCP never accepts archive paths, bytes, or passphrases. Secrets are never returned.',
   inputSchema: {
     type: 'object',
     required: ['networkId', 'action'],

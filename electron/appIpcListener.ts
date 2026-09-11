@@ -4,7 +4,7 @@ import windowState from 'electron-window-state';
 import { join } from 'path';
 import { ipcChannels } from '../src/shared';
 import { APP_ROOT, BASE_URL } from './constants';
-import { paykitProxy } from './paykitProxy';
+import { paykitProxy, paykitTransferProxy } from './paykitProxy';
 import { httpProxy } from './httpProxy';
 import { clearLitdProxyCache } from './litd/litdProxyServer';
 import { clearLndProxyCache } from './lnd/lndProxyServer';
@@ -70,6 +70,7 @@ const listeners: {
   [ipcChannels.clearCache]: clearCache,
   [ipcChannels.http]: httpProxy,
   [ipcChannels.paykit]: paykitProxy,
+  [ipcChannels.paykitTransfer]: paykitTransferProxy,
   [ipcChannels.zip]: zip,
   [ipcChannels.unzip]: unzip,
 };
@@ -88,7 +89,12 @@ export const initAppIpcListener = (ipc: IpcMain) => {
     log(`listening for ipc command "${channel}"`);
     ipc.on(requestChan, async (event, ...args) => {
       // the a message is received by the main process...
-      log(`received request "${requestChan}"`, JSON.stringify(args, null, 2));
+      log(
+        `received request "${requestChan}"`,
+        channel === ipcChannels.paykitTransfer
+          ? '[sensitive payload redacted]'
+          : JSON.stringify(args, null, 2),
+      );
       // inspect the first arg to see if it has a specific channel to reply to
       let uniqueChan = responseChan;
       if (args && args[0] && args[0].replyTo) {
@@ -103,8 +109,29 @@ export const initAppIpcListener = (ipc: IpcMain) => {
         event.reply(uniqueChan, result);
       } catch (err: any) {
         // reply with an error message if the execution fails
-        log(`send error "${uniqueChan}"`, JSON.stringify(err, null, 2));
-        event.reply(uniqueChan, { err: err.message });
+        log(
+          `send error "${uniqueChan}"`,
+          channel === ipcChannels.paykitTransfer
+            ? '[sensitive transfer error redacted]'
+            : JSON.stringify(err, null, 2),
+        );
+        const transferMessage = `${err?.message || ''}`;
+        const publicTransferMessage = [
+          'Invalid Paykit',
+          'Paykit transfer',
+          'Paykit service is unavailable',
+          'Passphrase must be',
+          'Backup selection cancelled',
+          'Backup must be',
+          'Backup file changed',
+          'Backup destination must be',
+        ].some(prefix => transferMessage.startsWith(prefix))
+          ? transferMessage
+          : 'Paykit transfer file operation failed';
+        event.reply(uniqueChan, {
+          err:
+            channel === ipcChannels.paykitTransfer ? publicTransferMessage : err.message,
+        });
       }
     });
   });

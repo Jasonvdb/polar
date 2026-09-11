@@ -7,6 +7,7 @@ use polar_paykit::{
     supervisor::Supervisor,
 };
 use std::{sync::Arc, time::Duration};
+use zeroize::Zeroize;
 
 #[tokio::main]
 async fn main() {
@@ -92,10 +93,167 @@ async fn run(args: &[String]) -> anyhow::Result<()> {
             .await
         }
         Some("state") | Some("command") | Some("operation") | Some("health") => cli(args).await,
+        Some("backup") => backup_cli(args).await,
         _ => {
             eprintln!("Usage: polar-paykit serve | state | health | operation UUID | command NAME JSON [COMMAND_UUID]\nCLI: PAYKIT_API_URL and PAYKIT_TOKEN_FILE; operations wait up to 120 seconds.");
             Ok(())
         }
+    }
+}
+
+#[cfg(unix)]
+async fn backup_cli(args: &[String]) -> anyhow::Result<()> {
+    use std::io::Write;
+    anyhow::ensure!(args.len() >= 3, "backup action and receiver UUID required");
+    let action = args[1].as_str();
+    anyhow::ensure!(
+        matches!(action, "export" | "inspect" | "restore"),
+        "invalid backup action"
+    );
+    let receiver_id: uuid::Uuid = args[2].parse()?;
+    let archive_fd = cli_fd(args, "--archive-fd")?;
+    let passphrase_fd = cli_fd(args, "--passphrase-fd")?;
+    let mut passphrase = zeroize::Zeroizing::new(read_fd(passphrase_fd, 1025)?);
+    while matches!(passphrase.last(), Some(b'\n' | b'\r')) {
+        passphrase.pop();
+    }
+    anyhow::ensure!(
+        (12..=1024).contains(&passphrase.len()),
+        "invalid passphrase length"
+    );
+    let purpose = if action == "export" { 1u8 } else { 2u8 };
+    let archive = if action == "export" {
+        zeroize::Zeroizing::new(Vec::new())
+    } else {
+        zeroize::Zeroizing::new(read_fd(
+            archive_fd,
+            polar_paykit::backup::MAX_ARCHIVE_BYTES + 1,
+        )?)
+    };
+    anyhow::ensure!(
+        archive.len() <= polar_paykit::backup::MAX_ARCHIVE_BYTES,
+        "backup too large"
+    );
+    let base = std::env::var("PAYKIT_API_URL")?;
+    ensure_loopback_url(&base)?;
+    let token = zeroize::Zeroizing::new(std::fs::read_to_string(std::env::var(
+        "PAYKIT_TOKEN_FILE",
+    )?)?);
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(130))
+        .build()?;
+    let mut frame =
+        zeroize::Zeroizing::new(Vec::with_capacity(27 + passphrase.len() + archive.len()));
+    frame.extend_from_slice(b"PKTR");
+    frame.extend_from_slice(&[1, purpose]);
+    frame.extend_from_slice(receiver_id.as_bytes());
+    frame.extend_from_slice(&(passphrase.len() as u16).to_be_bytes());
+    frame.extend_from_slice(&(archive.len() as u32).to_be_bytes());
+    frame.extend_from_slice(&passphrase);
+    frame.extend_from_slice(&archive);
+    let created = client
+        .post(format!("{base}/v1/transfers"))
+        .bearer_auth(token.trim())
+        .header("content-type", "application/octet-stream")
+        .body(frame.to_vec())
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+    frame.zeroize();
+    let transfer_id = created["transferId"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing transfer id"))?;
+    let command = polar_paykit::model::Command {
+        command_id: uuid::Uuid::new_v4(),
+        command: format!("backup.{action}"),
+        input: serde_json::json!({"receiverId":receiver_id,"transferId":transfer_id}),
+    };
+    let result = submit_and_wait(&client, &base, token.trim(), &command).await?;
+    if action == "export" {
+        let bytes = client
+            .get(format!("{base}/v1/transfers/{transfer_id}/archive"))
+            .bearer_auth(token.trim())
+            .send()
+            .await?
+            .error_for_status()?
+            .bytes()
+            .await?;
+        let mut output = std::fs::OpenOptions::new()
+            .write(true)
+            .open(format!("/dev/fd/{archive_fd}"))?;
+        output.write_all(&bytes)?;
+        output.flush()?;
+    }
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn backup_cli(_args: &[String]) -> anyhow::Result<()> {
+    anyhow::bail!("file-descriptor backup CLI is unavailable on this platform")
+}
+
+fn cli_fd(args: &[String], flag: &str) -> anyhow::Result<i32> {
+    let index = args
+        .iter()
+        .position(|value| value == flag)
+        .ok_or_else(|| anyhow::anyhow!("{flag} required"))?;
+    let fd: i32 = args
+        .get(index + 1)
+        .ok_or_else(|| anyhow::anyhow!("{flag} value required"))?
+        .parse()?;
+    anyhow::ensure!(fd >= 0, "invalid file descriptor");
+    Ok(fd)
+}
+
+#[cfg(unix)]
+fn read_fd(fd: i32, maximum: usize) -> anyhow::Result<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(format!("/dev/fd/{fd}"))?;
+    let mut bytes = Vec::new();
+    file.by_ref().take(maximum as u64).read_to_end(&mut bytes)?;
+    Ok(bytes)
+}
+
+async fn submit_and_wait(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    command: &polar_paykit::model::Command,
+) -> anyhow::Result<serde_json::Value> {
+    let response = client
+        .post(format!("{base}/v1/commands"))
+        .bearer_auth(token)
+        .json(command)
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<serde_json::Value>()
+        .await?;
+    let id = response["operationId"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing operation id"))?;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let result = client
+            .get(format!("{base}/v1/operations/{id}"))
+            .bearer_auth(token)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await?;
+        if result["status"] == "succeeded" {
+            return Ok(result);
+        }
+        anyhow::ensure!(result["status"] != "failed", "operation failed");
+        anyhow::ensure!(
+            tokio::time::Instant::now() < deadline,
+            "operation wait timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -144,12 +302,7 @@ async fn serve() -> anyhow::Result<()> {
 
 async fn cli(args: &[String]) -> anyhow::Result<()> {
     let base = std::env::var("PAYKIT_API_URL")?;
-    let url = reqwest::Url::parse(&base)?;
-    anyhow::ensure!(
-        url.scheme() == "http"
-            && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")),
-        "CLI requires a loopback HTTP endpoint"
-    );
+    ensure_loopback_url(&base)?;
     let token = zeroize::Zeroizing::new(std::fs::read_to_string(std::env::var(
         "PAYKIT_TOKEN_FILE",
     )?)?);
@@ -228,6 +381,16 @@ async fn cli(args: &[String]) -> anyhow::Result<()> {
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
+}
+
+fn ensure_loopback_url(base: &str) -> anyhow::Result<()> {
+    let url = reqwest::Url::parse(base)?;
+    anyhow::ensure!(
+        url.scheme() == "http"
+            && matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "[::1]")),
+        "CLI requires a loopback HTTP endpoint"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

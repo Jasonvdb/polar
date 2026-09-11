@@ -8,6 +8,38 @@ import {
 } from './paykitApi';
 
 describe('Paykit public commands', () => {
+  it('keeps backup commands secret-free and requires a lowercase v4 transfer ID', () => {
+    const receiverId = newPaykitId();
+    const transferId = newPaykitId();
+    expect(() =>
+      validatePaykitCommand({
+        commandId: newPaykitId(),
+        command: 'backup.restore',
+        input: { receiverId, transferId },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validatePaykitCommand({
+        commandId: newPaykitId(),
+        command: 'recovery.reconcile',
+        input: { receiverId },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validatePaykitCommand({
+        commandId: newPaykitId(),
+        command: 'backup.export',
+        input: { receiverId, transferId, passphrase: 'must-not-cross' },
+      }),
+    ).toThrow('input');
+    expect(() =>
+      validatePaykitCommand({
+        commandId: newPaykitId(),
+        command: 'backup.inspect',
+        input: { receiverId, transferId: transferId.toUpperCase() },
+      }),
+    ).toThrow('transferId');
+  });
   it('creates distinct RFC4122 version 4 command IDs', () => {
     const ids = Array.from({ length: 100 }, newPaykitId);
     expect(ids.every(id => isUuid(id) && id[14] === '4')).toBe(true);

@@ -147,6 +147,7 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     const context = { initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture };
     await require('./paykit-payment-scenarios').run(context);
     const requests = await require('./paykit-request-scenarios').run(context);
+    await require('./paykit-backup-scenarios').run({ ...context, base, token, requests });
     const restartEnvironment = async () => {
       signal?.throwIfAborted();
       docker('restart', '--timeout', '-1', serviceContainer);

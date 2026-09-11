@@ -10,6 +10,8 @@ import {
   fundingWalletIds,
   refreshWalletConfig,
   callService,
+  frameTransfer,
+  regularArchive,
 } from '../../electron/paykitProxy';
 import { bakePaykitMacaroon } from '../../electron/paykitWalletAuth';
 jest.mock('../../electron/paykitWalletAuth', () => ({
@@ -19,6 +21,7 @@ jest.mock('../../electron/paykitWalletAuth', () => ({
 import { paykitConfig } from './paykitConfig';
 
 jest.mock('fs', () => ({
+  constants: jest.requireActual('fs').constants,
   existsSync: () => false,
   promises: {
     readFile: jest.fn(),
@@ -31,6 +34,7 @@ jest.mock('fs', () => ({
     rename: jest.fn(),
     realpath: jest.fn(),
     stat: jest.fn(),
+    lstat: jest.fn(),
   },
 }));
 jest.mock('net', () => ({
@@ -49,6 +53,107 @@ const network = () => ({
   id: 1,
   path: join(paykitConfig.dataPath, 'networks', '1'),
   nodes: { bitcoin: [], lightning: [], tap: [] },
+});
+
+describe('Paykit sensitive transfer framing', () => {
+  it('uses the fixed binary frame and rejects short passphrases before transport', () => {
+    const receiverId = '9b03a782-e2f3-4b7a-8ef5-429628921ee2';
+    const archive = Buffer.from('archive');
+    const framed = frameTransfer(2, receiverId, 'twelve-byte-password', archive);
+    expect(framed.subarray(0, 4).toString()).toBe('PKTR');
+    expect([...framed.subarray(4, 6)]).toEqual([1, 2]);
+    expect(framed.readUInt32BE(24)).toBe(archive.length);
+    expect(() => frameTransfer(1, receiverId, 'short', Buffer.alloc(0))).toThrow('12');
+    framed.fill(0);
+  });
+  it('rejects symlinks and same-size inode replacement while opening an archive', async () => {
+    fsMock.lstat.mockResolvedValueOnce({
+      isFile: () => true,
+      isSymbolicLink: () => true,
+      size: 1,
+    } as any);
+    await expect(regularArchive('/chosen')).rejects.toThrow('regular file');
+    fsMock.lstat.mockResolvedValueOnce({
+      isFile: () => true,
+      isSymbolicLink: () => false,
+      size: 2,
+      dev: 1,
+      ino: 10,
+      mtimeMs: 100,
+    } as any);
+    const close = jest.fn();
+    fsMock.open.mockResolvedValueOnce({
+      stat: jest.fn().mockResolvedValue({
+        isFile: () => true,
+        size: 2,
+        dev: 1,
+        ino: 11,
+        mtimeMs: 100,
+      }),
+      close,
+    } as any);
+    await expect(regularArchive('/chosen')).rejects.toThrow('changed');
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('rejects archive growth during a bounded descriptor read', async () => {
+    const original = {
+      isFile: () => true,
+      isSymbolicLink: () => false,
+      size: 2,
+      dev: 1,
+      ino: 10,
+      mtimeMs: 100,
+    };
+    fsMock.lstat.mockResolvedValueOnce(original as any);
+    const stat = jest
+      .fn()
+      .mockResolvedValueOnce(original)
+      .mockResolvedValueOnce({ ...original, size: 3, mtimeMs: 101 });
+    const read = jest
+      .fn()
+      .mockImplementationOnce(async (buffer: Buffer) => {
+        buffer.write('ab');
+        return { bytesRead: 2, buffer };
+      })
+      .mockResolvedValueOnce({ bytesRead: 0, buffer: Buffer.alloc(0) });
+    const close = jest.fn();
+    fsMock.open.mockResolvedValueOnce({ stat, read, close } as any);
+
+    await expect(regularArchive('/chosen')).rejects.toThrow('changed while reading');
+    expect(read).toHaveBeenCalled();
+    expect(close).toHaveBeenCalled();
+  });
+
+  it('reads a stable small archive without using readFile', async () => {
+    const stable = {
+      isFile: () => true,
+      isSymbolicLink: () => false,
+      size: 2,
+      dev: 1,
+      ino: 10,
+      mtimeMs: 100,
+    };
+    fsMock.lstat.mockResolvedValueOnce(stable as any);
+    const read = jest
+      .fn()
+      .mockImplementationOnce(async (buffer: Buffer) => {
+        buffer.write('ab');
+        return { bytesRead: 2, buffer };
+      })
+      .mockResolvedValueOnce({ bytesRead: 0, buffer: Buffer.alloc(0) });
+    const readFile = jest.fn();
+    fsMock.open.mockResolvedValueOnce({
+      stat: jest.fn().mockResolvedValue(stable),
+      read,
+      readFile,
+      close: jest.fn(),
+    } as any);
+
+    await expect(regularArchive('/chosen')).resolves.toEqual(Buffer.from('ab'));
+    expect(readFile).not.toHaveBeenCalled();
+    expect(read.mock.calls[0][0]).toHaveLength(3);
+  });
 });
 
 describe('Main process Paykit boundary', () => {

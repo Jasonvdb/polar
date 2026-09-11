@@ -5,11 +5,15 @@ import {
   PaykitOperation,
   PaykitRequest,
   PaykitState,
+  PaykitTransfer,
+  PaykitTransferRequest,
 } from 'shared/paykitApi';
 import { createIpcSender } from 'lib/ipc/ipcService';
 
 const ipc = createIpcSender('Paykit', 'app');
 const send = <T>(request: PaykitRequest) => ipc<T>(ipcChannels.paykit, request);
+const transfer = <T>(request: PaykitTransferRequest) =>
+  ipc<T>(ipcChannels.paykitTransfer, request);
 export const paykitService = {
   provision: (networkId: number) =>
     send<PaykitEnvironment>({ networkId, action: 'provision' }),
@@ -18,6 +22,24 @@ export const paykitService = {
     send<PaykitOperation>({ networkId, action: 'operation', operationId }),
   command: (networkId: number, request: PaykitCommandRequest) =>
     send<{ operationId: string }>({ networkId, action: 'command', request }),
+  prepareExport: (networkId: number, receiverId: string, passphrase: string) =>
+    transfer<PaykitTransfer>({
+      networkId,
+      action: 'prepareExport',
+      receiverId,
+      passphrase,
+    }),
+  prepareRestore: (networkId: number, receiverId: string, passphrase: string) =>
+    transfer<PaykitTransfer>({
+      networkId,
+      action: 'prepareRestore',
+      receiverId,
+      passphrase,
+    }),
+  downloadExport: (networkId: number, transferId: string) =>
+    transfer<boolean>({ networkId, action: 'downloadExport', transferId }),
+  cancelTransfer: (networkId: number, transferId: string) =>
+    transfer<boolean>({ networkId, action: 'cancel', transferId }),
   checkPort: (networkId: number) => send<boolean>({ networkId, action: 'checkPort' }),
   remove: (networkId: number) => send<boolean>({ networkId, action: 'remove' }),
 };

@@ -30,6 +30,7 @@ import PaykitReceipts from './PaykitReceipts';
 import PaykitPaymentMethods from './PaykitPaymentMethods';
 import PaykitLinks from './PaykitLinks';
 import PaykitProfilesContacts from './PaykitProfilesContacts';
+import PaykitBackupRecovery from './PaykitBackupRecovery';
 
 const guardedCommand = (name: string) =>
   name.startsWith('subscription.') ||
@@ -381,6 +382,15 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
         </Space>
         {receiver && (
           <>
+            <PaykitBackupRecovery
+              networkId={network.id}
+              receiver={receiver}
+              workspace={state?.receiverWorkspaces?.find(
+                item => item.receiverId === receiver.id,
+              )}
+              disabled={disabled}
+              command={command}
+            />
             <Descriptions column={1} size="small" style={{ marginTop: 12 }}>
               <Descriptions.Item label="Receiver path">{receiver.path}</Descriptions.Item>
               <Descriptions.Item label="Status">{receiver.status}</Descriptions.Item>

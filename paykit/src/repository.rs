@@ -16,9 +16,11 @@ pub struct Repository {
     _lock: File,
     pub ready: AtomicBool,
     pub notify: Notify,
+    pub transfers: crate::backup::TransferRegistry,
 }
 impl Repository {
     pub fn open(config: &Config) -> anyhow::Result<Self> {
+        crate::backup::recover_restore_transaction(config)?;
         let vault = Vault::new(
             config.data_dir.clone(),
             *config.key,
@@ -40,6 +42,7 @@ impl Repository {
             _lock: lock,
             ready: AtomicBool::new(false),
             notify: Notify::new(),
+            transfers: crate::backup::TransferRegistry::default(),
         })
     }
     pub fn snapshot(&self) -> anyhow::Result<AppState> {

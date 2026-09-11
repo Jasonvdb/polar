@@ -421,7 +421,19 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
       }),
     };
   }
-  return { ...details, ...lifecycle, core, lnd, stateRoot, stopLnd, startLnd, walletSnapshot, evidence, ...controls, ...faults,
+  function paymentHistory(ownerKeys) {
+    assert(Array.isArray(ownerKeys) && ownerKeys.length === names.length);
+    return {
+      core: ownerKeys.map(ownerKey => core('listtransactions', ['*', 10000, 0, true], `paykit-${ownerKey}`)
+        .filter(value => value.category === 'send').map(value => value.txid).sort()),
+      lightning: names.map((_, index) => lnd(index, 'listpayments', '--include_incomplete').payments
+        .map(value => ({ hash: value.payment_hash, index: value.payment_index, status: value.status })).sort((a, b) => a.hash.localeCompare(b.hash))),
+    };
+  }
+  function loseReceiverState(receiverId) {
+    return receiverStateLoss({ stateRoot, data, receiverId, recordStorage });
+  }
+  return { ...details, ...lifecycle, core, lnd, stateRoot, stopLnd, startLnd, walletSnapshot, paymentHistory, loseReceiverState, evidence, ...controls, ...faults,
     restoreFaults: () => {
       const failures = [];
       for (const fault of [faults, executionFaults, requestFaults, workspaceFaults]) {
@@ -447,4 +459,22 @@ async function createWalletFixture({ data, secrets, prefix, environmentId, uid, 
     } };
 
 }
-module.exports = { coreLifecycle, createWalletFixture, storageFaults, executionCommitFaults, visibleStorageFaults, readGuestLedger, readGuestExecutionLedger, gateControls, atomicJson, images, paymentPermissions, setupPermissions };
+
+function receiverStateLoss({ stateRoot, data, receiverId, recordStorage }) {
+  assert.match(receiverId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  const parent = path.join(stateRoot, 'receivers'); const source = path.join(parent, receiverId);
+  const rollbackRoot = path.join(data, 'backup-fixture-rollbacks'); mkdir(rollbackRoot);
+  const rollback = path.join(rollbackRoot, `${receiverId}-${randomUUID()}`);
+  assert.equal(fs.lstatSync(parent).isSymbolicLink(), false); assert.equal(fs.lstatSync(source).isDirectory(), true);
+  assert.equal(fs.lstatSync(source).isSymbolicLink(), false); assert.equal(fs.existsSync(rollback), false);
+  fs.renameSync(source, rollback);
+  recordStorage({ phase: 'host', boundary: 'receiver backup local loss', receiverId, active: true });
+  return () => {
+    assert.equal(fs.lstatSync(source).isDirectory(), true, 'Restore did not recreate receiver state');
+    assert.equal(fs.lstatSync(source).isSymbolicLink(), false);
+    assert.equal(fs.lstatSync(rollback).isDirectory(), true, 'Local-loss rollback copy disappeared');
+    recordStorage({ phase: 'host', boundary: 'receiver backup local loss', receiverId, active: false });
+  };
+}
+
+module.exports = { coreLifecycle, createWalletFixture, receiverStateLoss, storageFaults, executionCommitFaults, visibleStorageFaults, readGuestLedger, readGuestExecutionLedger, gateControls, atomicJson, images, paymentPermissions, setupPermissions };

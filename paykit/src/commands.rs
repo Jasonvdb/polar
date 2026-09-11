@@ -27,6 +27,12 @@ pub struct ReceiverId {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BackupTransfer {
+    pub receiver_id: Uuid,
+    pub transfer_id: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateReceiver {
     pub participant_id: Uuid,
     pub name: String,
@@ -60,6 +66,12 @@ pub fn validate(command: &Command) -> Result<(), PublicError> {
             parse::<ReceiverId>(command)?;
             Ok(())
         }
+        "backup.export" | "backup.inspect" | "backup.restore" => {
+            let input: BackupTransfer = parse(command)?;
+            valid_id(input.receiver_id)?;
+            valid_v4(&input.transfer_id)
+        }
+        "recovery.reconcile" => valid_id(parse::<ReceiverId>(command)?.receiver_id),
         "preset.create" | "preset.fund" if command.input == serde_json::json!({}) => Ok(()),
         value if crate::subscription_input::is_command(value) => {
             crate::subscription_input::validate(command)
@@ -153,6 +165,23 @@ mod tests {
             })
             .is_err());
         }
+    }
+    #[test]
+    fn backup_commands_accept_only_secret_free_lowercase_v4_handles() {
+        let receiver = Uuid::new_v4();
+        let transfer = Uuid::new_v4().to_string();
+        let command = Command {
+            command_id: Uuid::new_v4(),
+            command: "backup.restore".into(),
+            input: serde_json::json!({"receiverId":receiver,"transferId":transfer}),
+        };
+        assert!(validate(&command).is_ok());
+        let mut secret = command.clone();
+        secret.input["passphrase"] = serde_json::json!("forbidden secret");
+        assert!(validate(&secret).is_err());
+        let mut uppercase = command;
+        uppercase.input["transferId"] = serde_json::json!(transfer.to_uppercase());
+        assert!(validate(&uppercase).is_err());
     }
     #[test]
     fn interrupted_funding_remains_explicitly_recoverable_with_original_progress() {
@@ -310,6 +339,14 @@ fn valid_id(id: Uuid) -> Result<(), PublicError> {
         Err(invalid())
     } else {
         Ok(())
+    }
+}
+fn valid_v4(value: &str) -> Result<(), PublicError> {
+    let id = value.parse::<Uuid>().map_err(|_| invalid())?;
+    if id.get_version_num() == 4 && id.to_string() == value {
+        Ok(())
+    } else {
+        Err(invalid())
     }
 }
 pub fn public_key(value: &str) -> Result<paykit_sdk::PubkyPublicKey, PublicError> {

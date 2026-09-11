@@ -6,7 +6,7 @@ use uuid::Uuid;
 pub const EVENT_RETENTION: usize = 256;
 pub const STATE_OPERATION_RETENTION: usize = 256;
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Command {
     pub command_id: Uuid,
@@ -32,6 +32,59 @@ pub struct Receiver {
     pub noise_public_key: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Recovery {
+    pub phase: RecoveryPhase,
+    pub automation_paused: bool,
+    pub sdk_validated: bool,
+    pub wallet_reconciled: bool,
+    pub identity_fingerprint: String,
+    pub receiver_fingerprint: String,
+    pub grant_valid: bool,
+    pub marker_valid: bool,
+    pub terminal_execution_count: usize,
+    pub uncertain_execution_count: usize,
+    pub unknown_after_export_count: usize,
+    pub peers_requiring_relink: Vec<RecoveryPeer>,
+    pub unresolved_execution_ids: Vec<String>,
+    pub blocked_reasons: Vec<RecoveryBlockedReason>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restored_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RecoveryPhase {
+    Inspectable,
+    Activating,
+    WalletReconciliationRequired,
+    RelinkRequired,
+    Ready,
+    Failed,
+}
+
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryPeer {
+    pub peer_public_key: String,
+    pub peer_receiver_path: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryBlockedReason {
+    SdkValidation,
+    GrantInvalid,
+    MarkerInvalid,
+    WalletUncertain,
+    WalletHistoryUnknown,
+    PeerRelinkRequired,
+    ActivationIncomplete,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
