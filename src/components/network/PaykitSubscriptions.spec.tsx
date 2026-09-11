@@ -209,6 +209,66 @@ it('blocks duplicate period execution, permits disabling authorization, and canc
     requestId,
   });
 });
+it('holds a proved period without an execution and blocks autopay only while it is current', () => {
+  const original = workspace.subscriptions![0];
+  const proved = {
+    ...original.periods[0],
+    status: 'proofSubmitted' as const,
+    proofId: newPaykitId(),
+    executionId: null,
+  };
+  const current = setup({
+    ...workspace,
+    subscriptions: [{ ...original, currentPeriodIndex: 0, periods: [proved] }],
+  });
+  current.chooseRequest();
+  current.select('Subscription spending wallet', 'Alice wallet');
+  current.select('Subscription payment method', 'btc-onchain');
+  current.select('Subscription endpoint source', 'Private');
+  expect(
+    current.getByText(
+      'This period already has a submitted payment proof. Another payment is blocked while that proof is retained.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    current.getByText(
+      'The current period already has a submitted payment proof. Autopay cannot be enabled until a future unpaid period becomes current.',
+    ),
+  ).toBeInTheDocument();
+  expect(
+    current.getByText('Pay selected period manually').closest('button'),
+  ).toBeDisabled();
+  expect(
+    current.getByText('Enable autopay for this request').closest('button'),
+  ).toBeDisabled();
+  expect(current.command).not.toHaveBeenCalled();
+  current.unmount();
+
+  const future = {
+    ...original.periods[0],
+    index: 1,
+    startsAt: '2099-02-28T00:00:00Z',
+    endsAt: '2099-03-31T00:00:00Z',
+    status: 'due' as const,
+    proofId: null,
+    executionId: null,
+  };
+  const advanced = setup({
+    ...workspace,
+    subscriptions: [{ ...original, currentPeriodIndex: 1, periods: [proved, future] }],
+  });
+  advanced.chooseRequest();
+  advanced.select('Subscription spending wallet', 'Alice wallet');
+  advanced.select('Subscription payment method', 'btc-onchain');
+  advanced.select('Subscription endpoint source', 'Private');
+  fireEvent.click(advanced.getByText('Select period 1'));
+  expect(
+    advanced.getByText('Pay selected period manually').closest('button'),
+  ).not.toBeDisabled();
+  expect(
+    advanced.getByText('Enable autopay for this request').closest('button'),
+  ).not.toBeDisabled();
+});
 it('waits visibly for a period offer and prevents future preparation', () => {
   const sub = workspace.subscriptions![0];
   const view = setup({ ...workspace, subscriptions: [{ ...sub, periods: [] }] });

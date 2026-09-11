@@ -4,7 +4,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const { sleep } = require('./paykit-harness');
 const ONCHAIN = 'btc-onchain';
 const BOLT11 = 'btc-lightning-bolt11';
-const stages = ['recurring-validation', 'recurring-onchain-manual', 'recurring-onchain-autopay', 'recurring-onchain-missed', 'recurring-lightning-manual', 'recurring-lightning-autopay', 'recurring-lightning-missed', 'recurring-persistence-cancel', 'recurring-failure-safety', 'recurring-wallet-clock', 'recurring-core-unsigned-restart', 'recurring-core-broadcast-restart'];
+const stages = ['recurring-validation', 'recurring-raw-proof-hold', 'recurring-onchain-manual', 'recurring-onchain-autopay', 'recurring-onchain-missed', 'recurring-lightning-manual', 'recurring-lightning-autopay', 'recurring-lightning-missed', 'recurring-persistence-cancel', 'recurring-failure-safety', 'recurring-wallet-clock', 'recurring-core-unsigned-restart', 'recurring-core-broadcast-restart'];
 const digest = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const utc = value => new Date(value).toISOString().replace('.000Z', 'Z');
 function keys(value, expected) { assert.deepEqual(Object.keys(value).sort(), expected.split(' ').sort()); }
@@ -58,9 +58,18 @@ function validateEvidence(evidence) {
   assert(Number.isSafeInteger(evidence.clock.invoiceExpiry) && evidence.clock.invoiceExpiry > 0);
   assert(Date.parse(evidence.clock.applicationNow) / 1000 > evidence.clock.invoiceTimestamp + evidence.clock.invoiceExpiry);
   assert.equal(evidence.clock.invoicePaid, true); assert.equal(evidence.clock.resetRejected, true);
-  keys(evidence.regressions, 'oversizedRejected oldOfferIndex oldCurrentIndex oldManual coreRestarts');
+  keys(evidence.regressions, 'oversizedRejected rawProofHold oldOfferIndex oldCurrentIndex oldManual coreRestarts');
   assert.equal(evidence.regressions.oversizedRejected, true); assert.equal(evidence.regressions.oldOfferIndex, 0);
   assert(evidence.regressions.oldCurrentIndex >= 128); assert.equal(evidence.regressions.oldManual, true);
+  keys(evidence.regressions.rawProofHold, 'requestId proofId externalTxid heldSends payablePeriodTxid sendsAfter walletBefore walletAfter resolverBefore resolverAfter');
+  assert.match(evidence.regressions.rawProofHold.requestId, /^[0-9a-f-]{36}$/);
+  assert.match(evidence.regressions.rawProofHold.proofId, /^[0-9a-f-]{36}$/);
+  for (const field of ['externalTxid', 'payablePeriodTxid']) assert.match(evidence.regressions.rawProofHold[field], /^[a-f0-9]{64}$/);
+  assert(Number.isInteger(evidence.regressions.rawProofHold.heldSends) && evidence.regressions.rawProofHold.heldSends > 0);
+  assert.equal(evidence.regressions.rawProofHold.sendsAfter, evidence.regressions.rawProofHold.heldSends + 1);
+  for (const field of ['walletBefore', 'resolverBefore']) assert.match(evidence.regressions.rawProofHold[field], /^[a-f0-9]{64}$/);
+  assert.equal(evidence.regressions.rawProofHold.walletAfter, evidence.regressions.rawProofHold.walletBefore);
+  assert.equal(evidence.regressions.rawProofHold.resolverAfter, evidence.regressions.rawProofHold.resolverBefore);
   assert.deepEqual(evidence.regressions.coreRestarts.map(r => r.phase), ['unsigned', 'broadcast']);
   for (const r of evidence.regressions.coreRestarts) {
     keys(r, 'phase executionId txid transactionDigest originalDigest walletWasUnloaded walletDirectoryBefore walletDirectoryAfter sendsBefore sendsAfter');
@@ -156,6 +165,56 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
   assert.deepEqual(await unchangedProposalState(), beforeOversized);
   evidence.regressions.oversizedRejected = true;
   stage('recurring-validation');
+  // A supported raw proof can describe a real payment made outside Paykit's execution ledger.
+  // That proof must hold this exact period across reopen without blocking a later period.
+  const raw = await create(ONCHAIN, '731');
+  await prepare(raw, 0);
+  const rawBinding = period(await view(bob), raw.id, 0).endpointBindings.find(b => b.source === raw.source && b.method === raw.method);
+  assert(rawBinding);
+  await mine(1);
+  const rawWallet = `paykit-${owner(alice)}`;
+  const externalTxid = fixture.core('sendtoaddress', [rawBinding.endpoint, '0.00000731'], rawWallet);
+  const externalTransaction = fixture.core('getrawtransaction', [externalTxid, true]);
+  const outputIndex = externalTransaction.vout.findIndex(output => output.scriptPubKey.address === rawBinding.endpoint);
+  assert(outputIndex >= 0, 'External recurring payment output was not found');
+  await mine(1);
+  await command('proof.submit', { receiverId: alice.id, requestId: raw.id, periodIndex: 0, proof: { method: ONCHAIN, txid: externalTxid, outputIndex } });
+  await wait(s => workspace(s, bob).proofs.some(p => p.requestId === raw.id && p.periodIndex === 0));
+  const rawProof = (await view(bob)).proofs.find(p => p.requestId === raw.id && p.periodIndex === 0);
+  assert.equal(execution(await view(alice), raw.id, 0), undefined);
+  await command('receiver.restart', { receiverId: alice.id });
+  assert.equal(period(await view(alice), raw.id, 0).proofId, rawProof.id);
+  assert.equal(execution(await view(alice), raw.id, 0), undefined);
+  const sendIds = () => [...new Set(fixture.core('listtransactions', ['*', 10000, 0, true], rawWallet).filter(t => t.category === 'send').map(t => t.txid))].sort();
+  const resolverState = async () => {
+    const payer = await view(alice);
+    const heldPeriod = period(payer, raw.id, 0);
+    return digest({
+      endpointBindings: heldPeriod.endpointBindings,
+      endpointCommitments: heldPeriod.endpointCommitments,
+      reservations: payer.reservations,
+      discoveries: payer.discoveries,
+    });
+  };
+  const held = sendIds(); assert(held.includes(externalTxid));
+  const walletBefore = digest(history()); const resolverBefore = await resolverState();
+  await command('payment.execute', selection(raw, 0), randomUUID(), 'failed');
+  assert.deepEqual(sendIds(), held); assert.equal(execution(await view(alice), raw.id, 0), undefined);
+  assert.equal(await resolverState(), resolverBefore);
+  await authorize(raw);
+  await wait(s => subscription(workspace(s, alice), raw.id).autopay.status === 'blocked');
+  await stableTicks(); assert.deepEqual(sendIds(), held); assert.equal(execution(await view(alice), raw.id, 0), undefined);
+  const walletAfter = digest(history()); const resolverAfter = await resolverState();
+  assert.equal(walletAfter, walletBefore); assert.equal(resolverAfter, resolverBefore);
+  await disable(raw);
+  now = raw.anchor + 60000; await set([bob, alice], now);
+  await prepare(raw, 1); await command('payment.execute', selection(raw, 1));
+  const payable = await finish(raw, 1);
+  const sendsAfter = sendIds();
+  assert.deepEqual(sendsAfter, [...new Set([...held, payable.paymentReference])].sort());
+  evidence.regressions.rawProofHold = { requestId: raw.id, proofId: rawProof.id, externalTxid, heldSends: held.length, payablePeriodTxid: payable.paymentReference, sendsAfter: sendsAfter.length, walletBefore, walletAfter, resolverBefore, resolverAfter };
+  await cancel(raw);
+  stage('recurring-raw-proof-hold');
   const subscriptions = [];
   for (const method of [ONCHAIN, BOLT11]) {
     const name = method === ONCHAIN ? 'onchain' : 'lightning';
@@ -271,12 +330,12 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
   const miningAddress = fixture.core('getnewaddress', [], '');
   const mineAfterRestart = async count => fixture.core('generatetoaddress', [count, miningAddress]);
   const walletName = `paykit-${owner(alice)}`;
-  const sendIds = () => [...new Set(fixture.core('listtransactions', ['*', 10000, 0, true], walletName).filter(t => t.category === 'send').map(t => t.txid))].sort();
+  const restartSendIds = () => [...new Set(fixture.core('listtransactions', ['*', 10000, 0, true], walletName).filter(t => t.category === 'send').map(t => t.txid))].sort();
   const walletDirectory = () => fixture.core('listwalletdir').wallets.map(w => w.name).filter(w => w.startsWith('paykit-')).sort();
   for (const phase of ['unsigned', 'broadcast']) {
     await mineAfterRestart(1);
     const r = await create(ONCHAIN, phase === 'unsigned' ? '709' : '719'); await prepare(r, 0);
-    const sendsBefore = sendIds(); const walletDirectoryBefore = walletDirectory();
+    const sendsBefore = restartSendIds(); const walletDirectoryBefore = walletDirectory();
     const operation = phase === 'unsigned' ? 'signrawtransactionwithwallet' : 'sendrawtransaction';
     const gateBefore = fixture.counts().core.executionSuccess;
     const nonce = fixture.arm('core', 'hold', operation);
@@ -310,7 +369,7 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
     await finish(r, 0, false, mineAfterRestart);
     await command('payment.reconcile', { receiverId: alice.id, executionId: recovered.id });
     await command('payment.execute', selection(r, 0, fixture.walletIds.fault));
-    const sendsAfter = sendIds(); assert.deepEqual(sendsAfter, [...new Set([...sendsBefore, recovered.txid])].sort()); assert.equal(sendsAfter.length, sendsBefore.length + 1);
+    const sendsAfter = restartSendIds(); assert.deepEqual(sendsAfter, [...new Set([...sendsBefore, recovered.txid])].sort()); assert.equal(sendsAfter.length, sendsBefore.length + 1);
     assert.equal(fixture.counts().core.executionSuccess, gateBefore + 1); assert.deepEqual(walletDirectory(), walletDirectoryBefore);
     evidence.regressions.coreRestarts.push({ phase, executionId: recovered.id, txid: recovered.txid, transactionDigest, originalDigest, walletWasUnloaded: true, walletDirectoryBefore, walletDirectoryAfter: walletDirectory(), sendsBefore: sendsBefore.length, sendsAfter: sendsAfter.length });
     await cancel(r); stage(`recurring-core-${phase}-restart`);

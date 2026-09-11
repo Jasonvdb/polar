@@ -69,6 +69,17 @@ const PaykitSubscriptions: React.FC<
     workspace?.executions?.some(
       item => item.requestId === requestId && item.periodIndex === periodIndex,
     );
+  const periodProved =
+    !!period?.proofId ||
+    period?.status === 'proofSubmitted' ||
+    period?.status === 'verified';
+  const currentPeriod = subscription?.periods.find(
+    item => item.index === subscription.currentPeriodIndex,
+  );
+  const currentPeriodProved =
+    !!currentPeriod?.proofId ||
+    currentPeriod?.status === 'proofSubmitted' ||
+    currentPeriod?.status === 'verified';
   const clock = workspace?.applicationClock;
   const effectiveNow = clock?.now || new Date().toISOString();
   const hasStarted =
@@ -492,6 +503,12 @@ const PaykitSubscriptions: React.FC<
                 message="This period already has an execution. Inspect or reconcile its original execution in Requests and payments; another payment is blocked."
               />
             )}
+            {periodProved && !periodExecuted && (
+              <Alert
+                type="info"
+                message="This period already has a submitted payment proof. Another payment is blocked while that proof is retained."
+              />
+            )}
             <Button
               type="primary"
               disabled={
@@ -502,7 +519,8 @@ const PaykitSubscriptions: React.FC<
                 !walletId ||
                 !methodAvailable ||
                 !period?.offerId ||
-                !!periodExecuted
+                !!periodExecuted ||
+                periodProved
               }
               onClick={() =>
                 source &&
@@ -522,12 +540,19 @@ const PaykitSubscriptions: React.FC<
               type="info"
               message="Autopay is an explicit authorization for this request only. It attempts the current period when an offer arrives and submits its payment proof. Missed periods and failed or uncertain attempts need manual attention. Settlement verification and receipts remain separate."
             />
+            {currentPeriodProved && (
+              <Alert
+                type="info"
+                message="The current period already has a submitted payment proof. Autopay cannot be enabled until a future unpaid period becomes current."
+              />
+            )}
             <Button
               disabled={
                 disabled ||
                 !active ||
                 !source ||
                 !authorizationValid ||
+                currentPeriodProved ||
                 subscription?.autopay.enabled
               }
               onClick={() =>

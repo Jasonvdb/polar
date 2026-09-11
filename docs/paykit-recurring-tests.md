@@ -1,11 +1,12 @@
 # Recurring payment verification
 
-`node scripts/paykit-ci.js` runs all earlier 60 stages and twelve recurring stages in each of two disposable real Pubky/PostgreSQL/Bitcoin Core/LND environments. Build the service and the existing non-shipping receipt fixture first, as described in the backend setup. No additional services or dependencies are needed. `node scripts/paykit-ci.js --verify-report <report-directory>` requires all 72 stages, existing wallet/fault/cleanup evidence, and the recurring evidence schema. An incomplete or timed-out run fails.
+`node scripts/paykit-ci.js` runs all earlier 60 stages and thirteen recurring stages in each of two disposable real Pubky/PostgreSQL/Bitcoin Core/LND environments. Build the service and the existing non-shipping receipt fixture first, as described in the backend setup. No additional services or dependencies are needed. `node scripts/paykit-ci.js --verify-report <report-directory>` requires all 73 stages, existing wallet/fault/cleanup evidence, and the recurring evidence schema. An incomplete or timed-out run fails.
 
 The recurring stages exercise:
 
 - Oversized encrypted parent proposals fail with shortening guidance and no new public request/reservation; Rust coverage verifies no hidden proposal checkpoint. A previously unrecorded period-0 offer received at current period 128 remains visible for manual payment without automatic backlog collection.
 - Explicit acceptance without payment, per-request wallet/source/method authorization, future-period rejection and hidden period-offer rejection by ordinary payment commands.
+- A real external on-chain payment submitted as a raw recurring proof creates no local execution. After receiver reopen, both manual execution and current-period autopay remain held without another outgoing Core transaction, while the next unpaid period remains payable exactly once.
 - On-chain public payments and BOLT11 private payments: period 0 paid manually; period 1 automatically paid only after the payee prepares its endpoint offer; period 2 skipped while the payer is offline, prepared later without automatic collection, then paid manually.
 - Compact period commitments match the payee's exact endpoint bytes and the payer's later resolved execution endpoint. The payer initially sees commitments without raw endpoints; prepayment invoice clock checks read authenticated payee bindings.
 - Separate execution, proof submission and independent settlement records with exact billing boundaries, plus encrypted receipt issuance, access delivery and decryption for each rail.

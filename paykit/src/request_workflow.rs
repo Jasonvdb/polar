@@ -375,6 +375,7 @@ impl Runtime {
                 ),
             "only payer can execute an accepted unpaid request"
         );
+        ensure_period_has_no_proof(&self.vault, &record, i.period_index)?;
         let terms = record
             .terms
             .as_ref()
@@ -871,6 +872,44 @@ fn checkpoint_proof(
     vault.save("requests.cbor", &local)
 }
 
+fn ensure_period_has_no_proof(
+    vault: &crate::storage::Vault,
+    record: &PaymentRequestRecord,
+    period_index: Option<u32>,
+) -> anyhow::Result<()> {
+    let has_proof = record
+        .payment_proofs
+        .iter()
+        .try_fold(false, |found, proof| {
+            Ok::<_, anyhow::Error>(
+                found
+                    || super::subscription_workflow::proof_period(
+                        record,
+                        proof.billing_period.as_ref(),
+                    )? == period_index,
+            )
+        })?;
+    anyhow::ensure!(
+        !has_proof,
+        "payment proof already submitted for this period"
+    );
+
+    let transition = match period_index {
+        Some(index) => format!("proof:{}:{index}", record.payment_request_id),
+        None => format!("proof:{}", record.payment_request_id),
+    };
+    anyhow::ensure!(
+        !vault
+            .load::<RequestState>("requests.cbor")?
+            .unwrap_or_default()
+            .transitions
+            .values()
+            .any(|value| value == &transition),
+        "proof enqueue checkpoint unresolved for this period"
+    );
+    Ok(())
+}
+
 fn lifecycle(state: PaymentRequestLifecycleState) -> &'static str {
     match state {
         PaymentRequestLifecycleState::Proposed => "proposed",
@@ -1080,6 +1119,76 @@ mod binding_tests {
             2
         );
         assert_eq!(lifecycle(record.state), "activeRecurring");
+    }
+    #[test]
+    fn recurring_payment_is_held_by_proof_checkpoint_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || {
+            crate::storage::Vault::new(dir.path().into(), [26; 32], "period-hold".into()).unwrap()
+        };
+        let record = recurring_payer_record();
+        let proof = Proof::Onchain {
+            txid: "ab".repeat(32),
+            output_index: 0,
+        };
+        checkpoint_proof(&open(), Uuid::new_v4(), &record, &proof, Some(0)).unwrap();
+
+        assert!(ensure_period_has_no_proof(&open(), &record, Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("checkpoint unresolved"));
+        ensure_period_has_no_proof(&open(), &record, Some(1)).unwrap();
+    }
+    #[test]
+    fn recurring_payment_is_held_only_for_the_sdk_proof_period() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault =
+            crate::storage::Vault::new(dir.path().into(), [27; 32], "sdk-proof-hold".into())
+                .unwrap();
+        let mut record = recurring_payer_record();
+        let period = crate::recurrence::Recurrence::from_record(
+            record.terms.as_ref().unwrap().recurrence.as_ref().unwrap(),
+        )
+        .unwrap()
+        .period(0)
+        .unwrap();
+        record.payment_proofs.push(
+            serde_json::from_value(json!({
+                "event_id": Uuid::new_v4().to_string(),
+                "outbound_message_id": 1,
+                "outbound_status": "Pending",
+                "stream_item_id": null,
+                "payment_reference": "fixture-reference",
+                "billing_period": {
+                    "starts_at": period.starts_at,
+                    "ends_at": period.ends_at
+                },
+                "payment_endpoint_identifier": ONCHAIN,
+                "proof": {"method": ONCHAIN, "txid": "ab".repeat(32), "outputIndex": 0},
+                "recorded_at": "2026-02-01T00:00:00Z"
+            }))
+            .unwrap(),
+        );
+
+        assert!(ensure_period_has_no_proof(&vault, &record, Some(0))
+            .unwrap_err()
+            .to_string()
+            .contains("proof already submitted"));
+        ensure_period_has_no_proof(&vault, &record, Some(1)).unwrap();
+    }
+
+    fn recurring_payer_record() -> PaymentRequestRecord {
+        let mut record = payer_record();
+        record.state = PaymentRequestLifecycleState::ActiveRecurring;
+        record.terms.as_mut().unwrap().recurrence =
+            Some(paykit_sdk::PaymentRequestRecurrenceRecord {
+                every: 1,
+                unit: "month".into(),
+                starts_at: "2026-01-31T00:00:00Z".into(),
+                anchor: "2026-01-31T00:00:00Z".into(),
+                ends_at: None,
+            });
+        record
     }
     #[test]
     fn full_proposal_preflight_enforces_exact_serialized_boundary() {
