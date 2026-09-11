@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, recoveryView, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
+const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, recoveryView, assertWrongReceiverPreview, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
 
 const receiverId = '123e4567-e89b-42d3-a456-426614174000';
 const presetReceiverId = 'af9f976d-b4ff-5feb-af0e-4fad185109f1';
@@ -53,4 +53,14 @@ test('public state oracle selects only the receiver and its recovery view', () =
   assert.equal(recoveryView(snapshot, receiverId).phase, 'ready');
   assert.deepEqual(JSON.parse(publicSnapshot(snapshot, receiverId)), { receivers: [snapshot.receivers[0]], workspaces: [snapshot.receiverWorkspaces[0]] });
   assert.equal(JSON.parse(publicSnapshot(snapshot)).receivers.length, 2);
+});
+test('wrong receiver preview is diagnostic and never claims restorability', () => {
+  const transferId = '123e4567-e89b-42d3-a456-426614174001';
+  assert.doesNotThrow(() => assertWrongReceiverPreview({ receiverId, transferId, identityMatches: true, receiverMatches: false, restorable: false }, receiverId, transferId));
+  for (const invalid of [
+    { receiverId: 'other', transferId, identityMatches: true, receiverMatches: false, restorable: false },
+    { receiverId, transferId, identityMatches: false, receiverMatches: false, restorable: false },
+    { receiverId, transferId, identityMatches: true, receiverMatches: true, restorable: false },
+    { receiverId, transferId, identityMatches: true, receiverMatches: false, restorable: true },
+  ]) assert.throws(() => assertWrongReceiverPreview(invalid, receiverId, transferId));
 });

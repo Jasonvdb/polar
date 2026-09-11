@@ -65,6 +65,12 @@ function publicSnapshot(snapshot, receiverId) {
   return JSON.stringify({ receivers, workspaces });
 }
 
+function assertWrongReceiverPreview(result, receiverId, transferId) {
+  assert.equal(result.receiverId, receiverId); assert.equal(result.transferId, transferId);
+  assert.equal(result.identityMatches, true);
+  assert.equal(result.receiverMatches, false); assert.equal(result.restorable, false);
+}
+
 async function run({ initial, state, command, stage, signal, walletFixture: fixture, base, token, requests }) {
   assert(fixture?.loseReceiverState && fixture?.pruneBackupExecutions && fixture?.markPeerUnsafe && fixture?.backupJournalProjection, 'PR8 backup fixture capabilities are required');
   const bobParticipant = initial.participants.find(value => value.name === 'Bob');
@@ -91,7 +97,6 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     for (const candidate of [
       { receiverId: bob.id, password: randomPassphrase(), bytes: archive },
       { receiverId: bob.id, password: passphrase, bytes: Buffer.from(archive).fill(archive[archive.length - 1] ^ 1, archive.length - 1) },
-      { receiverId: server.id, password: passphrase, bytes: archive },
     ]) {
       const beforeAll = publicSnapshot(await state());
       const beforeTarget = publicSnapshot(await state(), candidate.receiverId);
@@ -102,6 +107,27 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
       assert.deepEqual(fixture.paymentHistory(ownerKeys), histories);
       if (candidate.password !== passphrase) candidate.password.fill(0);
     }
+    const serverBefore = (await state()).receivers.find(value => value.id === server.id);
+    assert.equal(serverBefore.status, 'running');
+    await command('receiver.stop', { receiverId: server.id });
+    try {
+      const beforeAll = publicSnapshot(await state()); const beforeTarget = publicSnapshot(await state(), server.id);
+      const beforeJournal = fixture.backupJournalProjection(); const beforeHistories = fixture.paymentHistory(ownerKeys);
+      const transferId = await createTransfer({ base, token, purpose: 2, receiverId: server.id, passphrase, archive, signal });
+      const inspected = await command('backup.inspect', { receiverId: server.id, transferId });
+      assertWrongReceiverPreview(inspected.operation.result, server.id, transferId);
+      assert.equal(publicSnapshot(await state()), beforeAll); assert.equal(publicSnapshot(await state(), server.id), beforeTarget);
+      assert.deepEqual(fixture.backupJournalProjection(), beforeJournal); assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeHistories);
+      const rejected = await command('backup.restore', { receiverId: server.id, transferId }, undefined, 'failed');
+      assert.equal(rejected.operation.error.code, 'backup_invalid');
+      assert.equal(publicSnapshot(await state()), beforeAll); assert.equal(publicSnapshot(await state(), server.id), beforeTarget);
+      assert.deepEqual(fixture.backupJournalProjection(), beforeJournal); assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeHistories);
+    } finally {
+      await command('receiver.start', { receiverId: server.id });
+    }
+    const serverAfter = (await state()).receivers.find(value => value.id === server.id);
+    assert.equal(serverAfter.status, 'running'); assert.equal(serverAfter.path, serverBefore.path);
+    assert.equal(serverAfter.noisePublicKey, serverBefore.noisePublicKey); assert.equal(serverAfter.participantId, serverBefore.participantId);
     stage('backup-invalid-archives');
 
     await command('receiver.stop', { receiverId: alice.id });
@@ -196,4 +222,4 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
   } finally { passphrase.fill(0); alicePassphrase.fill(0); archive?.fill(0); aliceArchive?.fill(0); }
 }
 
-module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, MAX_ARCHIVE };
+module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertWrongReceiverPreview, MAX_ARCHIVE };
