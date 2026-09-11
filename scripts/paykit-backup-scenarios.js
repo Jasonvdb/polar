@@ -68,7 +68,7 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
   const server = initial.receivers.find(value => value.participantId === bobParticipant.id && value.path.endsWith('/server'));
   const ownerKeys = ['Alice', 'Bob', 'Carol'].map(name => initial.participants.find(value => value.name === name).publicKey);
   const alice = requests.alice;
-  const passphrase = randomBytes(32); let archive;
+  const passphrase = randomBytes(32); const alicePassphrase = randomBytes(32); let archive; let aliceArchive;
   try {
     await requests.link(bob, requests.carol);
     const linkedPeers = (await requests.view(bob)).links.filter(value => value.state === 'linked');
@@ -100,8 +100,12 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     }
     stage('backup-invalid-archives');
 
+    await command('receiver.stop', { receiverId: alice.id });
+    const aliceExportId = await createTransfer({ base, token, purpose: 1, receiverId: alice.id, passphrase: alicePassphrase, signal });
+    await command('backup.export', { receiverId: alice.id, transferId: aliceExportId });
+    aliceArchive = await downloadArchive({ base, token, transferId: aliceExportId, signal });
     const journalBeforePayments = fixture.backupJournalProjection();
-    await command('receiver.start', { receiverId: bob.id });
+    await command('receiver.start', { receiverId: alice.id }); await command('receiver.start', { receiverId: bob.id });
     const core = await requests.createPaid('btc-onchain');
     const lightning = await requests.createPaid('btc-lightning-bolt11');
     const payer = await requests.view(alice);
@@ -133,20 +137,40 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     await command('receiver.stop', { receiverId: bob.id });
     stage('backup-local-loss'); stage('backup-wallet-survivors');
 
+    await command('receiver.stop', { receiverId: alice.id });
+    const completeAliceLoss = fixture.loseReceiverState(alice.id);
+    const aliceTransfer = await createTransfer({ base, token, purpose: 2, receiverId: alice.id, passphrase: alicePassphrase, archive: aliceArchive, signal });
+    const ownPreview = await command('backup.inspect', { receiverId: alice.id, transferId: aliceTransfer });
+    assert.equal(ownPreview.operation.result.restorable, true); assert.equal(ownPreview.operation.result.sdkValidationPending, true);
+    await command('backup.restore', { receiverId: alice.id, transferId: aliceTransfer }); completeAliceLoss();
+    const restoredAlice = (await state()).receivers.find(value => value.id === alice.id);
+    assert.equal(restoredAlice.path, alice.path); assert.equal(restoredAlice.noisePublicKey, alice.noisePublicKey);
+    assert.deepEqual(fixture.backupJournalProjection(), paidJournal, 'Own-receiver restore changed immutable executions, survivors, or settlements');
+    assert.deepEqual(fixture.paymentHistory(ownerKeys), paidHistory, 'Own-receiver restore replayed a financial send');
+
     for (const receiver of initial.receivers) {
       if ((await state()).receivers.find(value => value.id === receiver.id).status !== 'stopped') await command('receiver.stop', { receiverId: receiver.id });
     }
     const restoreJournal = fixture.pruneBackupExecutions(alice.id, coreExecution.txid, lightningExecution.paymentHash);
-    const secondLoss = fixture.loseReceiverState(bob.id);
-    const emptyTransfer = await createTransfer({ base, token, purpose: 2, receiverId: bob.id, passphrase, archive, signal });
-    await command('backup.restore', { receiverId: bob.id, transferId: emptyTransfer }); secondLoss();
-    const unknown = recoveryView(await state(), bob.id);
+    const secondLoss = fixture.loseReceiverState(alice.id);
+    const emptyTransfer = await createTransfer({ base, token, purpose: 2, receiverId: alice.id, passphrase: alicePassphrase, archive: aliceArchive, signal });
+    await command('backup.restore', { receiverId: alice.id, transferId: emptyTransfer }); secondLoss();
+    const unknown = recoveryView(await state(), alice.id);
     assert.equal(unknown.unknownAfterExportCount, 2); assert.equal(unknown.walletReconciled, false); assert.equal(unknown.automationPaused, true);
     assert(unknown.blockedReasons.includes('wallet_history_unknown'));
     assert.deepEqual(fixture.paymentHistory(ownerKeys), paidHistory);
     restoreJournal(); stage('backup-empty-oracle');
 
     for (const receiver of initial.receivers) await command('receiver.start', { receiverId: receiver.id });
+    const beforeAliceReconcile = fixture.paymentHistory(ownerKeys);
+    await command('recovery.reconcile', { receiverId: alice.id });
+    assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeAliceReconcile, 'Own-receiver reconciliation replayed a financial send');
+    const aliceReady = recoveryView(await state(), alice.id);
+    assert.equal(aliceReady.unknownAfterExportCount, 0); assert.equal(aliceReady.phase, 'ready'); assert.equal(aliceReady.automationPaused, false);
+    const beforeReplay = fixture.paymentHistory(ownerKeys); const journalBeforeReplay = fixture.backupJournalProjection();
+    await command('payment.execute', core.executionInput); await command('payment.execute', lightning.executionInput);
+    assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeReplay, 'Replayed durable execution intent sent another payment');
+    assert.deepEqual(fixture.backupJournalProjection(), journalBeforeReplay, 'Replayed durable execution intent duplicated journal state');
     await command('recovery.reconcile', { receiverId: bob.id });
     restored = await state(); const recovery = recoveryView(restored, bob.id);
     assert.equal(recovery.sdkValidated, true); assert.equal(recovery.walletReconciled, true);
@@ -165,7 +189,7 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     assert.equal(ready.phase, 'ready'); assert.equal(ready.automationPaused, false); assert.equal(ready.unknownAfterExportCount, 0);
     assert.deepEqual(fixture.paymentHistory(ownerKeys), paidHistory); stage('backup-ready');
     return { restoredReceiverId: bob.id, preservedCoreTxid: coreExecution.txid, preservedLightningHash: lightningExecution.paymentHash };
-  } finally { passphrase.fill(0); archive?.fill(0); }
+  } finally { passphrase.fill(0); alicePassphrase.fill(0); archive?.fill(0); aliceArchive?.fill(0); }
 }
 
 module.exports = { stages, run, transferFrame, createTransfer, downloadArchive, recoveryView, publicSnapshot, MAX_ARCHIVE };

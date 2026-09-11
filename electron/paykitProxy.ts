@@ -471,7 +471,7 @@ async function callTransfer(
   method: 'POST' | 'GET' | 'DELETE',
   path: string,
   body?: Buffer,
-): Promise<{ status: number; body: Buffer; contentType?: string }> {
+): Promise<{ body: Buffer; contentType?: string }> {
   const token = await fs.readFile(
     join(credentialsRoot(), binding.environmentId, 'api-token'),
     'utf8',
@@ -518,7 +518,6 @@ async function callTransfer(
             return;
           }
           resolveRequest({
-            status: res.statusCode,
             body: response,
             contentType: `${res.headers['content-type'] || ''}`,
           });

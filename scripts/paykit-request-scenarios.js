@@ -277,7 +277,7 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
       const result = await execute(requestId, alice, fixture.walletIds.alice, method);
       assertPaidExecution(result);
       const proof = await submit(requestId, result.execution);
-      return { requestId, proof, method };
+      return { requestId, proof, method, executionInput: { receiverId: alice.id, requestId, walletId: fixture.walletIds.alice, source: 'public', method } };
     },
   };
 }
