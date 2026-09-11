@@ -141,6 +141,90 @@ describe('Editable encrypted links', () => {
     expect(view.getByText('Initiate link').closest('button')).not.toBeDisabled();
     expect(view.getByText('Accept link').closest('button')).not.toBeDisabled();
   });
+  it('allows a selected linked peer to observe and prepare recovery', () => {
+    const command = jest.fn().mockResolvedValue(undefined);
+    const linkedPeer = {
+      peerPublicKey: 'y'.repeat(52),
+      peerReceiverPath: 'bob/wallet',
+      state: 'linked',
+      generation: 2,
+      failureCount: 0,
+      pendingMessages: 0,
+    };
+    const view = renderWithProviders(
+      <PaykitLinks
+        receiverId={receiverId}
+        workspace={{ ...workspace, links: [linkedPeer] }}
+        state={state}
+        disabled={false}
+        command={command}
+      />,
+    );
+    fireEvent.click(view.getByText('Select link'));
+    expect(view.getByText('Prepare recovery').closest('button')).not.toBeDisabled();
+    fireEvent.click(view.getByText('Prepare recovery'));
+    expect(command).toHaveBeenCalledWith('link.prepareRecovery', {
+      receiverId,
+      peerPublicKey: linkedPeer.peerPublicKey,
+      peerReceiverPath: linkedPeer.peerReceiverPath,
+    });
+    expect(view.getByText('Initiate link').closest('button')).not.toBeDisabled();
+    expect(view.getByText('Accept link').closest('button')).not.toBeDisabled();
+  });
+  it.each(['linking', 'blocked', 'future-state'])(
+    'does not prepare a peer in the %s state',
+    linkState => {
+      const command = jest.fn().mockResolvedValue(undefined);
+      const view = renderWithProviders(
+        <PaykitLinks
+          receiverId={receiverId}
+          workspace={{
+            ...workspace,
+            links: [
+              {
+                peerPublicKey: 'y'.repeat(52),
+                peerReceiverPath: 'bob/wallet',
+                state: linkState,
+                generation: 2,
+                failureCount: 0,
+                pendingMessages: 0,
+              },
+            ],
+          }}
+          state={state}
+          disabled={false}
+          command={command}
+        />,
+      );
+      fireEvent.click(view.getByText('Select link'));
+      expect(view.getByText('Prepare recovery').closest('button')).toBeDisabled();
+    },
+  );
+  it('keeps preparation disabled while receiver operations are unavailable', () => {
+    const view = renderWithProviders(
+      <PaykitLinks
+        receiverId={receiverId}
+        workspace={{
+          ...workspace,
+          links: [
+            {
+              peerPublicKey: 'y'.repeat(52),
+              peerReceiverPath: 'bob/wallet',
+              state: 'linked',
+              generation: 2,
+              failureCount: 0,
+              pendingMessages: 0,
+            },
+          ],
+        }}
+        state={state}
+        disabled
+        command={jest.fn()}
+      />,
+    );
+    fireEvent.click(view.getByText('Select link'));
+    expect(view.getByText('Prepare recovery').closest('button')).toBeDisabled();
+  });
   it('does not gate a normal new link', () => {
     const view = renderWithProviders(
       <PaykitLinks

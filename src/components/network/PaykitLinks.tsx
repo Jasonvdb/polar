@@ -47,6 +47,9 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
       link.peerReceiverPath === input.peerReceiverPath,
   );
   const selectedRecovery = selectedLink?.state === 'recoveryRequired';
+  const recoveryPreparationAllowed =
+    !!selectedLink &&
+    ['notLinked', 'linked', 'recoveryRequired'].includes(selectedLink.state);
   const handshakeDisabled =
     peerDisabled ||
     (selectedRecovery && !selectedLink?.recoveryPreparation?.readyForHandshake);
@@ -126,7 +129,7 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
         />
         <Space wrap>
           <Button
-            disabled={peerDisabled || !selectedRecovery}
+            disabled={peerDisabled || !recoveryPreparationAllowed}
             onClick={() => command('link.prepareRecovery', input)}
           >
             Prepare recovery

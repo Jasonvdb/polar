@@ -994,8 +994,10 @@ impl Runtime {
         Ok(())
     }
     async fn sync(&self) -> anyhow::Result<()> {
+        let peers = self.sdk.linked_peers().await?;
+        self.observe_linked_recovery_markers(&peers).await?;
         let mut failed = self.payment_maintenance().await.is_err();
-        for peer in self.sdk.linked_peers().await? {
+        for peer in peers {
             if peer.state == LinkedPeerState::Linking && self.link_advancement_allowed(&peer) {
                 failed |= self
                     .sdk
@@ -1024,6 +1026,23 @@ impl Runtime {
             );
         }
         anyhow::ensure!(!failed, "link advancement failed");
+        Ok(())
+    }
+    async fn observe_linked_recovery_markers(
+        &self,
+        peers: &[LinkedPeerRecord],
+    ) -> anyhow::Result<()> {
+        for peer in peers
+            .iter()
+            .filter(|peer| peer.state == LinkedPeerState::Linked)
+        {
+            self.sdk
+                .observe_encrypted_link_recovery_marker(
+                    peer.counterparty.clone(),
+                    peer.counterparty_receiver_path.clone(),
+                )
+                .await?;
+        }
         Ok(())
     }
     pub async fn refresh(&mut self) -> anyhow::Result<()> {
@@ -1983,6 +2002,29 @@ mod tests {
         assert_eq!(after.generation, 5);
         assert!(after.handshake_snapshot.is_none());
         assert!(after.link_snapshot.is_none());
+    }
+    #[tokio::test]
+    async fn failed_recovery_observation_preserves_the_link_checkpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = open(dir.path(), Uuid::new_v4());
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        seed_abandoned_link(&runtime, &key, &path, LinkedPeerState::Linked).await;
+        let before = runtime
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(&key, &path).unwrap()))
+            .await
+            .unwrap();
+
+        assert!(runtime.sync().await.is_err());
+
+        let after = runtime
+            .storage
+            .transaction(|tx| Ok(tx.encrypted_link_state(&key, &path).unwrap()))
+            .await
+            .unwrap();
+        assert_eq!(after.generation, before.generation);
+        assert_eq!(after.checkpointed_at, before.checkpointed_at);
     }
     #[test]
     fn cache_eviction_preserves_durable_data_and_capacity_allows_existing_edits() {
