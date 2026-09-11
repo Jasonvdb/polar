@@ -383,7 +383,7 @@ const refreshWallets = (
 };
 
 /** Finite, authenticated requests. Only fixed loopback paths and public payloads are accepted. */
-async function callService(
+export async function callService(
   binding: PaykitEnvironment,
   path: string,
   body?: unknown,
@@ -407,9 +407,10 @@ async function callService(
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => {
           size += chunk.length;
-          if (size > 4 * 1024 * 1024)
-            req.destroy(new Error('Paykit response exceeded size limit'));
-          else chunks.push(chunk);
+          if (size > 4 * 1024 * 1024) {
+            reject(new Error('Paykit response exceeded size limit'));
+            req.destroy();
+          } else chunks.push(chunk);
         });
         res.on('error', () => reject(new Error('Paykit service response interrupted')));
         res.on('end', () => {
@@ -429,10 +430,10 @@ async function callService(
         });
       },
     );
-    const timeout = setTimeout(
-      () => req.destroy(new Error('Paykit service request timed out')),
-      5000,
-    );
+    const timeout = setTimeout(() => {
+      reject(new Error('Paykit service request timed out'));
+      req.destroy();
+    }, 5000);
     req.once('close', () => clearTimeout(timeout));
     req.on('error', () =>
       reject(

@@ -1,4 +1,6 @@
 import { promises as fs } from 'fs';
+import { EventEmitter } from 'events';
+import { request as httpRequest } from 'http';
 import { join, resolve, sep } from 'path';
 import {
   paykitProxy,
@@ -7,6 +9,7 @@ import {
   walletBindings,
   fundingWalletIds,
   refreshWalletConfig,
+  callService,
 } from '../../electron/paykitProxy';
 import { bakePaykitMacaroon } from '../../electron/paykitWalletAuth';
 jest.mock('../../electron/paykitWalletAuth', () => ({
@@ -37,9 +40,11 @@ jest.mock('net', () => ({
     close: (callback: () => void) => callback(),
   }),
 }));
+jest.mock('http', () => ({ request: jest.fn() }));
 const envId = '9b03a782-e2f3-4b7a-8ef5-429628921ee2';
-const binding = { apiVersion: 1, environmentId: envId, servicePort: 30091 };
+const binding = { apiVersion: 1 as const, environmentId: envId, servicePort: 30091 };
 const fsMock = fs as jest.Mocked<typeof fs>;
+const httpRequestMock = httpRequest as jest.MockedFunction<typeof httpRequest>;
 const network = () => ({
   id: 1,
   path: join(paykitConfig.dataPath, 'networks', '1'),
@@ -154,6 +159,73 @@ describe('Main process Paykit boundary', () => {
       expect(flags).toBe('wx');
       expect(mode).toBe(0o600);
     }
+  });
+});
+
+describe('Paykit local request failures', () => {
+  beforeEach(() => {
+    fsMock.readFile.mockResolvedValue('a'.repeat(64));
+    httpRequestMock.mockReset();
+  });
+
+  it('reports its local response-size rejection before destroying the request', async () => {
+    const response = new EventEmitter() as any;
+    response.statusCode = 200;
+    const request = new EventEmitter() as any;
+    request.destroy = jest.fn(() => {
+      response.emit('error', new Error('aborted'));
+      request.emit('close');
+    });
+    request.end = jest.fn(() => {
+      response.emit('data', Buffer.alloc(4 * 1024 * 1024 + 1));
+    });
+    httpRequestMock.mockImplementation(((_options: any, callback: any) => {
+      callback(response);
+      return request;
+    }) as any);
+
+    await expect(callService(binding, '/v1/state')).rejects.toThrow(
+      'Paykit response exceeded size limit',
+    );
+    expect(request.destroy).toHaveBeenCalledWith();
+  });
+
+  it('reports its local timeout before destroying the request', async () => {
+    jest.useFakeTimers();
+    const request = new EventEmitter() as any;
+    request.destroy = jest.fn(() => {
+      request.emit('error', new Error('aborted'));
+      request.emit('close');
+    });
+    request.end = jest.fn();
+    httpRequestMock.mockReturnValue(request);
+
+    const pending = callService(binding, '/v1/state');
+    while (!httpRequestMock.mock.calls.length) await Promise.resolve();
+    jest.runOnlyPendingTimers();
+    await expect(pending).rejects.toThrow('Paykit service request timed out');
+    expect(request.destroy).toHaveBeenCalledWith();
+    jest.useRealTimers();
+  });
+
+  it('keeps actual request socket errors generic without exposing details', async () => {
+    const request = new EventEmitter() as any;
+    request.destroy = jest.fn();
+    request.end = jest.fn(() => {
+      request.emit(
+        'error',
+        Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:30091'), {
+          code: 'ECONNREFUSED',
+          syscall: 'connect',
+        }),
+      );
+      request.emit('close');
+    });
+    httpRequestMock.mockReturnValue(request);
+
+    await expect(callService(binding, '/v1/state')).rejects.toThrow(
+      'Paykit service is unavailable. Start the network or check its service logs.',
+    );
   });
 });
 

@@ -4,6 +4,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 pub const EVENT_RETENTION: usize = 256;
+pub const STATE_OPERATION_RETENTION: usize = 256;
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -137,6 +138,37 @@ impl AppState {
         }
     }
     pub fn public(&self, ready: bool) -> PublicState {
+        let terminal_count = self
+            .operations
+            .iter()
+            .filter(|value| {
+                matches!(
+                    value.public.status,
+                    OperationStatus::Succeeded | OperationStatus::Failed
+                )
+            })
+            .count();
+        let skip_terminal = terminal_count.saturating_sub(STATE_OPERATION_RETENTION);
+        let mut terminal_index = 0;
+        let operations = self
+            .operations
+            .iter()
+            .filter_map(|value| {
+                let terminal = matches!(
+                    value.public.status,
+                    OperationStatus::Succeeded | OperationStatus::Failed
+                );
+                let include = !terminal || terminal_index >= skip_terminal;
+                terminal_index += usize::from(terminal);
+                include.then(|| Operation {
+                    id: value.public.id,
+                    command: value.public.command.clone(),
+                    status: value.public.status,
+                    result: None,
+                    error: value.public.error.clone(),
+                })
+            })
+            .collect();
         PublicState {
             api_version: 1,
             funding: self.funding.clone(),
@@ -145,7 +177,7 @@ impl AppState {
             ready,
             participants: self.participants.iter().map(|v| v.public.clone()).collect(),
             receivers: self.receivers.iter().map(|v| v.public.clone()).collect(),
-            operations: self.operations.iter().map(|v| v.public.clone()).collect(),
+            operations,
             last_event_sequence: self.last_event_sequence,
         }
     }
@@ -231,5 +263,55 @@ mod funding_migration_tests {
         let public = serde_json::to_value(recovered.public(true)).unwrap();
         assert_eq!(public["funding"]["status"], "notStarted");
         assert_eq!(public["funding"]["funded"], false);
+    }
+
+    #[test]
+    fn public_state_retains_active_and_recent_terminal_operation_summaries() {
+        let mut state = AppState::new(Uuid::new_v4());
+        let active_ids = [Uuid::new_v4(), Uuid::new_v4()];
+        let terminal_ids: Vec<_> = (0..STATE_OPERATION_RETENTION + 2)
+            .map(|_| Uuid::new_v4())
+            .collect();
+        state
+            .operations
+            .push(operation(active_ids[0], OperationStatus::Running));
+        state
+            .operations
+            .push(operation(active_ids[1], OperationStatus::Queued));
+        state.operations.extend(
+            terminal_ids
+                .iter()
+                .map(|id| operation(*id, OperationStatus::Succeeded)),
+        );
+
+        let public = state.public(true);
+
+        assert_eq!(public.operations.len(), STATE_OPERATION_RETENTION + 2);
+        assert_eq!(public.operations[0].id, active_ids[0]);
+        assert_eq!(public.operations[1].id, active_ids[1]);
+        assert_eq!(public.operations[2].id, terminal_ids[2]);
+        assert!(public.operations.iter().all(|value| value.result.is_none()));
+        assert!(public.operations.iter().all(|value| value.error.is_some()));
+        assert!(state
+            .operations
+            .iter()
+            .all(|value| value.public.result.is_some()));
+    }
+
+    fn operation(id: Uuid, status: OperationStatus) -> OperationRecord {
+        OperationRecord {
+            public: Operation {
+                id,
+                command: "test.command".into(),
+                status,
+                result: Some(serde_json::json!({"workspace":"durable"})),
+                error: Some(PublicError::new("test", "Retained public error")),
+            },
+            request: Command {
+                command_id: id,
+                command: "test.command".into(),
+                input: serde_json::json!({}),
+            },
+        }
     }
 }
