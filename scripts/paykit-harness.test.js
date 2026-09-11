@@ -142,6 +142,8 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
     wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => !(event.boundary === 'receiver backup local loss' && !event.active)); },
     wallets => { const loss = wallets.storageFaults.find(event => event.boundary === 'receiver backup local loss' && event.active); wallets.storageFaults.splice(wallets.storageFaults.indexOf(loss), 0, { ...loss }); },
     wallets => { const losses = wallets.storageFaults.filter(event => event.boundary === 'receiver backup local loss'); const start = wallets.storageFaults.indexOf(losses[0]); wallets.storageFaults.splice(start, 2, losses[1], losses[0]); },
+    wallets => { wallets.storageFaults.find(event => event.boundary === 'receiver backup local loss').receiverId = '  '; },
+    wallets => { wallets.storageFaults.find(event => event.boundary === 'receiver backup local loss').active = 'true'; },
     wallets => { wallets.storageFaults.push({ receiverId: 'receiver', boundary: 'workspace.cbor atomic renam', phase: 'host', active: true }, { receiverId: 'receiver', boundary: 'workspace.cbor atomic renam', phase: 'host', active: false }); },
     wallets => { wallets.storageFaults.reverse(); },
     wallets => { wallets.lndContainers.pop(); },

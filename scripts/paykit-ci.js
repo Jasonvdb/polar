@@ -67,6 +67,9 @@ function validateReport(root) {
     const pendingLocalLosses = new Set(); let completedLocalLosses = 0;
     for (const event of wallets.storageFaults.filter(value => value.boundary === 'receiver backup local loss')) {
       assert.equal(event.phase, 'host', 'Receiver backup local loss must be host evidence');
+      assert.equal(typeof event.receiverId, 'string', 'Receiver backup local loss requires a receiver ID');
+      assert(event.receiverId.trim(), 'Receiver backup local loss requires a receiver ID');
+      assert.equal(typeof event.active, 'boolean', 'Receiver backup local loss requires boolean state');
       if (event.active) {
         assert(!pendingLocalLosses.has(event.receiverId), 'Receiver backup local losses cannot overlap');
         pendingLocalLosses.add(event.receiverId);
