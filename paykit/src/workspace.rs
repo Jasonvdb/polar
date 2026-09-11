@@ -193,6 +193,7 @@ impl Runtime {
             && !self.recovery_allows_automation()
             && !name.starts_with("link.")
             && name != "delivery.pause"
+            && name != "clock.set"
         {
             return Err(PublicError::new(
                 "recovery_required",
@@ -2316,6 +2317,71 @@ mod tests {
             .unwrap();
         assert_eq!(after.generation, before.generation);
         assert_eq!(after.checkpointed_at, before.checkpointed_at);
+    }
+    #[tokio::test]
+    async fn fixed_clock_can_advance_during_recovery_without_enabling_payment_mutation() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let mut runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        runtime
+            .storage
+            .save_identity_state(paykit_sdk::IdentityState {
+                local_pubky_public_key: Some(runtime.owner.clone()),
+                local_receiver_noise_public_key: None,
+                initialized_at: chrono::Utc::now(),
+                sign_out_generation: 0,
+            })
+            .await
+            .unwrap();
+        runtime.state.view.recovery = Some(ready_recovery());
+        runtime.require_recovery_peer(&(key.to_string(), path.to_string()));
+        let subscriptions_before = serde_json::to_value(runtime.view().subscriptions).unwrap();
+        let executions_before = serde_json::to_value(runtime.view().executions).unwrap();
+
+        let clock_result = runtime
+            .execute(Command {
+                command_id: Uuid::new_v4(),
+                command: "clock.set".into(),
+                input: json!({"receiverId": receiver, "now": "2090-01-01T00:00:02Z"}),
+            })
+            .await
+            .unwrap();
+        assert!(clock_result.is_ok());
+        assert_eq!(
+            runtime.view().application_clock.unwrap().now,
+            "2090-01-01T00:00:02Z"
+        );
+        assert!(runtime.view().delivery_paused);
+        assert!(runtime.view().recovery.unwrap().automation_paused);
+        assert_eq!(
+            serde_json::to_value(runtime.view().subscriptions).unwrap(),
+            subscriptions_before
+        );
+        assert_eq!(
+            serde_json::to_value(runtime.view().executions).unwrap(),
+            executions_before
+        );
+
+        let payment_result = runtime
+            .execute(Command {
+                command_id: Uuid::new_v4(),
+                command: "paymentList.unpublish".into(),
+                input: json!({"receiverId": receiver}),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            payment_result,
+            Err("Finish receiver recovery before changing receiver or payment state.".into())
+        );
+        assert!(runtime.view().delivery_paused);
+        assert!(runtime.view().recovery.unwrap().automation_paused);
+        assert_eq!(
+            serde_json::to_value(runtime.view().executions).unwrap(),
+            executions_before
+        );
     }
     #[test]
     fn cache_eviction_preserves_durable_data_and_capacity_allows_existing_edits() {

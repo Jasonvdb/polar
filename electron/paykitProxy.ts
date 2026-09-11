@@ -782,6 +782,33 @@ const publicRecoveryWallet = (value: any) =>
     'uncertain',
     'unknownAfterExport',
   ]);
+const isPublicRecoveryTimestamp = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  /^20[2-9][0-9]-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,9})?(?:Z|\+00:00)$/.test(
+    value,
+  ) &&
+  Number.isFinite(Date.parse(value));
+const publicRecoveryPreparation = (value: any) =>
+  value &&
+  typeof value === 'object' &&
+  !Array.isArray(value) &&
+  typeof value.localMarkerPresent === 'boolean' &&
+  typeof value.remoteMarkerPresent === 'boolean' &&
+  typeof value.readyForHandshake === 'boolean'
+    ? {
+        ...fields(value, [
+          'localMarkerPresent',
+          'remoteMarkerPresent',
+          'readyForHandshake',
+        ]),
+        ...(isPublicRecoveryTimestamp(value.localMarkerCreatedAt)
+          ? { localMarkerCreatedAt: value.localMarkerCreatedAt }
+          : {}),
+        ...(isPublicRecoveryTimestamp(value.remoteMarkerObservedAt)
+          ? { remoteMarkerObservedAt: value.remoteMarkerObservedAt }
+          : {}),
+      }
+    : undefined;
 const publicRecovery = (value: any) => ({
   ...fields(value, [
     'phase',
@@ -1129,8 +1156,8 @@ export const publicWorkspace = (value: any) => ({
   })),
   reservations: list(value.reservations, publicReservation),
   resolutions: list(value.resolutions, publicResolution),
-  links: list(value.links, item =>
-    fields(item, [
+  links: list(value.links, item => ({
+    ...fields(item, [
       'peerPublicKey',
       'peerReceiverPath',
       'state',
@@ -1144,7 +1171,10 @@ export const publicWorkspace = (value: any) => ({
       'lastSentMessageId',
       'lastError',
     ]),
-  ),
+    ...(publicRecoveryPreparation(item.recoveryPreparation)
+      ? { recoveryPreparation: publicRecoveryPreparation(item.recoveryPreparation) }
+      : {}),
+  })),
   ...(value.profile && typeof value.profile === 'object'
     ? { profile: publicProfile(value.profile) }
     : {}),
@@ -1176,6 +1206,7 @@ export const publicOperation = (value: any) => ({
             'funded',
             'peerPublicKey',
             'peerReceiverPath',
+            'state',
             'outboundMessageId',
             'deliveryPaused',
             'status',
@@ -1197,6 +1228,18 @@ export const publicOperation = (value: any) => ({
             'unsafeCheckpointCount',
             'restorable',
           ]),
+          ...fields(value.result, [
+            'localMarkerPresent',
+            'remoteMarkerPresent',
+            'remoteMarkerChanged',
+            'readyForHandshake',
+          ]),
+          ...(isPublicRecoveryTimestamp(value.result.localMarkerCreatedAt)
+            ? { localMarkerCreatedAt: value.result.localMarkerCreatedAt }
+            : {}),
+          ...(isPublicRecoveryTimestamp(value.result.remoteMarkerObservedAt)
+            ? { remoteMarkerObservedAt: value.result.remoteMarkerObservedAt }
+            : {}),
           ...(value.result.sdkCounts && typeof value.result.sdkCounts === 'object'
             ? {
                 sdkCounts: Object.fromEntries(
