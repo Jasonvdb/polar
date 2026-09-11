@@ -97,6 +97,7 @@ describe('Paykit receiver command validation', () => {
     input: PaykitCommandRequest['input'],
   ) => validatePaykitCommand({ commandId: newPaykitId(), command, input });
   it('requires canonical scoped peer inputs and exact string arrays', () => {
+    expect(() => validate('link.prepareRecovery', peer)).not.toThrow();
     expect(() => validate('link.initiate', peer)).not.toThrow();
     for (const path of [
       'private/wallet',

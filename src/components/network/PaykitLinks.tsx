@@ -41,12 +41,21 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
     peerReceiverPath: peerReceiverPath.trim(),
   };
   const peerDisabled = disabled || !peerPublicKey.trim() || !peerReceiverPath.trim();
+  const selectedLink = workspace?.links.find(
+    link =>
+      link.peerPublicKey === input.peerPublicKey &&
+      link.peerReceiverPath === input.peerReceiverPath,
+  );
+  const selectedRecovery = selectedLink?.state === 'recoveryRequired';
+  const handshakeDisabled =
+    peerDisabled ||
+    (selectedRecovery && !selectedLink?.recoveryPreparation?.readyForHandshake);
   return (
     <Card title="Encrypted links" style={{ marginTop: 12 }}>
       <Typography.Paragraph>
         Choose a peer receiver explicitly. Initiate on one side, then accept on the other.
-        Recovery or unblocking requires explicit relinking. Empty lists demonstrate
-        encrypted delivery and contain no payment endpoints.
+        Recovery requires both sides to prepare before starting a fresh handshake. Empty
+        lists demonstrate encrypted delivery and contain no payment endpoints.
       </Typography.Paragraph>
       {workspace?.lastError && (
         <Alert type="error" message={workspace.lastError} showIcon />
@@ -116,6 +125,12 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
           onChange={e => setPath(e.target.value)}
         />
         <Space wrap>
+          <Button
+            disabled={peerDisabled || !selectedRecovery}
+            onClick={() => command('link.prepareRecovery', input)}
+          >
+            Prepare recovery
+          </Button>
           {(
             [
               ['link.initiate', 'Initiate link'],
@@ -128,7 +143,11 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
           ).map(([name, label]) => (
             <Button
               key={name}
-              disabled={peerDisabled}
+              disabled={
+                name === 'link.initiate' || name === 'link.accept'
+                  ? handshakeDisabled
+                  : peerDisabled
+              }
               onClick={() => command(name, input)}
             >
               {label}
@@ -154,8 +173,26 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
               {link.state === 'recoveryRequired' && (
                 <Alert
                   type="warning"
-                  message="This link requires explicit relinking; automatic advancement is stopped."
+                  message={
+                    link.recoveryPreparation?.readyForHandshake
+                      ? 'Both sides prepared; start the fresh link.'
+                      : link.recoveryPreparation?.localMarkerPresent
+                      ? 'Waiting for peer recovery marker. Prepare on the counterparty, then return here and prepare again.'
+                      : 'Select this link and prepare recovery. Then prepare on the counterparty and return here to prepare again.'
+                  }
                 />
+              )}
+              {link.recoveryPreparation && (
+                <Descriptions size="small" column={2}>
+                  <Descriptions.Item label="Local preparation">
+                    {link.recoveryPreparation.localMarkerPresent ? 'prepared' : 'pending'}
+                  </Descriptions.Item>
+                  <Descriptions.Item label="Peer preparation">
+                    {link.recoveryPreparation.remoteMarkerPresent
+                      ? 'observed'
+                      : 'pending'}
+                  </Descriptions.Item>
+                </Descriptions>
               )}
               {link.lastError && <Alert type="error" message={link.lastError} />}
               <Descriptions size="small" column={2}>

@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, assertPublicSnapshot, recoveryView, assertWrongReceiverPreview, receiverForPeer, forceExactRelink, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
+const { transferFrame, randomPassphrase, createTransfer, downloadArchive, publicSnapshot, assertPublicSnapshot, recoveryView, assertWrongReceiverPreview, receiverForPeer, withUnsafePeerArchive, prepareExactRecovery, MAX_ARCHIVE } = require('./paykit-backup-scenarios');
 
 const receiverId = '123e4567-e89b-42d3-a456-426614174000';
 const presetReceiverId = 'af9f976d-b4ff-5feb-af0e-4fad185109f1';
@@ -82,16 +82,46 @@ test('unsafe checkpoint repair and later relink resolve the exact same configure
   assert.equal(receiverForPeer(initial, { ...peer, peerPublicKey: 'other' }), undefined);
   assert.equal(receiverForPeer(initial, { ...peer, peerReceiverPath: 'other/path' }), undefined);
 });
-test('exact relink clears the local projection first and verifies both endpoints', async () => {
+test('unsafe archive fixture restores the live SDK when export fails', async () => {
+  const calls = [];
+  const fixture = { markPeerUnsafe: (...args) => {
+    calls.push(['mark', ...args]);
+    return { unsafeCheckpoints: 1, restore: () => calls.push(['restore']) };
+  } };
+  await assert.rejects(withUnsafePeerArchive(fixture, receiverId, 'peer-key', 'peer/wallet', async () => {
+    calls.push(['export']); throw new Error('export failed');
+  }), /export failed/);
+  assert.deepEqual(calls, [['mark', receiverId, 'peer-key', 'peer/wallet'], ['export'], ['restore']]);
+});
+test('exact recovery uses the three-step marker protocol before handshake', async () => {
   const local = { id: 'local', participantId: 'local-owner', path: 'local/wallet' };
   const remote = { id: 'remote', participantId: 'remote-owner', path: 'remote/wallet' };
   const initial = { participants: [{ id: 'local-owner', publicKey: 'local-key' }, { id: 'remote-owner', publicKey: 'remote-key' }] };
-  const calls = []; let repaired = false;
+  const calls = []; let prepared = 0; let repaired = false;
+  const links = receiver => [{
+    peerPublicKey: receiver === local ? 'remote-key' : 'local-key',
+    peerReceiverPath: receiver === local ? remote.path : local.path,
+    state: repaired ? 'linked' : 'recoveryRequired',
+    recoveryPreparation: { readyForHandshake: prepared === 3 },
+  }];
   const requests = {
-    unlinkLocally: async (actualLocal, actualRemote) => { calls.push(['unlink', actualLocal.id, actualRemote.id]); },
-    relinkAfterRestart: async (actualLocal, actualRemote) => { calls.push(['relink', actualLocal.id, actualRemote.id]); repaired = true; },
-    view: async receiver => ({ links: repaired ? [{ peerPublicKey: receiver === local ? 'remote-key' : 'local-key', peerReceiverPath: receiver === local ? remote.path : local.path, state: 'linked' }] : [] }),
+    wait: async predicate => {
+      const snapshot = { receiverWorkspaces: [{ receiverId: local.id, links: links(local) }, { receiverId: remote.id, links: links(remote) }] };
+      assert.equal(predicate(snapshot), true); return snapshot;
+    },
   };
-  await forceExactRelink(requests, initial, local, remote);
-  assert.deepEqual(calls, [['unlink', 'local', 'remote'], ['relink', 'local', 'remote']]);
+  const command = async (name, input) => {
+    calls.push([name, input.receiverId]);
+    if (name === 'link.prepareRecovery') prepared += 1;
+    if (name === 'link.accept') repaired = true;
+    return { operation: { result: { state: 'recoveryRequired', readyForHandshake: prepared === 3 } } };
+  };
+  await prepareExactRecovery(command, requests, initial, local, remote);
+  assert.deepEqual(calls, [
+    ['link.prepareRecovery', 'local'],
+    ['link.prepareRecovery', 'remote'],
+    ['link.prepareRecovery', 'local'],
+    ['link.initiate', 'local'],
+    ['link.accept', 'remote'],
+  ]);
 });

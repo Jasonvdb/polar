@@ -49,6 +49,7 @@ export const paykitCommands = [
   'receiver.restart',
   'preset.create',
   'preset.fund',
+  'link.prepareRecovery',
   'link.initiate',
   'link.accept',
   'link.advance',
@@ -146,6 +147,13 @@ export interface PaykitLink {
   latestReceivedListId?: string;
   lastSentMessageId?: string;
   lastError?: string;
+  recoveryPreparation?: {
+    localMarkerPresent: boolean;
+    localMarkerCreatedAt?: string;
+    remoteMarkerPresent: boolean;
+    remoteMarkerObservedAt?: string;
+    readyForHandshake: boolean;
+  };
 }
 export interface PaykitProfile {
   peerPublicKey: string;
@@ -502,6 +510,13 @@ export interface PaykitOperationResult {
   funding?: PaykitFunding;
   peerPublicKey?: string;
   peerReceiverPath?: string;
+  state?: 'notLinked' | 'linking' | 'linked' | 'recoveryRequired' | 'blocked' | 'unknown';
+  localMarkerPresent?: boolean;
+  localMarkerCreatedAt?: string;
+  remoteMarkerPresent?: boolean;
+  remoteMarkerObservedAt?: string;
+  remoteMarkerChanged?: boolean;
+  readyForHandshake?: boolean;
   outboundMessageId?: string;
   deliveryPaused?: boolean;
   status?: string;
@@ -589,6 +604,7 @@ export const paykitCommandFields: Record<PaykitCommand, string[]> = {
   'receiver.restart': ['receiverId'],
   'preset.create': [],
   'preset.fund': [],
+  'link.prepareRecovery': peerFields,
   'link.initiate': peerFields,
   'link.accept': peerFields,
   'link.advance': peerFields,

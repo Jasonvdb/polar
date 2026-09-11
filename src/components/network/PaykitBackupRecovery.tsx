@@ -209,13 +209,23 @@ const PaykitBackupRecovery: React.FC<{
           </Descriptions>
         )}
         {recovery?.peersRequiringRelink.map(peer => (
-          <Button
+          <Space
+            direction="vertical"
             key={`${peer.peerPublicKey}:${peer.peerReceiverPath}`}
-            disabled={disabled || busy}
-            onClick={() => command('link.initiate', { receiverId: receiver.id, ...peer })}
           >
-            Relink {peer.peerReceiverPath}
-          </Button>
+            <Typography.Text type="secondary">
+              Select this counterparty to prepare recovery, then return to the original
+              side and prepare again before starting a fresh handshake.
+            </Typography.Text>
+            <Button
+              disabled={disabled || busy}
+              onClick={() =>
+                command('link.prepareRecovery', { receiverId: receiver.id, ...peer })
+              }
+            >
+              Prepare recovery with {peer.peerReceiverPath}
+            </Button>
+          </Space>
         ))}
       </Space>
     </Card>

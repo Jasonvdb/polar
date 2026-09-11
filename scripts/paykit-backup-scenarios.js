@@ -96,13 +96,34 @@ function receiverForPeer(initial, peer) {
     && initial.participants.find(participant => participant.id === receiver.participantId)?.publicKey === peer.peerPublicKey);
 }
 
-async function forceExactRelink(requests, initial, local, remote) {
+async function withUnsafePeerArchive(fixture, receiverId, peerPublicKey, peerReceiverPath, task) {
+  const unsafe = fixture.markPeerUnsafe(receiverId, peerPublicKey, peerReceiverPath);
+  assert.equal(unsafe.unsafeCheckpoints, 1);
+  try { return await task(); }
+  finally { unsafe.restore(); }
+}
+
+async function prepareExactRecovery(command, requests, initial, restored, healthy) {
   const owner = receiver => initial.participants.find(participant => participant.id === receiver.participantId).publicKey;
   const exact = (workspace, peer) => workspace.links.find(link => link.peerPublicKey === owner(peer) && link.peerReceiverPath === peer.path);
-  await requests.unlinkLocally(local, remote);
-  await requests.relinkAfterRestart(local, remote);
-  assert.equal(exact(await requests.view(local), remote)?.state, 'linked');
-  assert.equal(exact(await requests.view(remote), local)?.state, 'linked');
+  const peer = (local, remote) => ({ receiverId: local.id, peerPublicKey: owner(remote), peerReceiverPath: remote.path });
+  const first = await command('link.prepareRecovery', peer(restored, healthy));
+  const second = await command('link.prepareRecovery', peer(healthy, restored));
+  const third = await command('link.prepareRecovery', peer(restored, healthy));
+  for (const result of [first, second, third]) assert.equal(result.operation.result.state, 'recoveryRequired');
+  assert.equal(third.operation.result.readyForHandshake, true);
+  const prepared = await requests.wait(snapshot => [
+    exact(snapshot.receiverWorkspaces.find(value => value.receiverId === restored.id), healthy),
+    exact(snapshot.receiverWorkspaces.find(value => value.receiverId === healthy.id), restored),
+  ].every(link => link?.recoveryPreparation?.readyForHandshake === true));
+  assert.equal(exact(prepared.receiverWorkspaces.find(value => value.receiverId === restored.id), healthy).recoveryPreparation.readyForHandshake, true);
+  assert.equal(exact(prepared.receiverWorkspaces.find(value => value.receiverId === healthy.id), restored).recoveryPreparation.readyForHandshake, true);
+  await command('link.initiate', peer(restored, healthy));
+  await command('link.accept', peer(healthy, restored));
+  await requests.wait(snapshot => [restored, healthy].every((local, index) => {
+    const remote = index ? restored : healthy;
+    return exact(snapshot.receiverWorkspaces.find(value => value.receiverId === local.id), remote)?.state === 'linked';
+  }));
 }
 
 async function run({ initial, state, command, stage, signal, walletFixture: fixture, base, token, requests }) {
@@ -123,12 +144,12 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     const safePeer = bobLinks.find(value => value.state === 'linked' && value.peerPublicKey === carolPeer.peerPublicKey && value.peerReceiverPath === carolPeer.peerReceiverPath);
     assert(linkedPeer && safePeer, 'Backup recovery requires Bob linked to the exact Alice and Carol wallet peers');
     await command('receiver.stop', { receiverId: bob.id });
-    const unsafe = fixture.markPeerUnsafe(bob.id, linkedPeer.peerPublicKey, linkedPeer.peerReceiverPath);
-    assert.equal(unsafe.unsafeCheckpoints, 1);
-    const exportId = await createTransfer({ base, token, purpose: 1, receiverId: bob.id, passphrase, signal });
-    const exported = await command('backup.export', { receiverId: bob.id, transferId: exportId });
-    assert.equal(exported.operation.result.receiverId, bob.id);
-    archive = await downloadArchive({ base, token, transferId: exportId, signal });
+    await withUnsafePeerArchive(fixture, bob.id, linkedPeer.peerPublicKey, linkedPeer.peerReceiverPath, async () => {
+      const exportId = await createTransfer({ base, token, purpose: 1, receiverId: bob.id, passphrase, signal });
+      const exported = await command('backup.export', { receiverId: bob.id, transferId: exportId });
+      assert.equal(exported.operation.result.receiverId, bob.id);
+      archive = await downloadArchive({ base, token, transferId: exportId, signal });
+    });
     stage('backup-export');
 
     const receiversBeforeNegatives = (await state()).receivers;
@@ -178,10 +199,9 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     assert.equal(serverAfter.noisePublicKey, serverBefore.noisePublicKey); assert.equal(serverAfter.participantId, serverBefore.participantId);
     stage('backup-invalid-archives');
 
-    await command('receiver.start', { receiverId: bob.id });
     const unsafeRemote = receiverForPeer(initial, linkedPeer);
     assert(unsafeRemote, 'Unsafe checkpoint peer no longer resolves to one configured receiver');
-    await forceExactRelink(requests, initial, bob, unsafeRemote);
+    await command('receiver.start', { receiverId: bob.id });
     await command('receiver.stop', { receiverId: alice.id });
     const aliceExportId = await createTransfer({ base, token, purpose: 1, receiverId: alice.id, passphrase: alicePassphrase, signal });
     await command('backup.export', { receiverId: alice.id, transferId: aliceExportId });
@@ -269,7 +289,7 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
     assert.equal(blockedSafePeer.operation.error.code, 'recovery_required');
     assert.deepEqual(fixture.paymentHistory(ownerKeys), beforeBlockedSafePeer, 'Global recovery gate triggered a financial action');
     assert.equal(recovery.automationPaused, true); stage('backup-relink');
-    await forceExactRelink(requests, initial, bob, unsafeRemote);
+    await prepareExactRecovery(command, requests, initial, bob, unsafeRemote);
     await command('receiver.stop', { receiverId: bob.id });
     await command('recovery.reconcile', { receiverId: bob.id });
     const ready = recoveryView(await state(), bob.id);
@@ -286,4 +306,4 @@ async function run({ initial, state, command, stage, signal, walletFixture: fixt
   } finally { passphrase.fill(0); alicePassphrase.fill(0); archive?.fill(0); aliceArchive?.fill(0); }
 }
 
-module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertPublicSnapshot, assertWrongReceiverPreview, receiverForPeer, forceExactRelink, MAX_ARCHIVE };
+module.exports = { stages, run, transferFrame, randomPassphrase, createTransfer, downloadArchive, recoveryView, publicSnapshot, assertPublicSnapshot, assertWrongReceiverPreview, receiverForPeer, withUnsafePeerArchive, prepareExactRecovery, MAX_ARCHIVE };

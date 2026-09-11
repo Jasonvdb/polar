@@ -103,8 +103,11 @@ it('shows durable recovery gates and explicit relink controls', () => {
     />,
   );
   expect(view.getByText(/Automation is paused/)).toBeInTheDocument();
-  fireEvent.click(view.getByText('Relink alice/wallet'));
-  expect(command).toHaveBeenCalledWith('link.initiate', {
+  expect(
+    view.getByText(/return to the original side and prepare again/),
+  ).toBeInTheDocument();
+  fireEvent.click(view.getByText('Prepare recovery with alice/wallet'));
+  expect(command).toHaveBeenCalledWith('link.prepareRecovery', {
     receiverId: receiver.id,
     ...peer,
   });

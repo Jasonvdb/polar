@@ -103,7 +103,7 @@ The v1 workspace commands are:
 
 | Commands                                                                                           | Input                                                      |
 | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `link.initiate`, `link.accept`, `link.advance`, `link.block`, `link.unblock`, `link.sendEmptyList` | `{receiverId,peerPublicKey,peerReceiverPath}`              |
+| `link.prepareRecovery`, `link.initiate`, `link.accept`, `link.advance`, `link.block`, `link.unblock`, `link.sendEmptyList` | `{receiverId,peerPublicKey,peerReceiverPath}`              |
 | `delivery.pause`, `delivery.resume`, `delivery.sync`, `profile.delete`                             | `{receiverId}`                                             |
 | `profile.publish`                                                                                  | `{receiverId,displayName,about,avatarBase64?,avatarMime?}` |
 | `profile.fetch`, `contact.publish`, `contact.unpublish`                                            | `{receiverId,peerPublicKey,peerReceiverPath}`              |
@@ -113,6 +113,8 @@ The v1 workspace commands are:
 Peer keys must be canonical Pubky z-base32 public keys. Receiver paths follow the pinned SDK grammar: a 1–64 character lowercase ASCII letter/digit/hyphen app segment other than `private`, followed by `/wallet` or `/server`. Discovery only lists real public receiver markers; it never saves contacts or accepts a link. Same-owner encrypted links are rejected.
 
 Initiation and acceptance are explicit. Background work advances existing linking peers and uses the SDK durable send queue and receive cursor for linked peers. It never automatically initiates a peer, unblocks a peer, or restarts a recovery-required handshake. Pause persists across restarts and prevents both outbound publication and inbound receipt; an empty list may still be queued while paused. `delivery.sync` fails visibly until resumed. Blocking clears the SDK link; unblocking requires explicit new linking.
+
+Backup recovery has a marker preparation barrier before its fresh handshake. Call `link.prepareRecovery` on the restored side, then the healthy counterparty, then the restored side again. Both exact peer projections must report `recoveryPreparation.readyForHandshake=true` before `link.initiate` and `link.accept`. Preparation observes and publishes current-episode markers without starting or advancing a handshake. Normal new links and explicit relinks without backup recovery evidence retain their existing flow. Public state exposes only marker presence, bounded timestamps, and readiness; SDK attempt identifiers and marker errors remain private.
 
 `link.sendEmptyList` demonstrates the actual encrypted Private Payment List protocol with zero payment endpoints. Its string `outboundMessageId` identifies durable queue acceptance. `lastSentMessageId` is projected only from an SDK record with successful sent status and timestamp; the recipient independently exposes `latestReceivedListId`. These identifiers are strings to preserve full u64 precision. This command only exchanges endpoint metadata; payment execution and funding use the separate commands below.
 

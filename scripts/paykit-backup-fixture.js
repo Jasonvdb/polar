@@ -2,12 +2,13 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
+const { randomUUID, createHash } = require('node:crypto');
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const hash = /^[a-f0-9]{64}$/;
 
 function syncFile(filename) { const fd = fs.openSync(filename, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
 function syncDirectory(filename) { const fd = fs.openSync(filename, 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); } }
+function fileHash(filename) { return createHash('sha256').update(fs.readFileSync(filename)).digest('hex'); }
 
 function createBackupFixture({ data, secrets, environmentId, runId, uid, docker, recordContainer, serviceContainer, image, recordEvidence }) {
   assert(image, 'PAYKIT_BACKUP_FIXTURE_IMAGE must select the separately built non-shipping target');
@@ -43,7 +44,39 @@ function createBackupFixture({ data, secrets, environmentId, runId, uid, docker,
         evidence.push({ action: 'restore-pruned', receiverId }); recordEvidence(evidence);
       };
     },
-    markPeerUnsafe(receiverId, peerPublicKey, peerReceiverPath) { return invoke('mark-peer-unsafe', [receiverId, peerPublicKey, peerReceiverPath]); },
+    markPeerUnsafe(receiverId, peerPublicKey, peerReceiverPath) {
+      assert.match(receiverId, uuid); verify();
+      const receiverRoot = path.join(stateRoot, 'receivers', receiverId);
+      assert.equal(fs.realpathSync(receiverRoot), receiverRoot, 'Receiver directory must be owned and must not traverse symlinks');
+      const sdk = path.join(receiverRoot, 'sdk.cbor'); const sdkStat = fs.lstatSync(sdk);
+      assert(sdkStat.isFile() && !sdkStat.isSymbolicLink(), 'SDK state must be a regular non-symlink file');
+      const originalHash = fileHash(sdk); const rollback = path.join(rollbackRoot, `sdk-${receiverId}-${randomUUID()}.cbor`);
+      fs.copyFileSync(sdk, rollback, fs.constants.COPYFILE_EXCL); fs.chmodSync(rollback, 0o600); syncFile(rollback); syncDirectory(rollbackRoot);
+      assert.equal(fileHash(rollback), originalHash, 'SDK rollback copy must exactly match the encrypted source');
+      const value = invoke('mark-peer-unsafe', [receiverId, peerPublicKey, peerReceiverPath]);
+      assert.deepEqual(value, { unsafeCheckpoints: 1 });
+      const mutatedHash = fileHash(sdk); assert.notEqual(mutatedHash, originalHash, 'Unsafe checkpoint fixture must change SDK state');
+      let used = false;
+      const restore = () => {
+        assert.equal(used, false, 'SDK rollback is single-use'); verify();
+        assert.equal(fs.realpathSync(rollbackRoot), rollbackRoot, 'SDK rollback directory must remain canonical');
+        const rollbackStat = fs.lstatSync(rollback);
+        assert(rollbackStat.isFile() && !rollbackStat.isSymbolicLink(), 'SDK rollback must be a regular non-symlink file');
+        assert.equal(fs.realpathSync(rollback), rollback, 'SDK rollback path must remain canonical');
+        assert.equal(fileHash(rollback), originalHash, 'SDK rollback changed after fixture mutation');
+        assert.equal(fs.realpathSync(receiverRoot), receiverRoot, 'Receiver directory must remain owned');
+        const liveStat = fs.lstatSync(sdk); assert(liveStat.isFile() && !liveStat.isSymbolicLink(), 'Live SDK state must remain a regular non-symlink file');
+        assert.equal(fileHash(sdk), mutatedHash, 'Live SDK state changed after fixture mutation');
+        used = true;
+        const staged = path.join(receiverRoot, `.sdk-pr8-restore-${randomUUID()}.cbor`);
+        fs.copyFileSync(rollback, staged, fs.constants.COPYFILE_EXCL); fs.chmodSync(staged, sdkStat.mode & 0o777); syncFile(staged);
+        fs.renameSync(staged, sdk); syncFile(sdk); syncDirectory(receiverRoot);
+        assert.equal(fileHash(sdk), originalHash, 'Restored SDK state must exactly match the encrypted original');
+        evidence.push({ action: 'restore-peer-checkpoint', receiverId }); recordEvidence(evidence);
+      };
+      evidence.push({ action: 'mark-peer-unsafe', receiverId, unsafeCheckpoints: 1 }); recordEvidence(evidence);
+      return { ...value, restore };
+    },
     journalProjection() {
       const value = invoke('journal-projection', []);
       assert.deepEqual(Object.keys(value).sort(), ['digest', 'executionCount', 'settlementCount', 'terminalByReceiver'].sort());

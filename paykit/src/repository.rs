@@ -227,6 +227,7 @@ mod tests {
                 state: "linked".into(),
                 generation: 0,
                 handshake_role: None,
+                recovery_preparation: None,
                 last_sync_at: None,
                 last_receive_at: None,
                 failure_count: 0,
