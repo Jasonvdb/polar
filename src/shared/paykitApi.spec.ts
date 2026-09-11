@@ -340,3 +340,89 @@ it('validates immutable request endpoint metadata without accepting nested or ex
   ])
     expect(isPaykitRequestEndpointBinding(invalid)).toBe(false);
 });
+
+describe('Receipt commands', () => {
+  const receiverId = newPaykitId();
+  const requestId = newPaykitId();
+  const proofId = newPaykitId();
+  const receiptId = newPaykitId();
+  const validate = (command: PaykitCommandRequest['command'], input: any) =>
+    validatePaykitCommand({ commandId: newPaykitId(), command, input });
+  it('accepts omitted or empty notes without changing nonempty text and bounds UTF-8 bytes', () => {
+    const input = { receiverId, requestId, proofId };
+    for (const note of [undefined, '', '  unchanged  ', 'é'.repeat(250)]) {
+      const draft = { ...input, ...(note === undefined ? {} : { note }) };
+      expect(() => validate('receipt.prepare', draft)).not.toThrow();
+      expect(draft.note).toBe(note);
+    }
+    for (const note of ['é'.repeat(251), 'x\n', 'x\u0085', { receiptKey: 'hidden' }]) {
+      expect(() => validate('receipt.prepare', { ...input, note })).toThrow();
+    }
+    for (const forbidden of [
+      'amountSats',
+      'method',
+      'recipient',
+      'receiptKey',
+      'url',
+      'metadata',
+    ]) {
+      expect(() =>
+        validate('receipt.prepare', { ...input, [forbidden]: 'hidden' }),
+      ).toThrow();
+    }
+  });
+  it('requires SDK v4 request/proof/receipt IDs, canonical receiver IDs and the exact issuer namespace', () => {
+    expect(() => validate('receipt.process', { receiverId, receiptId })).not.toThrow();
+    const input = {
+      receiverId,
+      receiptId,
+      peerPublicKey: 'y'.repeat(52),
+      peerReceiverPath: 'bob/server',
+    };
+    expect(() => validate('receipt.retrieve', input)).not.toThrow();
+    expect(() =>
+      validate('receipt.retrieve', {
+        ...input,
+        receiverId: '018f1234-5678-5abc-8123-456789abcdef',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      validate('proof.verify', {
+        receiverId,
+        requestId,
+        proofId: '018f1234-5678-7abc-8123-456789abcdef',
+      }),
+    ).toThrow();
+
+    for (const badId of [
+      '018f1234-5678-7abc-8123-456789abcdef',
+      '018f1234-5678-5abc-8123-456789abcdef',
+      '018f1234-5678-4abc-7123-456789abcdef',
+      receiptId.toUpperCase(),
+      receiptId.replace(/-/g, ''),
+      '00000000-0000-0000-0000-000000000000',
+      'invalid',
+    ]) {
+      expect(() =>
+        validate('receipt.process', { receiverId, receiptId: badId }),
+      ).toThrow();
+      for (const field of ['requestId', 'proofId']) {
+        expect(() =>
+          validate('receipt.prepare', {
+            receiverId,
+            requestId,
+            proofId,
+            [field]: badId,
+          }),
+        ).toThrow();
+      }
+    }
+    expect(() =>
+      validate('receipt.retrieve', { ...input, peerReceiverPath: undefined }),
+    ).toThrow();
+    expect(() =>
+      validate('receipt.retrieve', { ...input, peerReceiverPath: '../bob' }),
+    ).toThrow();
+    expect(() => validate('receipt.retrieve', { ...input, key: 'hidden' })).toThrow();
+  });
+});

@@ -38,6 +38,37 @@ impl Runtime {
             .find(|r| r.payment_request_id == id.to_string())
             .ok_or_else(|| anyhow::anyhow!("request missing"))
     }
+    pub(super) async fn verified_receipt_request(
+        &self,
+        request_id: Uuid,
+        proof_id: Uuid,
+    ) -> anyhow::Result<(PaymentRequestRecord, Proof)> {
+        let record = self.request_record(request_id).await?;
+        anyhow::ensure!(
+            record.local_role == Some(PaymentRequestLocalRole::Payee)
+                && record.state == PaymentRequestLifecycleState::ProofSubmitted
+                && record.invalid_reason.is_none(),
+            "receipt requires payee and valid proof history"
+        );
+        let proof = record
+            .payment_proofs
+            .iter()
+            .find(|p| p.event_id == proof_id.to_string())
+            .ok_or_else(|| anyhow::anyhow!("receipt proof missing"))?;
+        let proof: Proof = serde_json::from_value(json!(proof.proof))?;
+        proof.validate()?;
+        anyhow::ensure!(
+            self.request_state()?
+                .settlements
+                .iter()
+                .any(|s| s.request_id == request_id.to_string()
+                    && s.proof_id == proof_id.to_string()
+                    && s.status == "verified"
+                    && s.verified_at.is_some()),
+            "receipt requires verified settlement"
+        );
+        Ok((record, proof))
+    }
     pub(super) async fn request_command(&mut self, c: &Command) -> anyhow::Result<Value> {
         match c.command.as_str() {
             "request.create" => self.create_request(c).await?,

@@ -1,6 +1,11 @@
 import { createStore } from 'easy-peasy';
 import { paykitDefinition } from './paykit';
-import { newPaykitId, paykitCommands, paykitCommandFields } from 'shared/paykitApi';
+import {
+  newPaykitId,
+  paykitCommands,
+  paykitCommandFields,
+  PaykitInput,
+} from 'shared/paykitApi';
 import { paykitService } from 'lib/paykit/paykitService';
 import { createMockRootModel, getNetwork, injections } from 'utils/tests';
 
@@ -73,3 +78,34 @@ it('forwards editable proof objects unchanged and returns only command acceptanc
   ).resolves.toEqual({ operationId: request.commandId });
   expect(service.command).toHaveBeenCalledWith(1, request);
 });
+
+it.each(['receipt.prepare', 'receipt.process', 'receipt.retrieve'] as const)(
+  'forwards %s unchanged and returns immediately with an operation ID',
+  async command => {
+    const store = createStore(createMockRootModel(), { injections });
+    store.getActions().network.setNetworks([getNetwork(1, 'test')]);
+    const input: PaykitInput =
+      command === 'receipt.prepare'
+        ? {
+            receiverId: newPaykitId(),
+            requestId: newPaykitId(),
+            proofId: newPaykitId(),
+            note: '  original note  ',
+          }
+        : command === 'receipt.process'
+        ? { receiverId: newPaykitId(), receiptId: newPaykitId() }
+        : {
+            receiverId: newPaykitId(),
+            receiptId: newPaykitId(),
+            peerPublicKey: 'y'.repeat(52),
+            peerReceiverPath: 'bob/server',
+          };
+    const request = { commandId: newPaykitId(), command, input };
+    service.command.mockResolvedValue({ operationId: request.commandId });
+    await expect(
+      store.getActions().mcp.paykit({ networkId: 1, action: 'command', request }),
+    ).resolves.toEqual({ operationId: request.commandId });
+    expect(service.command).toHaveBeenCalledWith(1, request);
+    expect(service.operation).not.toHaveBeenCalled();
+  },
+);

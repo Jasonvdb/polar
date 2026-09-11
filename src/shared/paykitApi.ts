@@ -84,6 +84,9 @@ export const paykitCommands = [
   'payment.reconcile',
   'proof.submit',
   'proof.verify',
+  'receipt.prepare',
+  'receipt.process',
+  'receipt.retrieve',
 ] as const;
 export type PaykitCommand = (typeof paykitCommands)[number];
 export interface PaykitCommandRequest {
@@ -296,6 +299,64 @@ export interface PaykitSettlement {
   verifiedAt: string | null;
   lastError: string | null;
 }
+export interface PaykitReceiptIssuance {
+  id: string;
+  requestId: string;
+  proofId: string;
+  peerPublicKey: string;
+  peerReceiverPath: string;
+  paymentReference: string;
+  method: PaykitMethod;
+  amountSats: string;
+  description: string;
+  note: string;
+  status: 'pendingStorage' | 'stored' | 'accessQueued' | 'failed';
+  deliveryStatus:
+    | 'notQueued'
+    | 'pending'
+    | 'sending'
+    | 'sent'
+    | 'failed'
+    | 'invalid'
+    | 'recoveryRequired'
+    | 'superseded'
+    | 'unknown';
+  accessEventId: string;
+  outboundMessageId: string | null;
+  createdAt: string;
+  updatedAt: string;
+  storedAt: string | null;
+  accessQueuedAt: string | null;
+  lastError: string | null;
+}
+export interface PaykitReceiptAccess {
+  receiptId: string;
+  peerPublicKey: string;
+  peerReceiverPath: string;
+  accessEventId: string;
+  requestId: string | null;
+  paymentReference: string;
+  retrievalStatus: 'pending' | 'retrieved' | 'notFound' | 'failed';
+  receivedAt: string;
+  attemptedAt: string | null;
+  retrievedAt: string | null;
+  lastError: string | null;
+}
+export interface PaykitDecryptedReceipt {
+  id: string;
+  issuerPublicKey: string;
+  issuerReceiverPath: string;
+  recipientPublicKey: string;
+  requestId: string | null;
+  proofId: string | null;
+  paymentReference: string;
+  method: PaykitMethod | null;
+  amountSats: string | null;
+  description: string | null;
+  note: string | null;
+  accessEventId: string;
+  retrievedAt: string;
+}
 export interface PaykitFunding {
   status: 'notStarted' | 'running' | 'ready' | 'uncertain' | 'failed';
   funded: boolean;
@@ -310,6 +371,7 @@ export interface PaykitFunding {
   lastError: string | null;
 }
 export interface PaykitOperationResult {
+  receiptId?: string;
   participantId?: string;
   receiverId?: string;
   preset?: string;
@@ -341,6 +403,9 @@ export interface PaykitReceiverWorkspace {
   executions?: PaykitExecution[];
   proofs?: PaykitProof[];
   settlements?: PaykitSettlement[];
+  receiptIssuances?: PaykitReceiptIssuance[];
+  receiptAccess?: PaykitReceiptAccess[];
+  receipts?: PaykitDecryptedReceipt[];
   lastError?: string;
   updatedAt?: string;
 }
@@ -396,6 +461,9 @@ export const paykitCommandFields: Record<PaykitCommand, string[]> = {
   'payment.reconcile': ['receiverId', 'executionId'],
   'proof.submit': ['receiverId', 'requestId', 'executionId', 'proof'],
   'proof.verify': ['receiverId', 'requestId', 'proofId', 'requiredConfirmations'],
+  'receipt.prepare': ['receiverId', 'requestId', 'proofId', 'note'],
+  'receipt.process': ['receiverId', 'receiptId'],
+  'receipt.retrieve': [...peerFields, 'receiptId'],
 };
 export const isPaykitPublicKey = (value: string) =>
   /^[ybndrfg8ejkmcpqxot1uwisza345h769]{51}[yo]$/.test(value);
@@ -463,13 +531,35 @@ export const validatePaykitCommand = (request: PaykitCommandRequest) => {
   for (const field of expected) {
     const value = request.input[field];
     if (
-      (field === 'method' ||
+      (field === 'note' ||
+        field === 'method' ||
         field === 'requiredConfirmations' ||
         (request.command === 'proof.submit' &&
           ['executionId', 'proof'].includes(field))) &&
       value === undefined
     )
       continue;
+    if (field === 'note') {
+      if (
+        typeof value !== 'string' ||
+        Buffer.byteLength(value, 'utf8') > 500 ||
+        /[\u0000-\u001f\u007f-\u009f]/.test(value)
+      )
+        throw new Error(
+          'Receipt note must be at most 500 UTF-8 bytes without control characters',
+        );
+      continue;
+    }
+    if (request.command.startsWith('receipt.') && field.endsWith('Id')) {
+      if (
+        typeof value !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value) ||
+        value === '00000000-0000-0000-0000-000000000000' ||
+        (field !== 'receiverId' && (value[14] !== '4' || !/[89ab]/.test(value[19])))
+      )
+        throw new Error(`Invalid Paykit ${field}`);
+      continue;
+    }
     if (field === 'proof') {
       validatePaykitProof(value);
       continue;

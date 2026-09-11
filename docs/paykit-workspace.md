@@ -171,7 +171,7 @@ list** explicitly. Select a method override or use a saved nonempty preference.
 unsupported override. Inspect the status, endpoint, exact private-list version and
 expiry. **Consume private list without payment** records consumption durably and
 prevents reuse of that private version. It does not execute a wallet payment.
-Payment execution and proofs follow in the next increment.
+Payment execution and proofs are described below.
 
 MCP and CLI expose `method.configure`, `method.prefer`, `paymentList.publish`,
 `paymentList.unpublish`, `reservation.create`, `reservation.rotate`,
@@ -232,7 +232,7 @@ supports 1–144. A matching transaction below that depth remains pending. Inval
 proofs show a concrete mismatch; an unavailable wallet shows a verification error.
 The request lifecycle, execution, proof delivery and settlement verification have
 separate statuses. A submitted proof is not a settlement confirmation. Receipt
-issuance follows in the next increment.
+issuance is a separate explicit action after verification.
 
 The MCP/CLI commands are `preset.fund`, `request.create`, `request.accept`,
 `request.reject`, `request.cancel`, `payment.execute`, `payment.reconcile`,
@@ -243,3 +243,59 @@ restricted files enter the Paykit service mount. Initial authorization happens
 before command acceptance and failures leave the backend operation unsubmitted.
 The same backend funding/payment commands work in the standalone CLI without
 Electron.
+
+## Encrypted receipts and access
+
+On the payee receiver, **Receipts and access** offers only request/proof pairs
+with an independently verified settlement. Select the exact proof and inspect
+its request, amount, method, recipient key and receiver path. Edit the optional
+note (up to 500 UTF-8 bytes, without control characters), then **Prepare receipt**.
+The note preserves whitespace. Preparation saves an immutable local draft; it
+does not publish a receipt. Each receiver/request/proof has one stable receipt
+identity. Its payment terms come from the retained request and proof, and its
+original note and draft cannot be replaced by repeating preparation.
+
+**Issued receipt history** separates receipt issuance from access delivery.
+**Process / resume receipt** stores the encrypted receipt in Pubky and queues
+access through the existing private link. A pendingStorage receipt is only
+prepared locally; stored means the encrypted object was stored; accessQueued
+means access was queued locally. Delivery sent means the private stream was
+published, not that the recipient has retrieved the receipt. Existing encrypted
+link controls resume paused delivery or recover a link. Restarting a receiver
+preserves prepared drafts, ciphertext and access identities. After a terminal
+failure, retry processing the original receipt; it must not issue a new receipt
+or trigger another wallet payment. Recovery or relinking errors remain visible.
+
+On the payer receiver, **Received access** identifies each receipt by its issuer
+public key **and receiver path**. Choose **Retrieve and decrypt receipt**, or
+**Retry retrieval and decryption** after a missing object or decryption failure.
+The same receipt ID from a different issuer path is a different selection.
+A valid cached receipt can be returned without another download. Missing objects,
+invalid decryption and known-request mismatches remain failed access entries;
+they are not presented as successfully decrypted receipt history.
+
+**Decrypted receipt history** shows only the safe receipt contents and their
+issuer namespace. Foreign SDK receipts may omit supported amount, method or
+request metadata; these fields are labeled as absent or unsupported. Decryption
+is not independent settlement verification. Session secrets, Noise secrets,
+receipt keys, raw access messages and encrypted SDK records never enter the UI
+or MCP response.
+
+The same asynchronous commands are available through MCP and the standalone CLI:
+
+- `receipt.prepare`: `receiverId`, `requestId`, `proofId`, optional `note`.
+- `receipt.process`: `receiverId`, `receiptId`.
+- `receipt.retrieve`: `receiverId`, `receiptId`, issuer `peerPublicKey` and
+  `peerReceiverPath` from received access.
+
+Request, proof and receipt IDs must be canonical lowercase RFC 4122 UUIDv4 values
+accepted by the pinned SDK. Receiver IDs remain canonical non-nil UUIDs, including
+the preset's version 5 receiver identities. Treat receipt IDs as opaque values
+returned by the backend.
+
+Poll the returned operation ID. For uncertain command acceptance, **Retry command**
+reuses the original command ID. After an accepted operation fails or is interrupted,
+the receipt action submits a fresh command ID with the original receipt identity.
+Receipt controls remain disabled until the accepted receipt operation finishes.
+No command accepts receipt keys, ciphertext, arbitrary URLs or replacement payment
+terms.

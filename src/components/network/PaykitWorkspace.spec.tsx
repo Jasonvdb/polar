@@ -136,7 +136,11 @@ it('resets receiver drafts on selection and preserves uncertain peer-command ide
   fireEvent.change(view.getByLabelText('Contact label'), {
     target: { value: 'Private first draft' },
   });
+  fireEvent.change(view.getByLabelText('Receipt note'), {
+    target: { value: 'First receiver receipt draft' },
+  });
   select('Receiver', 'Receiver 2 (running)');
+  expect(view.getByLabelText('Receipt note')).toHaveValue('');
   expect(view.getByLabelText('Link peer public key')).toHaveValue('');
   expect(view.getByLabelText('Profile display name')).toHaveValue('');
   expect(view.getByLabelText('Contact label')).toHaveValue('');
@@ -258,3 +262,96 @@ it.each(['queued', 'running'] as const)(
     expect(service.command).not.toHaveBeenCalled();
   },
 );
+
+it('retries uncertain receipt acceptance with its original ID and terminal failures with a fresh ID', async () => {
+  const participantId = newPaykitId();
+  const receiverId = newPaykitId();
+  const receiptId = newPaykitId();
+  const operationId = newPaykitId();
+  const current: PaykitState = {
+    ...state,
+    participants: [{ id: participantId, name: 'Bob', publicKey: 'y'.repeat(52) }],
+    receivers: [
+      {
+        id: receiverId,
+        participantId,
+        name: 'Wallet',
+        path: 'bob/wallet',
+        status: 'running',
+        generation: 1,
+        noisePublicKey: 'public',
+      },
+    ],
+    receiverWorkspaces: [
+      {
+        receiverId,
+        deliveryPaused: false,
+        links: [],
+        profiles: [],
+        contacts: [],
+        discoveries: [],
+        receiptAccess: [
+          {
+            receiptId,
+            peerPublicKey: 'o'.repeat(52),
+            peerReceiverPath: 'alice/wallet',
+            accessEventId: newPaykitId(),
+            requestId: null,
+            paymentReference: 'ref',
+            retrievalStatus: 'failed',
+            receivedAt: 'today',
+            attemptedAt: 'today',
+            retrievedAt: null,
+            lastError: 'Receipt decryption failed.',
+          },
+        ],
+      },
+    ],
+  };
+  service.state.mockResolvedValue(current);
+  service.command
+    .mockRejectedValueOnce(new Error('Paykit service is unavailable'))
+    .mockResolvedValueOnce({ operationId })
+    .mockResolvedValueOnce({ operationId: newPaykitId() });
+  const view = setup();
+  await waitFor(() =>
+    expect(
+      view.getByText('Create Alice / Bob / Carol preset').closest('button'),
+    ).not.toBeDisabled(),
+  );
+  const select = (label: string, text: string) => {
+    fireEvent.mouseDown(
+      view.getAllByLabelText(label).find(element => element.tagName === 'INPUT')!,
+    );
+    fireEvent.click(view.getByText(text));
+  };
+  select('Participant', 'Bob');
+  select('Receiver', 'Wallet (running)');
+  const button = view.getByText('Retry retrieval and decryption').closest('button')!;
+  fireEvent.click(button);
+  fireEvent.click(await view.findByText('Retry command'));
+  await waitFor(() => expect(service.command).toHaveBeenCalledTimes(2));
+  expect(service.command.mock.calls[0]).toEqual(service.command.mock.calls[1]);
+  await waitFor(() => expect(view.queryByText('Retry command')).not.toBeInTheDocument());
+  expect(button).toBeDisabled(); // accepted operation has not appeared in the next poll yet
+  service.state.mockResolvedValue({
+    ...current,
+    operations: [
+      {
+        id: operationId,
+        command: 'receipt.retrieve',
+        status: 'failed',
+        error: { code: 'receipt', message: 'Receipt decryption failed.' },
+      },
+    ],
+  });
+  await waitFor(() => expect(button).not.toBeDisabled(), { timeout: 2500 });
+  fireEvent.click(button);
+  await waitFor(() => expect(service.command).toHaveBeenCalledTimes(3));
+  expect(service.command.mock.calls[2][1].commandId).not.toBe(
+    service.command.mock.calls[1][1].commandId,
+  );
+  expect(service.command.mock.calls[2][1].input).toEqual(
+    service.command.mock.calls[1][1].input,
+  );
+});

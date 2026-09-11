@@ -22,3 +22,6 @@ pub mod funding;
 pub mod request_input;
 pub mod request_model;
 pub mod wallet_execution;
+
+pub mod receipt_input;
+pub mod receipt_model;

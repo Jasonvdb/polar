@@ -8,8 +8,9 @@ const { randomUUID, randomBytes } = require('crypto');
 const { execFileSync } = require('child_process');
 const { run } = require('./paykit-scenarios');
 const { createWalletFixture } = require('./paykit-wallet-fixture');
+const { createReceiptFixture, validateReceiptEvidence } = require('./paykit-receipt-fixture');
 const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
-const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, 'complete'];
+const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, 'complete'];
 
 function validateReport(root) {
   const report = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));
@@ -62,6 +63,7 @@ function validateReport(root) {
       assert(blocked >= 0 && restored > blocked, 'Missing confirmed guest ledger boundaries');
     }
     assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active));
+    validateReceiptEvidence(owned.receiptEvidence, { runId: ledger.runId, environmentId: environment.environmentId });
     assert.deepEqual(environment.stages, requiredStages);
     assert.equal(new Set(environment.participantKeys).size, 3);
     assert.equal(new Set(environment.receiverNoiseKeys).size, 4);
@@ -92,6 +94,7 @@ function start() {
   const resources = { root, runId, nodeVersion: process.version, containers: [], containerDetails: [], networks: [], environments: [] };
   const journal = [];
   const walletFixtures = [];
+  const receiptFixtures = [];
   let lastScenarioStage = 'run:started';
   const image = process.env.PAYKIT_TEST_IMAGE || 'polar-paykit/service:pr2';
   const postgres = 'postgres:18-bookworm@sha256:1c59e2c3c818eaa0f0628f695b36e7c9e362d6b219b36a54a32df645cbd7e1af';
@@ -149,11 +152,15 @@ function start() {
       '-e', `PAYKIT_ENVIRONMENT_ID=${environmentId}`, '-e', 'PAYKIT_DATA_DIR=/data', '-e', 'PAYKIT_KEY_FILE=/run/paykit/master-key',
       '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', '-e', 'PAYKIT_WALLET_CONFIG_FILE=/run/paykit/wallet-config.json', image).trim();
     entry.service = service; recordContainer(service);
+    const receiptFixture = createReceiptFixture({ data, secrets, environmentId, runId, uid, docker,
+      recordContainer, serviceContainer: service, image: process.env.PAYKIT_RECEIPT_FIXTURE_IMAGE,
+      recordEvidence: evidence => { entry.receiptEvidence = evidence; record(); } });
+    receiptFixtures.push(receiptFixture);
     signal.throwIfAborted();
     const base = serviceBase(service, docker);
     progress(`${suffix}:provisioned`);
     progress(`${suffix}:endpoint:${base}`);
-    return { base, tokenFile: path.join(secrets, 'api-token'), serviceContainer: service, postgresContainer: database, walletFixture };
+    return { base, tokenFile: path.join(secrets, 'api-token'), serviceContainer: service, postgresContainer: database, walletFixture, receiptFixture };
   }
   async function work(signal) {
     const a = await environment('a', signal);
@@ -179,6 +186,10 @@ function start() {
   function cleanup() {
     progress('cleanup:started');
     const result = { completed: false, remainingContainers: [], remainingNetworks: [], errors: [] };
+    for (const fixture of receiptFixtures) {
+      try { fixture.restoreFaults(); }
+      catch (_) { result.errors.push('Receipt fault restoration failed; retain the owned restore journal'); }
+    }
     for (const fixture of walletFixtures) {
       try {
         fixture.restoreFaults();
