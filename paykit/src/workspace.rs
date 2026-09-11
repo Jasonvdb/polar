@@ -81,13 +81,11 @@ pub(crate) fn with_recovery_gate(
     state.view.recovery = Some(recovery);
     state.recovery_preparations.clear();
     state.explicit_relink_peers.clear();
-    state.recovery_reached_ready = state.view.recovery.as_ref().is_some_and(|recovery| {
-        recovery.sdk_validated
-            && recovery.wallet_reconciled
-            && recovery.grant_valid
-            && recovery.marker_valid
-            && matches!(recovery.phase, crate::model::RecoveryPhase::Ready)
-    });
+    state.recovery_reached_ready = state
+        .view
+        .recovery
+        .as_ref()
+        .is_some_and(recovery_fully_ready);
     Ok(ciborium::Value::serialized(&state)?)
 }
 
@@ -110,15 +108,6 @@ pub(crate) fn save_recovery(vault: &Vault, recovery: crate::model::Recovery) -> 
         .ok_or_else(|| anyhow::anyhow!("receiver workspace missing"))?;
     let currently_safe = recovery_valid_for_explicit_relink(&recovery);
     apply_recovery_state(&mut state, recovery);
-    if state.view.recovery.as_ref().is_some_and(|recovery| {
-        recovery.sdk_validated
-            && recovery.wallet_reconciled
-            && recovery.grant_valid
-            && recovery.marker_valid
-            && matches!(recovery.phase, crate::model::RecoveryPhase::Ready)
-    }) {
-        state.recovery_reached_ready = true;
-    }
     if !currently_safe {
         state.explicit_relink_peers.clear();
     }
@@ -126,17 +115,25 @@ pub(crate) fn save_recovery(vault: &Vault, recovery: crate::model::Recovery) -> 
 }
 
 fn apply_recovery_state(state: &mut LocalState, recovery: crate::model::Recovery) {
-    let ready = recovery_valid_for_explicit_relink(&recovery)
-        && matches!(recovery.phase, crate::model::RecoveryPhase::Ready)
-        && recovery.peers_requiring_relink.is_empty();
+    let ready = recovery_fully_ready(&recovery);
     if recovery.automation_paused {
         state.view.delivery_paused = true;
     }
     state.view.recovery = Some(recovery);
-    if ready && state.recovery_forced_delivery_pause {
-        state.view.delivery_paused = false;
-        state.recovery_forced_delivery_pause = false;
+    if ready {
+        state.recovery_reached_ready = true;
+        if state.recovery_forced_delivery_pause {
+            state.view.delivery_paused = false;
+            state.recovery_forced_delivery_pause = false;
+        }
     }
+}
+
+fn recovery_fully_ready(recovery: &crate::model::Recovery) -> bool {
+    recovery_valid_for_explicit_relink(recovery)
+        && matches!(recovery.phase, crate::model::RecoveryPhase::Ready)
+        && recovery.peers_requiring_relink.is_empty()
+        && recovery.blocked_reasons.is_empty()
 }
 
 fn recovery_valid_for_explicit_relink(recovery: &crate::model::Recovery) -> bool {
@@ -2895,6 +2892,19 @@ mod tests {
             let ready_state: LocalState = ciborium::from_reader(bytes.as_slice()).unwrap();
             assert_eq!(ready_state.view.delivery_paused, explicitly_paused);
             assert!(!ready_state.recovery_forced_delivery_pause);
+            assert!(ready_state.recovery_reached_ready);
+            if !explicitly_paused {
+                let vault = Vault::new(dir.path().into(), [8; 32], receiver.to_string()).unwrap();
+                vault.save("workspace.cbor", &ready).unwrap();
+                let mut reopened = open(dir.path(), receiver);
+                assert!(reopened.state.recovery_reached_ready);
+                let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+                let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+                let target = (key.to_string(), path.to_string());
+                reopened.require_recovery_peer(&target);
+                reopened.authorize_explicit_relink(&target);
+                assert!(reopened.state.explicit_relink_peers.contains(&target));
+            }
         }
 
         let dir = tempfile::tempdir().unwrap();
@@ -2924,10 +2934,30 @@ mod tests {
         let mut reopened = open(dir.path(), receiver);
         assert!(reopened.state.view.delivery_paused);
         assert!(reopened.state.recovery_forced_delivery_pause);
+        assert!(!reopened.state.recovery_reached_ready);
         let linked = recovery_peer_record(&key, &path, LinkedPeerState::Linked);
         reopened.reconcile_local_link_recovery(&[linked]);
         assert!(!reopened.state.view.delivery_paused);
         assert!(!reopened.state.recovery_forced_delivery_pause);
+        assert!(reopened.state.recovery_reached_ready);
+
+        for mutate in [
+            |recovery: &mut crate::model::Recovery| recovery.sdk_validated = false,
+            |recovery: &mut crate::model::Recovery| recovery.grant_valid = false,
+            |recovery: &mut crate::model::Recovery| recovery.marker_valid = false,
+            |recovery: &mut crate::model::Recovery| recovery.unknown_after_export_count = 1,
+        ] {
+            let mut state = archived.clone();
+            state.recovery_reached_ready = false;
+            state.recovery_forced_delivery_pause = true;
+            state.view.delivery_paused = true;
+            let mut invalid = ready_recovery();
+            mutate(&mut invalid);
+            apply_recovery_state(&mut state, invalid);
+            assert!(!state.recovery_reached_ready);
+            assert!(state.view.delivery_paused);
+            assert!(state.recovery_forced_delivery_pause);
+        }
     }
     #[test]
     fn wallet_reconciliation_invalidates_prior_ready_relink_authorization() {
