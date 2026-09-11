@@ -94,13 +94,12 @@ impl SdkEventClock {
             Ok(())
         }
     }
-}
-impl Clock for SdkEventClock {
-    fn now(&self) -> DateTime<Utc> {
-        let now = self.application.now();
+    fn serialized_now(&self, before_lock: impl FnOnce()) -> DateTime<Utc> {
+        before_lock();
         let Ok(mut state) = self.logical.lock() else {
-            return now;
+            return self.application.now();
         };
+        let now = self.application.now();
         if state.failed {
             return state.last.unwrap_or(now);
         }
@@ -118,6 +117,11 @@ impl Clock for SdkEventClock {
                 state.last.unwrap_or(now)
             }
         }
+    }
+}
+impl Clock for SdkEventClock {
+    fn now(&self) -> DateTime<Utc> {
+        self.serialized_now(|| {})
     }
 }
 fn event_clock_error() -> paykit_sdk::PaykitSdkError {
@@ -249,6 +253,35 @@ mod tests {
         let backwards = SdkEventClock::new(app.clone(), &future);
         assert!(backwards.ensure_valid().is_err());
         assert!(backwards.ensure_valid().is_err());
+    }
+    #[test]
+    fn live_clock_sample_is_taken_after_serializing_concurrent_event_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault =
+            Vault::new(directory.path().into(), [44; 32], "serialized-clock".into()).unwrap();
+        let application = ApplicationClock::open(&vault).unwrap();
+        application
+            .set(&vault, Some("2090-01-01T00:00:00Z"))
+            .unwrap();
+        let advanced_second = recurrence::timestamp("2090-01-01T00:00:01Z").unwrap();
+        let sdk = SdkEventClock::new(application.clone(), &Default::default());
+        let mut logical = sdk.logical.lock().unwrap();
+        let (reached_lock, waiting) = std::sync::mpsc::channel();
+        let concurrent = sdk.clone();
+        let handle = std::thread::spawn(move || {
+            concurrent.serialized_now(|| reached_lock.send(()).unwrap())
+        });
+        waiting.recv().unwrap();
+        application
+            .set(&vault, Some("2090-01-01T00:00:01Z"))
+            .unwrap();
+        logical.last = Some(advanced_second);
+        drop(logical);
+        assert_eq!(
+            handle.join().unwrap(),
+            advanced_second + chrono::Duration::nanoseconds(1)
+        );
+        assert!(sdk.ensure_valid().is_ok());
     }
     #[test]
     fn controlled_time_survives_restart_and_rejects_backwards_reset() {
