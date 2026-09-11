@@ -37,12 +37,14 @@ function walletEvidence(environment) {
     gateCounts: { core: { issuanceSuccess: 2, executionSuccess: 1 }, lnd: { issuanceSuccess: 1, executionSuccess: 1 } },
     gateEvents: [completed('core', 1), dropped('core', 1), completed('lnd', 2), dropped('lnd', 2), completed('core', 3), { event: 'hold.finished', channel: 'core', id: 3, nonce: 'nonce-3', action: 'relay', reason: 'control' }, { ...completed('core', 4), successfulIssuance: false, successfulExecution: true }, dropped('core', 4), { ...completed('lnd', 5), successfulIssuance: false, successfulExecution: true }, dropped('lnd', 5)],
     coreLifecycle: [0, 1].flatMap(cycle => ['stopIntent','stopped','startIntent','started'].map((action,index)=>({action,identity:{id:`${environment}-core`,startedAt:String(cycle+(index===3?1:0)),labels:{'polar-paykit.test-run':'current'},mounts:[]}}))),
-    storageFaults: ['payments', 'workspace', 'requests', 'executions'].flatMap(ledger => [
+    storageFaults: [...['payments', 'workspace', 'requests', 'executions'].flatMap(ledger => [
       { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'host', active: true },
       { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'guest', active: true, observed: ledger === 'executions' ? 'readableCommitBlocked' : 'directory', ...(ledger === 'executions' ? { uid: 1001, writable: false } : {}) },
       { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'host', active: false },
       { receiverId: 'receiver', faultId: ledger, boundary: ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`, phase: 'guest', active: false, observed: 'originalFile', ...(ledger === 'executions' ? { uid: 1001, writable: true } : {}) },
     ]),
+    { receiverId: 'receiver', boundary: 'receiver backup local loss', phase: 'host', active: true },
+    { receiverId: 'receiver', boundary: 'receiver backup local loss', phase: 'host', active: false }],
   };
 }
 const { validateReport, requiredStages, captureFailureDiagnostics, captureFailureDiagnosticsSafely, PRIVATE_DIAGNOSTIC_BYTES, PRIVATE_RECEIVER_DIAGNOSTIC_BYTES } = require('./paykit-ci');
@@ -134,6 +136,9 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
     wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => event.phase !== 'guest'); },
     wallets => { wallets.storageFaults[1].observed = 'file'; },
     wallets => { wallets.storageFaults[3].faultId = 'different'; },
+    wallets => { delete wallets.storageFaults.find(event => event.boundary === 'payments.cbor atomic rename' && event.phase === 'host' && event.active).faultId; },
+    wallets => { wallets.storageFaults = wallets.storageFaults.filter(event => !(event.boundary === 'receiver backup local loss' && !event.active)); },
+    wallets => { wallets.storageFaults.push({ receiverId: 'receiver', boundary: 'workspace.cbor atomic renam', phase: 'host', active: true }, { receiverId: 'receiver', boundary: 'workspace.cbor atomic renam', phase: 'host', active: false }); },
     wallets => { wallets.storageFaults.reverse(); },
     wallets => { wallets.lndContainers.pop(); },
     wallets => { wallets.readiness[0].syncedToChain = false; },

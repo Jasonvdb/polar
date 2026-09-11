@@ -50,12 +50,13 @@ function validateReport(root) {
       const completed = wallets.gateEvents.find(event => event.channel === channel && event.event === 'upstream.completed' && event.successfulExecution && wallets.gateEvents.some(drop => drop.event === 'response.dropped' && drop.channel === channel && drop.id === event.id && drop.nonce === event.nonce));
       assert(completed?.nonce, 'Missing lost successful execution response');
     }
-    for (const ledger of ['payments', 'workspace', 'requests', 'executions']) {
-      assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active && event.boundary === (ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`)), `Missing ${ledger} commit fault evidence`);
-    }
+    const atomicBoundaries = new Set(['payments.cbor atomic rename', 'workspace.cbor atomic rename', 'requests.cbor atomic rename', 'executions.cbor commit temp creation']);
+    for (const boundary of atomicBoundaries) assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active && event.boundary === boundary), `Missing ${boundary} fault evidence`);
     const finalFaults = new Map(wallets.storageFaults.map(event => [`${event.receiverId}:${event.boundary}`, event.active]));
     assert([...finalFaults.values()].every(active => active === false));
-    for (const fault of wallets.storageFaults.filter(event => event.phase === 'host' && event.active)) {
+    const activeHostFaults = wallets.storageFaults.filter(event => event.phase === 'host' && event.active);
+    assert(activeHostFaults.every(event => atomicBoundaries.has(event.boundary) || event.boundary === 'receiver backup local loss'), 'Unknown host storage fault boundary');
+    for (const fault of activeHostFaults.filter(event => atomicBoundaries.has(event.boundary))) {
       assert(fault.faultId);
       const events = wallets.storageFaults.filter(event => event.faultId === fault.faultId && event.receiverId === fault.receiverId);
       const execution = fault.boundary === 'executions.cbor commit temp creation';
@@ -63,7 +64,13 @@ function validateReport(root) {
       const restored = events.findIndex(event => event.phase === 'guest' && !event.active && ['originalFile', 'absent'].includes(event.observed) && (!execution || event.uid > 0 && event.writable === true));
       assert(blocked >= 0 && restored > blocked, 'Missing confirmed guest ledger boundaries');
     }
-    assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active));
+    const localLosses = activeHostFaults.filter(event => event.boundary === 'receiver backup local loss');
+    assert(localLosses.length > 0, 'Missing receiver backup local loss evidence');
+    for (const loss of localLosses) {
+      const started = wallets.storageFaults.indexOf(loss);
+      const restored = wallets.storageFaults.findIndex((event, index) => index > started && event.phase === 'host' && !event.active && event.boundary === loss.boundary && event.receiverId === loss.receiverId);
+      assert(restored > started, 'Receiver backup local loss was not restored');
+    }
     assert.deepEqual(wallets.coreLifecycle.map(e => e.action), ['stopIntent','stopped','startIntent','started','stopIntent','stopped','startIntent','started']);
     for (let cycle = 0; cycle < 2; cycle++) {
       const events = wallets.coreLifecycle.slice(cycle * 4, cycle * 4 + 4);
