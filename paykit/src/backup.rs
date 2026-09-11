@@ -998,7 +998,7 @@ pub async fn restore_receiver(
         crate::model::RecoveryPhase::RelinkRequired
     };
     let recovery = recovery_view(&backup, &merge, unknown_after_export, peers, phase);
-    let gated_workspace = crate::workspace::with_recovery_gate(
+    let gated_workspace = crate::workspace::finalize_staged_recovery(
         staging_vault
             .load("workspace.cbor")
             .map_err(|_| backup_invalid())?
