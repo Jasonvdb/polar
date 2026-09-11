@@ -264,7 +264,7 @@ settled invoice amount must agree. A durable shared transaction-output/hash clai
 prevents another request using the same payment. On-chain settlement defaults to one
 confirmation; callers may require 1–144. Insufficient confirmations remain pending.
 Verification failure, proof delivery, execution and receipt issuance remain separate;
-receipt issuance is introduced in the following increment.
+receipt preparation, publication, private access delivery and decryption have independent observable states.
 
 `preset.create` remains the Pubky-only preset. `preset.fund` additionally selects
 three distinct actual LND identities sharing a trusted Core backend, provisions
@@ -285,3 +285,54 @@ grants for the service, and never exposes credentials through UI/API. Receiving,
 payment/history/identity, and preset setup grants remain distinct. TLS verification
 is enabled for every LND call. Core amounts use exact decimal text and integer
 satoshis, including JSON/CBOR roundtrip tests.
+
+## Encrypted receipts and access
+
+`receipt.prepare` accepts `receiverId`, `requestId`, `proofId` and an optional `note`
+(maximum 500 UTF-8 bytes, no control characters). Only the payee can prepare a
+receipt for its independently verified settlement. The backend derives recipient,
+reference, exact satoshi amount and rail from immutable request/proof records.
+Preparation persists the SDK receipt ciphertext, secret access event and original
+creation time atomically before any remote publication. Notes are immutable after
+preparation; repeating the same fields with a new command ID returns the original
+receipt, while changing the note is rejected.
+
+Receipt identity is derived from the receiver, request and proof tuple. The pinned
+SDK requires RFC4122 v4-shaped receipt IDs: the backend computes a namespaced UUIDv5
+hash then sets its version bits to v4 while preserving the RFC4122 variant. This
+stable identifier is not an encryption key or nonce. The SDK independently creates
+secret encryption material during the first successful preparation. Receipt,
+request and proof inputs require canonical lowercase RFC4122 v4 UUIDs; receiver
+IDs remain canonical non-nil UUIDs and support the preset's v5 identities.
+
+`receipt.process { receiverId, receiptId }` stores the exact prepared encrypted
+object and atomically queues its original access event. Resume an interrupted
+operation with a fresh command ID and the same receipt ID. A successful remote
+write followed by a failed local checkpoint repeats identical ciphertext, and a
+queued access event is never duplicated. A failed local atomic commit requires
+restoring storage and restarting the receiver before retry, preserving the existing
+Vault protection against uncertain commits. Existing queued receipts acknowledge
+without a live session, after checking the retained outbound event. Preparation
+alone does not start publication. Existing private delivery workers handle queued
+access, including paused/offline delivery and restart recovery.
+
+`receipt.retrieve` accepts `receiverId`, `peerPublicKey`, `peerReceiverPath` and
+`receiptId`. It retrieves through indexed SDK access, decrypts and verifies the
+receipt recipient and access binding. Cached successful retrieval returns local
+receipt data without fetching the remote object again. Missing and corrupt-object
+tests therefore exercise an uncached receipt. A known app-schema receipt that
+contradicts local request, issuer namespace, amount, method or proof fails every
+retrieval retry; its SDK evidence is retained and its access row shows an actionable
+failure. Decryption never implies independently verified settlement.
+
+Receiver workspaces expose `receiptIssuances`, `receiptAccess` and `receipts`.
+Issuance states are `pendingStorage`, `stored`, `accessQueued` and `failed`.
+Delivery remains separate: `sent` means private-stream publication, not recipient
+retrieval. Recipient access states are `pending`, `retrieved`, `notFound` and
+`failed`. All optional public fields are explicit nulls, monetary values and
+outbound message IDs are strings, and received receipt keys include issuer identity
+and receiver path. Public projections omit receipt keys, private locations, key
+hashes, ciphertext, raw access JSON, arbitrary metadata and raw stored errors.
+Only bounded description/note/proof metadata and supported typed amount/method
+fields are displayed. SDK receipt secrets remain solely in receiver-scoped encrypted
+`sdk.cbor`; no second secret ledger or key store is introduced.

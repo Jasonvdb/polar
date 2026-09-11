@@ -606,3 +606,106 @@ it('projects immutable endpoint bindings and rejects malformed request metadata'
   expect(result.workspace?.requests[1].endpointBindings).toEqual([]);
   expect(JSON.stringify(result)).not.toContain('hidden');
 });
+
+it('projects exact receipt DTOs in state and operation results without SDK records or scalar injection', () => {
+  const hidden = { receiptKey: 'hidden', session: 'hidden', noiseSecretKey: 'hidden' };
+  const issuance = {
+    id: envId,
+    requestId: 'request',
+    proofId: 'proof',
+    peerPublicKey: 'public',
+    peerReceiverPath: 'bob/server',
+    paymentReference: 'reference',
+    method: 'btc-onchain',
+    amountSats: '2100000000000000',
+    description: 'Receipt',
+    note: 'Note',
+    status: 'stored',
+    deliveryStatus: 'notQueued',
+    accessEventId: 'event',
+    outboundMessageId: '18446744073709551615',
+    createdAt: 'created',
+    updatedAt: 'updated',
+    storedAt: 'stored',
+    accessQueuedAt: null,
+    lastError: null,
+  };
+  const access = {
+    receiptId: envId,
+    peerPublicKey: 'public',
+    peerReceiverPath: 'bob/server',
+    accessEventId: 'event',
+    requestId: null,
+    paymentReference: 'reference',
+    retrievalStatus: 'failed',
+    receivedAt: 'received',
+    attemptedAt: 'attempted',
+    retrievedAt: null,
+    lastError: 'Receipt does not match the known request.',
+  };
+  const receipt = {
+    id: envId,
+    issuerPublicKey: 'public',
+    issuerReceiverPath: 'bob/server',
+    recipientPublicKey: 'recipient',
+    requestId: null,
+    proofId: null,
+    paymentReference: 'reference',
+    method: null,
+    amountSats: null,
+    description: null,
+    note: null,
+    accessEventId: 'event',
+    retrievedAt: 'retrieved',
+  };
+  const extras = {
+    ...hidden,
+    location: 'hidden',
+    key: 'hidden',
+    receipt_access_key_hash: 'hidden',
+    encrypted_receipt: hidden,
+    access_json: hidden,
+    metadata: hidden,
+    rawMessage: hidden,
+  };
+  const workspace = {
+    receiverId: 'receiver',
+    receiptIssuances: [
+      { ...issuance, ...extras },
+      { ...issuance, description: hidden, outboundMessageId: 123 },
+    ],
+    receiptAccess: [
+      { ...access, ...extras },
+      { ...access, lastError: hidden, requestId: hidden },
+    ],
+    receipts: [
+      { ...receipt, ...extras },
+      { ...receipt, note: hidden, method: hidden, amountSats: hidden },
+    ],
+  };
+  const raw = {
+    ...binding,
+    participants: [],
+    receivers: [],
+    operations: [],
+    receiverWorkspaces: [workspace],
+  };
+  const result = publicOperation({ result: { receiptId: envId, workspace, ...extras } })
+    .result!;
+  const projected = publicState(raw, envId);
+  for (const current of [result.workspace!, projected.receiverWorkspaces[0]]) {
+    expect(JSON.stringify(current)).not.toContain('hidden');
+    expect(current.receiptIssuances[0]).toEqual(issuance);
+    expect(current.receiptAccess[0]).toEqual(access);
+    expect(current.receipts[0]).toEqual(receipt);
+    expect(current.receiptIssuances[1]).not.toHaveProperty('description');
+    expect(current.receiptIssuances[1]).not.toHaveProperty('outboundMessageId');
+    expect(current.receiptAccess[1]).not.toHaveProperty('lastError');
+    expect(current.receipts[1]).not.toHaveProperty('note');
+  }
+  expect(result).toHaveProperty('receiptId', envId);
+  expect(publicOperation({ result: { receiptId: 123 } }).result).not.toHaveProperty(
+    'receiptId',
+  );
+  expect(JSON.stringify(result)).not.toContain('hidden');
+});

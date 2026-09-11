@@ -6,6 +6,12 @@ use uuid::Uuid;
 pub struct Workspace {
     pub receiver_id: Uuid,
     #[serde(default)]
+    pub receipt_issuances: Vec<crate::receipt_model::ReceiptIssuanceView>,
+    #[serde(default)]
+    pub receipt_access: Vec<crate::receipt_model::ReceiptAccessView>,
+    #[serde(default)]
+    pub receipts: Vec<crate::receipt_model::DecryptedReceiptView>,
+    #[serde(default)]
     pub requests: Vec<crate::request_model::RequestView>,
     #[serde(default)]
     pub executions: Vec<crate::request_model::ExecutionView>,

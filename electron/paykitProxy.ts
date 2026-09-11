@@ -537,6 +537,18 @@ const publicFunding = (value: any) => ({
   ),
   channelPoints: strings(value.channelPoints),
 });
+// Receipt DTOs contain strings and explicit nulls only. Never forward SDK records,
+// arbitrary metadata, encryption material, or objects injected into scalar fields.
+const receiptFields = (value: any, names: string[], nullable: string[] = []) =>
+  Object.fromEntries(
+    [...names, ...nullable]
+      .filter(
+        name =>
+          typeof value?.[name] === 'string' ||
+          (nullable.includes(name) && value?.[name] === null),
+      )
+      .map(name => [name, value[name]]),
+  );
 export const publicWorkspace = (value: any) => ({
   ...fields(value, ['receiverId', 'deliveryPaused', 'lastError', 'updatedAt']),
   ...(value.paymentMethods && typeof value.paymentMethods === 'object'
@@ -622,6 +634,59 @@ export const publicWorkspace = (value: any) => ({
       'lastError',
     ]),
   ),
+  receiptIssuances: list(value.receiptIssuances, item =>
+    receiptFields(
+      item,
+      [
+        'id',
+        'requestId',
+        'proofId',
+        'peerPublicKey',
+        'peerReceiverPath',
+        'paymentReference',
+        'method',
+        'amountSats',
+        'description',
+        'note',
+        'status',
+        'deliveryStatus',
+        'accessEventId',
+        'createdAt',
+        'updatedAt',
+      ],
+      ['outboundMessageId', 'storedAt', 'accessQueuedAt', 'lastError'],
+    ),
+  ),
+  receiptAccess: list(value.receiptAccess, item =>
+    receiptFields(
+      item,
+      [
+        'receiptId',
+        'peerPublicKey',
+        'peerReceiverPath',
+        'accessEventId',
+        'paymentReference',
+        'retrievalStatus',
+        'receivedAt',
+      ],
+      ['requestId', 'attemptedAt', 'retrievedAt', 'lastError'],
+    ),
+  ),
+  receipts: list(value.receipts, item =>
+    receiptFields(
+      item,
+      [
+        'id',
+        'issuerPublicKey',
+        'issuerReceiverPath',
+        'recipientPublicKey',
+        'paymentReference',
+        'accessEventId',
+        'retrievedAt',
+      ],
+      ['requestId', 'proofId', 'method', 'amountSats', 'description', 'note'],
+    ),
+  ),
   reservations: list(value.reservations, publicReservation),
   resolutions: list(value.resolutions, publicResolution),
   links: list(value.links, item =>
@@ -677,6 +742,7 @@ export const publicOperation = (value: any) => ({
             'path',
             'imageUri',
           ]),
+          ...receiptFields(value.result, ['receiptId']),
           ...(value.result.funding && typeof value.result.funding === 'object'
             ? { funding: publicFunding(value.result.funding) }
             : {}),

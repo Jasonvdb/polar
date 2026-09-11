@@ -25,6 +25,7 @@ import { Network } from 'types';
 import { paykitService } from 'lib/paykit/paykitService';
 import PaykitRequests from './PaykitRequests';
 import PaykitProofs from './PaykitProofs';
+import PaykitReceipts from './PaykitReceipts';
 import PaykitPaymentMethods from './PaykitPaymentMethods';
 import PaykitLinks from './PaykitLinks';
 import PaykitProfilesContacts from './PaykitProfilesContacts';
@@ -42,12 +43,14 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const [kind, setKind] = useState<'wallet' | 'server'>('wallet');
   const [retry, setRetry] = useState<PaykitCommandRequest>();
   const [operationId, setOperationId] = useState('');
+  const [receiptOperationId, setReceiptOperationId] = useState('');
   const active = !!network.paykit && network.status === Status.Started;
 
   useEffect(() => {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     setState(undefined);
+    setReceiptOperationId('');
     setConnectionError('');
     const poll = async () => {
       try {
@@ -85,6 +88,8 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
     try {
       const result = await paykitService.command(network.id, request);
       setOperationId(result.operationId);
+      if (request.command.startsWith('receipt.'))
+        setReceiptOperationId(result.operationId);
       setRetry(undefined);
     } catch (e: any) {
       // A rejected request was never accepted. Transport errors remain uncertain.
@@ -102,6 +107,17 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const receivers = state?.receivers.filter(r => r.participantId === participantId) || [];
   const receiver = receivers.find(r => r.id === receiverId);
   const disabled = busy || !state?.ready || !!retry || !!connectionError;
+  const receiptPending =
+    (!!receiptOperationId &&
+      !state?.operations.some(
+        item =>
+          item.id === receiptOperationId && ['succeeded', 'failed'].includes(item.status),
+      )) ||
+    state?.operations.some(
+      item =>
+        item.command.startsWith('receipt.') &&
+        (item.status === 'queued' || item.status === 'running'),
+    );
   const fundingPending = state?.operations.some(
     item =>
       item.command === 'preset.fund' &&
@@ -413,6 +429,14 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
               item => item.receiverId === receiver.id,
             )}
             disabled={disabled || receiver.status !== 'running'}
+            command={command}
+          />
+          <PaykitReceipts
+            receiverId={receiver.id}
+            workspace={state.receiverWorkspaces?.find(
+              item => item.receiverId === receiver.id,
+            )}
+            disabled={disabled || receiver.status !== 'running' || !!receiptPending}
             command={command}
           />
           <PaykitProfilesContacts

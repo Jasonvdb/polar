@@ -6,7 +6,7 @@ const { randomUUID } = require('crypto');
 const { execFileSync } = require('child_process');
 const { sleep, serviceBase, requestJson, runCli, operationFailure } = require('./paykit-harness');
 
-async function run({ base, tokenFile, serviceContainer, postgresContainer, walletFixture, scope = 'full', signal, progress = stage => console.log(stage) }) {
+async function run({ base, tokenFile, serviceContainer, postgresContainer, walletFixture, receiptFixture, scope = 'full', signal, progress = stage => console.log(stage) }) {
   assert(['full', 'pubky-only'].includes(scope), 'Unknown scenario scope');
   assert(scope === 'pubky-only' || walletFixture, 'Full scenarios require the real wallet fixture. Run node scripts/paykit-ci.js, or explicitly choose --pubky-only for the earlier 23 Pubky checks.');
   const stages = [];
@@ -69,7 +69,7 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     const marker = JSON.parse(docker('exec', serviceContainer, 'polar-paykit', 'inspect-marker', owner.publicKey, receiver.path));
     assert.equal(marker.noise_public_key, receiver.noisePublicKey);
     assert.equal(marker.receiver_path, receiver.path);
-    assert.deepEqual(marker.capabilities, { private_payments: true, payment_requests: true, receipts: false, outgoing_payments: true });
+    assert.deepEqual(marker.capabilities, { private_payments: true, payment_requests: true, receipts: true, outgoing_payments: true });
   };
 
   stage('readiness');
@@ -145,7 +145,22 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
   if (scope === 'full') {
     const context = { initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture };
     await require('./paykit-payment-scenarios').run(context);
-    await require('./paykit-request-scenarios').run(context);
+    const requests = await require('./paykit-request-scenarios').run(context);
+    const restartEnvironment = async () => {
+      signal?.throwIfAborted();
+      docker('restart', '--timeout', '-1', serviceContainer);
+      base = serviceBase(serviceContainer, docker);
+      await waitReady();
+      const deadline = Date.now() + 120000;
+      while (Date.now() < deadline) {
+        if ((await state()).receivers.every(r => r.status === 'running')) {
+          initial.receivers.forEach(inspectMarker); return;
+        }
+        await sleep(300, signal);
+      }
+      throw new Error('Receipt environment restart did not restore receivers');
+    };
+    await require('./paykit-receipt-scenarios').run({ ...context, receiptFixture, requests, restartEnvironment });
   }
   stage('complete');
   return { scope, stages, environmentId: initial.environmentId, participantKeys: initial.participants.map(p => p.publicKey), receiverNoiseKeys: initial.receivers.map(r => r.noisePublicKey), passed: true };

@@ -223,5 +223,19 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   await wait(s => workspace(s, bob).proofs.some(p => p.requestId === lostId));
   await command('proof.submit', { receiverId: alice.id, requestId: lostId, executionId: recovered.id }); assert.equal((await view(alice)).proofs.filter(p => p.requestId === lostId).length, 1); stage('proof-delivery-recovery');
   assert.equal((await view(server)).requests.length, 0); assert.equal((await view(server)).executions.length, 0); assert.equal((await view(server)).proofs.length, 0); stage('request-receiver-isolation');
+  // Pass real paid proof identities and existing payment helpers to the receipt increment.
+  return { alice, bob, carol, server, peer, view, wait, link, unlinkLocally, relinkAfterRestart, mine, verify,
+    chain: { requestId: chainId, proof: chainProof, method: ONCHAIN },
+    lightning: { requestId: lightningId, proof: lightningProof, method: BOLT11 },
+    invalid: { requestId: wrongId, proof: workspace(await state(), bob).proofs.find(p => p.requestId === wrongId) },
+    unpaidRequestId: blockedId,
+    createPaid: async (method, amountSats = '5000') => {
+      const requestId = await accepted(bob, alice, amountSats, method);
+      const result = await execute(requestId, alice, fixture.walletIds.alice, method);
+      assert.equal(result.execution.status, 'succeeded');
+      const proof = await submit(requestId, result.execution);
+      return { requestId, proof, method };
+    },
+  };
 }
 module.exports = { stages, run };

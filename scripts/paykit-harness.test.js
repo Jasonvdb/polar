@@ -5,6 +5,13 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const helper = require.resolve('./paykit-harness');
+function receiptEvidence(environmentId) {
+  const { randomUUID } = require('node:crypto');
+  return ['delete', 'corrupt', 'wrong-key'].flatMap(action => {
+    const value = { version: 1, action, runId: 'current', environmentId, receiverId: randomUUID(), receiptId: randomUUID(), accessEventId: randomUUID(), exists: action !== 'delete', bytes: action === 'delete' ? 0 : 20, digest: action === 'delete' ? null : 'a'.repeat(64), originalDigest: 'b'.repeat(64), matchesPrepared: false, restored: false };
+    return [value, { ...value, action: 'recover', exists: true, bytes: 30, digest: value.originalDigest, matchesPrepared: true, restored: true }];
+  });
+}
 function walletEvidence(environment) {
   const completed = (channel, id) => ({ event: 'upstream.completed', channel, id, nonce: `nonce-${id}`, successfulIssuance: true });
   const dropped = (channel, id) => ({ event: 'response.dropped', channel, id, nonce: `nonce-${id}` });
@@ -83,13 +90,13 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-report-test-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const cleanup = { completed: true, remainingContainers: [], remainingNetworks: [], errors: [] };
-  const ledger = { runId: 'current', cleanup, environments: ['a', 'b'].map(environmentId => ({ environmentId, wallets: walletEvidence(environmentId) })) };
+  const ledger = { runId: 'current', cleanup, environments: ['a', 'b'].map(environmentId => ({ environmentId, wallets: walletEvidence(environmentId), receiptEvidence: receiptEvidence(environmentId) })) };
   fs.writeFileSync(path.join(root, 'resources.json'), JSON.stringify(ledger));
   assert.throws(() => validateReport(root));
   const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
   const write = value => fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(value));
   write(report); assert.equal(validateReport(root).passed, true);
-  assert.equal(requiredStages.length, 48);
+  assert.equal(requiredStages.length, 60);
   write({ ...report, survivingWalletEnvironmentVerified: false }); assert.throws(() => validateReport(root));
   for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery']) {
     write({ ...report, environments: report.environments.map(environment => ({ ...environment, stages: environment.stages.filter(stage => stage !== missing) })) });
