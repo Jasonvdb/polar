@@ -12,6 +12,7 @@ RUN cargo build --locked --release --bin polar-paykit -j ${CARGO_BUILD_JOBS} \
     && ./target/release/polar-paykit 2>&1 | grep -F 'Usage: polar-paykit'
 
 FROM build AS fixture-build
+ARG CARGO_BUILD_JOBS=2
 RUN cargo build --locked --release --bin paykit-receipt-fixture -j ${CARGO_BUILD_JOBS}
 
 FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
