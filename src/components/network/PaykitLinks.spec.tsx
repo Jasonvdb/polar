@@ -135,11 +135,18 @@ describe('Editable encrypted links', () => {
       peerPublicKey: recoveryLink.peerPublicKey,
       peerReceiverPath: recoveryLink.peerReceiverPath,
     });
+    fireEvent.click(view.getByText('Retry recovery marker'));
+    expect(command).toHaveBeenCalledWith('link.retryRecoveryMarker', {
+      receiverId,
+      peerPublicKey: recoveryLink.peerPublicKey,
+      peerReceiverPath: recoveryLink.peerReceiverPath,
+    });
     view.rerender(renderLinks(true));
     fireEvent.click(view.getByText('Select link'));
     expect(view.getByText(/Both sides prepared/)).toBeInTheDocument();
     expect(view.getByText('Initiate link').closest('button')).not.toBeDisabled();
     expect(view.getByText('Accept link').closest('button')).not.toBeDisabled();
+    expect(view.getByText('Retry recovery marker').closest('button')).toBeDisabled();
   });
   it('allows a selected linked peer to observe and prepare recovery', () => {
     const command = jest.fn().mockResolvedValue(undefined);
@@ -198,6 +205,7 @@ describe('Editable encrypted links', () => {
       );
       fireEvent.click(view.getByText('Select link'));
       expect(view.getByText('Prepare recovery').closest('button')).toBeDisabled();
+      expect(view.getByText('Retry recovery marker').closest('button')).toBeDisabled();
     },
   );
   it('keeps preparation disabled while receiver operations are unavailable', () => {

@@ -93,35 +93,46 @@ test('unsafe archive fixture restores the live SDK when export fails', async () 
   }), /export failed/);
   assert.deepEqual(calls, [['mark', receiverId, 'peer-key', 'peer/wallet'], ['export'], ['restore']]);
 });
-test('exact recovery uses the three-step marker protocol before handshake', async () => {
+test('exact recovery exposes stale failure and safely retries the marker before handshake', async () => {
   const local = { id: 'local', participantId: 'local-owner', path: 'local/wallet' };
   const remote = { id: 'remote', participantId: 'remote-owner', path: 'remote/wallet' };
   const initial = { participants: [{ id: 'local-owner', publicKey: 'local-key' }, { id: 'remote-owner', publicKey: 'remote-key' }] };
-  const calls = []; let prepared = 0; let repaired = false;
+  const calls = []; let prepared = 0; let repaired = false; let paused = false;
   const links = receiver => [{
     peerPublicKey: receiver === local ? 'remote-key' : 'local-key',
     peerReceiverPath: receiver === local ? remote.path : local.path,
     state: repaired ? 'linked' : 'recoveryRequired',
-    recoveryPreparation: { readyForHandshake: prepared === 3 },
+    recoveryPreparation: { localMarkerPresent: true, readyForHandshake: prepared === 3 },
   }];
   const requests = {
+    view: async receiver => ({ deliveryPaused: receiver === remote && paused, applicationClock: { mode: 'system', now: '2026-09-11T16:00:00Z' } }),
     wait: async predicate => {
       const snapshot = { receiverWorkspaces: [{ receiverId: local.id, links: links(local) }, { receiverId: remote.id, links: links(remote) }] };
       assert.equal(predicate(snapshot), true); return snapshot;
     },
   };
-  const command = async (name, input) => {
-    calls.push([name, input.receiverId]);
+  const command = async (name, input, commandId, expected = 'succeeded') => {
+    calls.push([name, input.receiverId, expected]);
+    if (name === 'link.prepareRecovery' && expected === 'failed') return { operation: { error: { code: 'receiver_operation_failed', message: 'The peer recovery marker is stale. Pause delivery on this healthy peer, advance the application clock beyond its last link checkpoint if fixed, then retry the recovery marker on the recovering peer.' } } };
     if (name === 'link.prepareRecovery') prepared += 1;
+    if (name === 'delivery.pause') paused = true;
+    if (name === 'delivery.resume') paused = false;
     if (name === 'link.accept') repaired = true;
-    return { operation: { result: { state: 'recoveryRequired', readyForHandshake: prepared === 3 } } };
+    return { operation: { result: { state: 'recoveryRequired', readyForHandshake: name === 'link.retryRecoveryMarker' ? false : prepared === 3 } } };
   };
   await prepareExactRecovery(command, requests, initial, local, remote);
   assert.deepEqual(calls, [
-    ['link.prepareRecovery', 'local'],
-    ['link.prepareRecovery', 'remote'],
-    ['link.prepareRecovery', 'local'],
-    ['link.initiate', 'local'],
-    ['link.accept', 'remote'],
+    ['clock.set', 'remote', 'succeeded'],
+    ['delivery.sync', 'remote', 'succeeded'],
+    ['link.prepareRecovery', 'local', 'succeeded'],
+    ['link.prepareRecovery', 'remote', 'failed'],
+    ['delivery.pause', 'remote', 'succeeded'],
+    ['clock.set', 'local', 'succeeded'],
+    ['link.retryRecoveryMarker', 'local', 'succeeded'],
+    ['link.prepareRecovery', 'remote', 'succeeded'],
+    ['link.prepareRecovery', 'local', 'succeeded'],
+    ['link.initiate', 'local', 'succeeded'],
+    ['link.accept', 'remote', 'succeeded'],
+    ['delivery.resume', 'remote', 'succeeded'],
   ]);
 });

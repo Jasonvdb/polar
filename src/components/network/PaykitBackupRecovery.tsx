@@ -214,8 +214,11 @@ const PaykitBackupRecovery: React.FC<{
             key={`${peer.peerPublicKey}:${peer.peerReceiverPath}`}
           >
             <Typography.Text type="secondary">
-              Select this counterparty to prepare recovery, then return to the original
-              side and prepare again before starting a fresh handshake.
+              Prepare here first. If the healthy peer reports a stale marker, pause its
+              private delivery, advance this receiver’s application clock beyond the
+              marker’s whole second when fixed, retry this recovery marker, prepare the
+              healthy peer and then return here to prepare again. Complete the handshake
+              before explicitly resuming healthy-peer delivery.
             </Typography.Text>
             <Button
               disabled={disabled || busy}
@@ -225,6 +228,26 @@ const PaykitBackupRecovery: React.FC<{
             >
               Prepare recovery with {peer.peerReceiverPath}
             </Button>
+            {workspace?.links.some(
+              link =>
+                link.peerPublicKey === peer.peerPublicKey &&
+                link.peerReceiverPath === peer.peerReceiverPath &&
+                link.state === 'recoveryRequired' &&
+                link.recoveryPreparation?.localMarkerPresent === true &&
+                link.recoveryPreparation.readyForHandshake !== true,
+            ) && (
+              <Button
+                disabled={disabled || busy}
+                onClick={() =>
+                  command('link.retryRecoveryMarker', {
+                    receiverId: receiver.id,
+                    ...peer,
+                  })
+                }
+              >
+                Retry recovery marker with {peer.peerReceiverPath}
+              </Button>
+            )}
           </Space>
         ))}
       </Space>

@@ -50,6 +50,10 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
   const recoveryPreparationAllowed =
     !!selectedLink &&
     ['notLinked', 'linked', 'recoveryRequired'].includes(selectedLink.state);
+  const recoveryMarkerRetryAllowed =
+    selectedRecovery &&
+    selectedLink?.recoveryPreparation?.localMarkerPresent === true &&
+    selectedLink.recoveryPreparation.readyForHandshake !== true;
   const handshakeDisabled =
     peerDisabled ||
     (selectedRecovery && !selectedLink?.recoveryPreparation?.readyForHandshake);
@@ -57,8 +61,13 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
     <Card title="Encrypted links" style={{ marginTop: 12 }}>
       <Typography.Paragraph>
         Choose a peer receiver explicitly. Initiate on one side, then accept on the other.
-        Recovery requires both sides to prepare before starting a fresh handshake. Empty
-        lists demonstrate encrypted delivery and contain no payment endpoints.
+        Recovery requires both sides to prepare before starting a fresh handshake. If a
+        marker is stale, pause private delivery on the healthy peer, advance the
+        recovering receiver’s application clock beyond the marker’s whole second when it
+        is fixed, retry the marker on the recovering peer, prepare the healthy peer and
+        then the recovering peer, complete the handshake, and explicitly resume
+        healthy-peer delivery. Empty lists demonstrate encrypted delivery and contain no
+        payment endpoints.
       </Typography.Paragraph>
       {workspace?.lastError && (
         <Alert type="error" message={workspace.lastError} showIcon />
@@ -133,6 +142,12 @@ const PaykitLinks: React.FC<PaykitReceiverPanelProps & { state: PaykitState }> =
             onClick={() => command('link.prepareRecovery', input)}
           >
             Prepare recovery
+          </Button>
+          <Button
+            disabled={peerDisabled || !recoveryMarkerRetryAllowed}
+            onClick={() => command('link.retryRecoveryMarker', input)}
+          >
+            Retry recovery marker
           </Button>
           {(
             [

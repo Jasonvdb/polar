@@ -316,6 +316,7 @@ pub fn workspace_command(command: &str) -> bool {
         || matches!(
             command,
             "link.prepareRecovery"
+                | "link.retryRecoveryMarker"
                 | "link.initiate"
                 | "link.accept"
                 | "link.advance"
@@ -529,6 +530,7 @@ mod workspace_tests {
         let peer = pubky::Keypair::random().public_key().z32();
         let good = serde_json::json!({"receiverId":id,"peerPublicKey":peer,"peerReceiverPath":"other/server"});
         assert!(validate_input("link.prepareRecovery", good.clone()));
+        assert!(validate_input("link.retryRecoveryMarker", good.clone()));
         assert!(validate_input("link.initiate", good.clone()));
         for path in [
             "private/wallet",

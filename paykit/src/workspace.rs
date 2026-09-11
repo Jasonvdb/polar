@@ -49,6 +49,8 @@ struct RecoveryPreparationAnchor {
     anchored_remote_attempt_id: Option<String>,
     #[serde(default)]
     remote_attested_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    marker_retry_started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 pub struct Runtime {
     clock: crate::clock::ApplicationClock,
@@ -233,6 +235,7 @@ impl Runtime {
             if !matches!(
                 name,
                 "link.prepareRecovery"
+                    | "link.retryRecoveryMarker"
                     | "link.initiate"
                     | "link.accept"
                     | "link.advance"
@@ -247,6 +250,9 @@ impl Runtime {
             match name {
                 "link.prepareRecovery" => {
                     return self.prepare_link_recovery(key, path, sdk_peer).await;
+                }
+                "link.retryRecoveryMarker" => {
+                    return self.retry_link_recovery_marker(key, path, sdk_peer).await;
                 }
                 "link.initiate" => {
                     self.ensure_recovery_prepared(&peer, sdk_peer)?;
@@ -469,6 +475,11 @@ impl Runtime {
         self.save()?;
         let application_target = self.application_recovery_targets(&peer);
         let observed_preparation = self.recovery_preparation(&peer, application_target);
+        if live_recovery_marker_was_rejected(&observed, live_remote.as_ref()) {
+            self.clear_recovery_preparation(&target);
+            self.save()?;
+            return Err(recovery_marker_stale().into());
+        }
         if !application_target
             && peer.state != LinkedPeerState::RecoveryRequired
             && observed_preparation.is_none()
@@ -518,18 +529,83 @@ impl Runtime {
         let preparation = self
             .recovery_preparation(&peer, application_target)
             .ok_or_else(|| anyhow::anyhow!("peer recovery unavailable"))?;
-        Ok(json!({
-            "receiverId": self.state.view.receiver_id,
-            "peerPublicKey": key.to_string(),
-            "peerReceiverPath": path.to_string(),
-            "state": linked_peer_state_name(&peer.state),
-            "localMarkerPresent": preparation.local_marker_present,
-            "localMarkerCreatedAt": preparation.local_marker_created_at,
-            "remoteMarkerPresent": preparation.remote_marker_present,
-            "remoteMarkerObservedAt": preparation.remote_marker_observed_at,
-            "remoteMarkerChanged": observed.remote_marker_changed,
-            "readyForHandshake": preparation.ready_for_handshake,
-        }))
+        Ok(recovery_preparation_result(
+            self.state.view.receiver_id,
+            &peer,
+            &preparation,
+            observed.remote_marker_changed,
+        ))
+    }
+
+    async fn retry_link_recovery_marker(
+        &mut self,
+        key: PubkyPublicKey,
+        path: PaykitReceiverPath,
+        initial_peer: Option<&LinkedPeerRecord>,
+    ) -> anyhow::Result<Value> {
+        let initial_peer = initial_peer.ok_or_else(recovery_marker_retry_unavailable)?;
+        let target = (key.to_string(), path.to_string());
+        let application_target = self.application_recovery_targets(initial_peer);
+        let now = self.clock.now();
+        if initial_peer.local_recovery_attempt_id.is_some() {
+            ensure_recovery_marker_retry_allowed(initial_peer, application_target, now)?;
+            self.ensure_recovery_preparation_anchor(&target)?;
+            let anchor = self
+                .state
+                .recovery_preparations
+                .iter_mut()
+                .find(|anchor| {
+                    anchor.peer_public_key == target.0 && anchor.peer_receiver_path == target.1
+                })
+                .ok_or_else(recovery_marker_retry_unavailable)?;
+            anchor.anchored_local_attempt_id = initial_peer.local_recovery_attempt_id.clone();
+            anchor.marker_retry_started_at = Some(now);
+            self.save()?;
+            self.sdk
+                .remove_encrypted_link_recovery_marker(key.clone(), path.clone())
+                .await
+                .map_err(|_| recovery_marker_failed())?;
+        } else {
+            let anchor = self
+                .recovery_preparation_anchor(&target)
+                .ok_or_else(recovery_marker_retry_unavailable)?;
+            ensure_recovery_marker_retry_resume_allowed(
+                initial_peer,
+                application_target,
+                anchor,
+                now,
+            )?;
+        }
+        let cleared = self
+            .sdk_peer(&key, &path)
+            .await?
+            .ok_or_else(recovery_marker_retry_unavailable)?;
+        if cleared.local_recovery_attempt_id.is_some()
+            || cleared.local_recovery_marker_last_error.is_some()
+        {
+            return Err(recovery_marker_failed().into());
+        }
+
+        let published = self
+            .sdk
+            .publish_encrypted_link_recovery_marker(key.clone(), path.clone())
+            .await
+            .map_err(|_| recovery_marker_failed())?;
+        let peer = self
+            .sdk_peer(&key, &path)
+            .await?
+            .ok_or_else(recovery_marker_retry_unavailable)?;
+        self.anchor_published_local_evidence(&target, &published);
+        self.save()?;
+        let preparation = self
+            .recovery_preparation(&peer, application_target)
+            .ok_or_else(recovery_marker_retry_unavailable)?;
+        Ok(recovery_preparation_result(
+            self.state.view.receiver_id,
+            &peer,
+            &preparation,
+            false,
+        ))
     }
 
     async fn sdk_peer(
@@ -636,6 +712,7 @@ impl Runtime {
                     anchored_local_attempt_id: None,
                     anchored_remote_attempt_id: None,
                     remote_attested_at: None,
+                    marker_retry_started_at: None,
                 });
         }
         Ok(())
@@ -685,6 +762,7 @@ impl Runtime {
             return;
         };
         anchor.anchored_local_attempt_id = published.local_attempt_id.clone();
+        anchor.marker_retry_started_at = None;
     }
 
     fn clear_recovery_preparation(&mut self, peer: &(String, String)) {
@@ -1216,6 +1294,91 @@ fn linked_peer_state_name(state: &LinkedPeerState) -> &'static str {
         _ => "unknown",
     }
 }
+fn recovery_preparation_result(
+    receiver_id: Uuid,
+    peer: &LinkedPeerRecord,
+    preparation: &RecoveryPreparationView,
+    remote_marker_changed: bool,
+) -> Value {
+    json!({
+        "receiverId": receiver_id,
+        "peerPublicKey": peer.counterparty.to_string(),
+        "peerReceiverPath": peer.counterparty_receiver_path.to_string(),
+        "state": linked_peer_state_name(&peer.state),
+        "localMarkerPresent": preparation.local_marker_present,
+        "localMarkerCreatedAt": preparation.local_marker_created_at,
+        "remoteMarkerPresent": preparation.remote_marker_present,
+        "remoteMarkerObservedAt": preparation.remote_marker_observed_at,
+        "remoteMarkerChanged": remote_marker_changed,
+        "readyForHandshake": preparation.ready_for_handshake,
+    })
+}
+fn live_recovery_marker_was_rejected(
+    observed: &paykit_sdk::EncryptedLinkRecoveryMarkerReport,
+    live: Option<&paykit_lib::EncryptedLinkRecoveryMarker>,
+) -> bool {
+    live.is_some_and(|marker| Some(marker.attempt_id()) != observed.remote_attempt_id.as_deref())
+}
+fn ensure_recovery_marker_retry_allowed(
+    peer: &LinkedPeerRecord,
+    application_target: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), PublicError> {
+    let Some(marker_created_at) = peer.local_recovery_marker_created_at else {
+        return Err(recovery_marker_retry_unavailable());
+    };
+    if peer.local_recovery_attempt_id.is_none()
+        || peer.state == LinkedPeerState::Blocked
+        || peer.state == LinkedPeerState::Linking
+        || (!application_target && peer.state != LinkedPeerState::RecoveryRequired)
+    {
+        return Err(recovery_marker_retry_unavailable());
+    }
+    if now.timestamp() <= marker_created_at.timestamp() {
+        return Err(PublicError::new(
+            "recovery_marker_retry_too_soon",
+            "Pause delivery on the healthy peer, advance the application clock beyond the current marker second if fixed, then retry the recovering peer's marker.",
+        ));
+    }
+    Ok(())
+}
+fn ensure_recovery_marker_retry_resume_allowed(
+    peer: &LinkedPeerRecord,
+    application_target: bool,
+    anchor: &RecoveryPreparationAnchor,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), PublicError> {
+    let Some(retry_started_at) = anchor.marker_retry_started_at else {
+        return Err(recovery_marker_retry_unavailable());
+    };
+    if anchor.anchored_local_attempt_id.is_none()
+        || peer.local_recovery_attempt_id.is_some()
+        || peer.state == LinkedPeerState::Blocked
+        || peer.state == LinkedPeerState::Linking
+        || (!application_target && peer.state != LinkedPeerState::RecoveryRequired)
+    {
+        return Err(recovery_marker_retry_unavailable());
+    }
+    if now.timestamp() <= retry_started_at.timestamp() {
+        return Err(PublicError::new(
+            "recovery_marker_retry_too_soon",
+            "Pause delivery on the healthy peer, advance the application clock beyond the current marker second if fixed, then retry the recovering peer's marker.",
+        ));
+    }
+    Ok(())
+}
+fn recovery_marker_retry_unavailable() -> PublicError {
+    PublicError::new(
+        "recovery_marker_retry_unavailable",
+        "No retryable local recovery marker exists for this peer.",
+    )
+}
+fn recovery_marker_stale() -> PublicError {
+    PublicError::new(
+        "recovery_marker_stale",
+        "The peer recovery marker is stale. Pause delivery on this healthy peer, advance the application clock beyond its last link checkpoint if fixed, then retry the recovery marker on the recovering peer.",
+    )
+}
 fn recovery_marker_failed() -> PublicError {
     PublicError::new(
         "recovery_marker_failed",
@@ -1582,6 +1745,7 @@ mod tests {
             anchored_local_attempt_id: peer.local_recovery_attempt_id.clone(),
             anchored_remote_attempt_id: peer.remote_recovery_attempt_id.clone(),
             remote_attested_at: Some(stale),
+            marker_retry_started_at: None,
         };
         assert!(recovery_preparation(&peer, false, Some(&anchor)).is_none());
         let stale_target = recovery_preparation(&peer, true, Some(&anchor)).unwrap();
@@ -1605,6 +1769,130 @@ mod tests {
         assert!(!failed.ready_for_handshake);
         let public = serde_json::to_string(&failed).unwrap();
         assert!(!public.contains("private marker failure"));
+    }
+    #[test]
+    fn recovery_marker_retry_requires_a_recovery_episode_and_a_later_second() {
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let marker_created_at = chrono::Utc::now();
+        let mut peer = recovery_peer_record(&key, &path, LinkedPeerState::RecoveryRequired);
+        peer.local_recovery_attempt_id = Some(Uuid::new_v4().to_string());
+        peer.local_recovery_marker_created_at = Some(marker_created_at);
+
+        let too_soon =
+            ensure_recovery_marker_retry_allowed(&peer, false, marker_created_at).unwrap_err();
+        assert_eq!(too_soon.code, "recovery_marker_retry_too_soon");
+        ensure_recovery_marker_retry_allowed(
+            &peer,
+            false,
+            marker_created_at + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+
+        peer.state = LinkedPeerState::Linked;
+        assert_eq!(
+            ensure_recovery_marker_retry_allowed(
+                &peer,
+                false,
+                marker_created_at + chrono::Duration::seconds(1),
+            )
+            .unwrap_err()
+            .code,
+            "recovery_marker_retry_unavailable"
+        );
+        ensure_recovery_marker_retry_allowed(
+            &peer,
+            true,
+            marker_created_at + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+
+        peer.state = LinkedPeerState::Linking;
+        assert_eq!(
+            ensure_recovery_marker_retry_allowed(
+                &peer,
+                true,
+                marker_created_at + chrono::Duration::seconds(1),
+            )
+            .unwrap_err()
+            .code,
+            "recovery_marker_retry_unavailable"
+        );
+
+        peer.state = LinkedPeerState::RecoveryRequired;
+        peer.local_recovery_attempt_id = None;
+        peer.local_recovery_marker_created_at = None;
+        let anchor = RecoveryPreparationAnchor {
+            peer_public_key: key.to_string(),
+            peer_receiver_path: path.to_string(),
+            episode_started_at: marker_created_at,
+            anchored_local_attempt_id: Some(Uuid::new_v4().to_string()),
+            anchored_remote_attempt_id: None,
+            remote_attested_at: None,
+            marker_retry_started_at: Some(marker_created_at),
+        };
+        assert_eq!(
+            ensure_recovery_marker_retry_resume_allowed(&peer, false, &anchor, marker_created_at,)
+                .unwrap_err()
+                .code,
+            "recovery_marker_retry_too_soon"
+        );
+        ensure_recovery_marker_retry_resume_allowed(
+            &peer,
+            false,
+            &anchor,
+            marker_created_at + chrono::Duration::seconds(1),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn live_marker_without_matching_sdk_observation_maps_to_stale_retry_guidance() {
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let peer = recovery_peer_record(&key, &path, LinkedPeerState::Linked);
+        let observed = recovery_marker_report(&peer);
+        let live = paykit_lib::EncryptedLinkRecoveryMarker::new(
+            Uuid::new_v4().to_string(),
+            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        )
+        .unwrap();
+
+        assert!(live_recovery_marker_was_rejected(&observed, Some(&live)));
+        let error = recovery_marker_stale();
+        assert_eq!(error.code, "recovery_marker_stale");
+        assert!(error.message.contains("Pause delivery"));
+    }
+    #[test]
+    fn recovery_marker_retry_intent_survives_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let mut runtime = open(dir.path(), receiver);
+        let key = PubkyPublicKey::from_public_key(&pubky::Keypair::random().public_key());
+        let path = PaykitReceiverPath::new("peer/wallet").unwrap();
+        let target = (key.to_string(), path.to_string());
+        let retry_started_at = chrono::Utc::now();
+        let old_attempt = Uuid::new_v4().to_string();
+        runtime.ensure_recovery_preparation_anchor(&target).unwrap();
+        let anchor = runtime
+            .state
+            .recovery_preparations
+            .iter_mut()
+            .find(|anchor| {
+                anchor.peer_public_key == target.0 && anchor.peer_receiver_path == target.1
+            })
+            .unwrap();
+        anchor.anchored_local_attempt_id = Some(old_attempt.clone());
+        anchor.marker_retry_started_at = Some(retry_started_at);
+        runtime.save().unwrap();
+        drop(runtime);
+
+        let reopened = open(dir.path(), receiver);
+        let anchor = reopened.recovery_preparation_anchor(&target).unwrap();
+        assert_eq!(
+            anchor.anchored_local_attempt_id.as_deref(),
+            Some(old_attempt.as_str())
+        );
+        assert_eq!(anchor.marker_retry_started_at, Some(retry_started_at));
     }
 
     #[test]
@@ -1632,6 +1920,7 @@ mod tests {
                 anchored_local_attempt_id: None,
                 anchored_remote_attempt_id: None,
                 remote_attested_at: None,
+                marker_retry_started_at: None,
             });
         let mut peer = recovery_peer_record(&key, &path, LinkedPeerState::RecoveryRequired);
         let archived_local = Uuid::new_v4().to_string();
@@ -1754,6 +2043,7 @@ mod tests {
                 anchored_local_attempt_id: peer.local_recovery_attempt_id.clone(),
                 anchored_remote_attempt_id: None,
                 remote_attested_at: None,
+                marker_retry_started_at: None,
             });
 
         let error = runtime
@@ -1814,6 +2104,7 @@ mod tests {
                 anchored_local_attempt_id: peer.local_recovery_attempt_id.clone(),
                 anchored_remote_attempt_id: peer.remote_recovery_attempt_id.clone(),
                 remote_attested_at: Some(episode),
+                marker_retry_started_at: None,
             });
         assert!(runtime.link_advancement_allowed(&peer));
 

@@ -79,7 +79,20 @@ it('shows durable recovery gates and explicit relink controls', () => {
       workspace={{
         receiverId: receiver.id,
         deliveryPaused: true,
-        links: [],
+        links: [
+          {
+            ...peer,
+            state: 'recoveryRequired',
+            generation: 2,
+            failureCount: 0,
+            pendingMessages: 0,
+            recoveryPreparation: {
+              localMarkerPresent: true,
+              remoteMarkerPresent: false,
+              readyForHandshake: false,
+            },
+          },
+        ],
         profiles: [],
         contacts: [],
         discoveries: [],
@@ -103,11 +116,14 @@ it('shows durable recovery gates and explicit relink controls', () => {
     />,
   );
   expect(view.getByText(/Automation is paused/)).toBeInTheDocument();
-  expect(
-    view.getByText(/return to the original side and prepare again/),
-  ).toBeInTheDocument();
+  expect(view.getByText(/return here to prepare again/)).toBeInTheDocument();
   fireEvent.click(view.getByText('Prepare recovery with alice/wallet'));
   expect(command).toHaveBeenCalledWith('link.prepareRecovery', {
+    receiverId: receiver.id,
+    ...peer,
+  });
+  fireEvent.click(view.getByText('Retry recovery marker with alice/wallet'));
+  expect(command).toHaveBeenCalledWith('link.retryRecoveryMarker', {
     receiverId: receiver.id,
     ...peer,
   });

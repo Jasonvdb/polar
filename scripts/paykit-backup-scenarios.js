@@ -107,10 +107,25 @@ async function prepareExactRecovery(command, requests, initial, restored, health
   const owner = receiver => initial.participants.find(participant => participant.id === receiver.participantId).publicKey;
   const exact = (workspace, peer) => workspace.links.find(link => link.peerPublicKey === owner(peer) && link.peerReceiverPath === peer.path);
   const peer = (local, remote) => ({ receiverId: local.id, peerPublicKey: owner(remote), peerReceiverPath: remote.path });
+  const effective = receiver => Date.parse(receiver.applicationClock?.now || '') || 0;
+  const checkpointTime = Math.ceil(Math.max(Date.now(), effective(await requests.view(healthy)), effective(await requests.view(restored))) / 1000) * 1000 + 2000;
+  const utc = value => new Date(value).toISOString().replace('.000Z', 'Z');
+  await command('clock.set', { receiverId: healthy.id, now: utc(checkpointTime) });
+  await command('delivery.sync', { receiverId: healthy.id });
   const first = await command('link.prepareRecovery', peer(restored, healthy));
+  assert.equal(first.operation.result.state, 'recoveryRequired');
+  const stale = await command('link.prepareRecovery', peer(healthy, restored), undefined, 'failed');
+  assert.equal(stale.operation.error.code, 'receiver_operation_failed');
+  assert.equal(stale.operation.error.message, 'The peer recovery marker is stale. Pause delivery on this healthy peer, advance the application clock beyond its last link checkpoint if fixed, then retry the recovery marker on the recovering peer.');
+  await command('delivery.pause', { receiverId: healthy.id });
+  assert.equal((await requests.view(healthy)).deliveryPaused, true);
+  await command('clock.set', { receiverId: restored.id, now: utc(checkpointTime + 2000) });
+  const retry = await command('link.retryRecoveryMarker', peer(restored, healthy));
+  assert.equal(retry.operation.result.state, 'recoveryRequired');
+  assert.equal(retry.operation.result.readyForHandshake, false);
   const second = await command('link.prepareRecovery', peer(healthy, restored));
   const third = await command('link.prepareRecovery', peer(restored, healthy));
-  for (const result of [first, second, third]) assert.equal(result.operation.result.state, 'recoveryRequired');
+  for (const result of [second, third]) assert.equal(result.operation.result.state, 'recoveryRequired');
   assert.equal(third.operation.result.readyForHandshake, true);
   const prepared = await requests.wait(snapshot => [
     exact(snapshot.receiverWorkspaces.find(value => value.receiverId === restored.id), healthy),
@@ -124,6 +139,8 @@ async function prepareExactRecovery(command, requests, initial, restored, health
     const remote = index ? restored : healthy;
     return exact(snapshot.receiverWorkspaces.find(value => value.receiverId === local.id), remote)?.state === 'linked';
   }));
+  await command('delivery.resume', { receiverId: healthy.id });
+  assert.equal((await requests.view(healthy)).deliveryPaused, false);
 }
 
 async function run({ initial, state, command, stage, signal, walletFixture: fixture, base, token, requests }) {
