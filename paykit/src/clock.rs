@@ -20,14 +20,19 @@ pub struct ClockView {
 }
 impl Clock for ApplicationClock {
     fn now(&self) -> DateTime<Utc> {
-        self.state
-            .read()
-            .expect("clock lock")
-            .controlled
-            .unwrap_or_else(Utc::now)
+        self.sample().expect("clock lock").0
     }
 }
 impl ApplicationClock {
+    fn sample(&self) -> Result<(DateTime<Utc>, &'static str), ()> {
+        match self.state.read() {
+            Ok(state) => match state.controlled {
+                Some(now) => Ok((now, "controlled")),
+                None => Ok((Utc::now(), "system")),
+            },
+            Err(_) => Err(()),
+        }
+    }
     pub fn open(vault: &Vault) -> anyhow::Result<Self> {
         Ok(Self {
             state: Arc::new(RwLock::new(vault.load("clock.cbor")?.unwrap_or_default())),
@@ -65,7 +70,8 @@ pub struct SdkEventClock {
 }
 struct LogicalTime {
     last: Option<DateTime<Utc>>,
-    failed: bool,
+    failure: Option<&'static str>,
+    persisted_seed: bool,
 }
 impl SdkEventClock {
     pub(crate) fn new(
@@ -74,33 +80,68 @@ impl SdkEventClock {
     ) -> Self {
         Self {
             application,
-            logical: Arc::new(std::sync::Mutex::new(LogicalTime {
-                last: observation_watermark(state),
-                failed: false,
+            logical: Arc::new(std::sync::Mutex::new({
+                let last = observation_watermark(state);
+                LogicalTime {
+                    last,
+                    failure: None,
+                    persisted_seed: last.is_some(),
+                }
             })),
         }
     }
     pub(crate) fn ensure_valid(&self) -> paykit_sdk::Result<()> {
-        let mut state = self.logical.lock().map_err(|_| event_clock_error())?;
+        let mut state = self.logical.lock().map_err(|_| {
+            match self.application.sample() {
+                Ok((observed, mode)) => {
+                    private_clock_diagnostic("lock_poisoned", mode, Some(observed), None)
+                }
+                Err(()) => {
+                    private_clock_diagnostic("application_lock_poisoned", "unavailable", None, None)
+                }
+            }
+            event_clock_error()
+        })?;
+        let (observed, mode) = self.application.sample().expect("clock lock");
         if state
             .last
-            .is_some_and(|last| self.application.now().timestamp() < last.timestamp())
+            .is_some_and(|last| observed.timestamp() < last.timestamp())
         {
-            state.failed = true;
+            state.failure = Some(if state.persisted_seed {
+                "future_persisted_seed"
+            } else {
+                "backward_observation"
+            });
         }
-        if state.failed {
+        if let Some(kind) = state.failure {
+            private_clock_diagnostic(kind, mode, Some(observed), state.last);
             Err(event_clock_error())
         } else {
+            state.persisted_seed = false;
             Ok(())
         }
     }
     fn serialized_now(&self, before_lock: impl FnOnce()) -> DateTime<Utc> {
         before_lock();
         let Ok(mut state) = self.logical.lock() else {
-            return self.application.now();
+            return match self.application.sample() {
+                Ok((observed, mode)) => {
+                    private_clock_diagnostic("lock_poisoned", mode, Some(observed), None);
+                    observed
+                }
+                Err(()) => {
+                    private_clock_diagnostic(
+                        "application_lock_poisoned",
+                        "unavailable",
+                        None,
+                        None,
+                    );
+                    panic!("clock lock")
+                }
+            };
         };
-        let now = self.application.now();
-        if state.failed {
+        let (now, mode) = self.application.sample().expect("clock lock");
+        if state.failure.is_some() {
             return state.last.unwrap_or(now);
         }
         let next = match state.last {
@@ -110,10 +151,23 @@ impl SdkEventClock {
         match next.filter(|next| next.timestamp() == now.timestamp()) {
             Some(next) => {
                 state.last = Some(next);
+                state.persisted_seed = false;
                 next
             }
             None => {
-                state.failed = true;
+                let kind = if next.is_none() {
+                    "datetime_overflow"
+                } else if state.persisted_seed
+                    && state
+                        .last
+                        .is_some_and(|last| last.timestamp() > now.timestamp())
+                {
+                    "future_persisted_seed"
+                } else {
+                    "causal_second_exhausted"
+                };
+                state.failure = Some(kind);
+                private_clock_diagnostic(kind, mode, Some(now), state.last);
                 state.last.unwrap_or(now)
             }
         }
@@ -123,6 +177,39 @@ impl Clock for SdkEventClock {
     fn now(&self) -> DateTime<Utc> {
         self.serialized_now(|| {})
     }
+}
+fn private_clock_diagnostic(
+    kind: &'static str,
+    mode: &'static str,
+    observed: Option<DateTime<Utc>>,
+    last: Option<DateTime<Utc>>,
+) {
+    if !private_clock_diagnostic_enabled(|name| std::env::var(name).ok()) {
+        return;
+    }
+    eprintln!(
+        "{}",
+        private_clock_diagnostic_line(kind, mode, observed, last)
+    );
+}
+fn private_clock_diagnostic_line(
+    kind: &'static str,
+    mode: &'static str,
+    observed: Option<DateTime<Utc>>,
+    last: Option<DateTime<Utc>>,
+) -> String {
+    let timestamp =
+        |value: DateTime<Utc>| value.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    format!(
+        "SDK private clock diagnostic: kind={kind} mode={mode} observedUtc={} lastUtc={}",
+        observed.map_or_else(|| "none".into(), timestamp),
+        last.map_or_else(|| "none".into(), timestamp)
+    )
+}
+fn private_clock_diagnostic_enabled(env: impl Fn(&str) -> Option<String>) -> bool {
+    env("PAYKIT_PRIVATE_RECEIVER_CHILD").as_deref() == Some("1")
+        && env("PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS").as_deref()
+            == Some("receiver-diagnostics.json")
 }
 fn event_clock_error() -> paykit_sdk::PaykitSdkError {
     paykit_sdk::PaykitSdkError::Storage {
@@ -253,6 +340,10 @@ mod tests {
         let backwards = SdkEventClock::new(app.clone(), &future);
         assert!(backwards.ensure_valid().is_err());
         assert!(backwards.ensure_valid().is_err());
+        assert_eq!(
+            backwards.logical.lock().unwrap().failure,
+            Some("future_persisted_seed")
+        );
     }
     #[test]
     fn live_clock_sample_is_taken_after_serializing_concurrent_event_time() {
@@ -282,6 +373,98 @@ mod tests {
             advanced_second + chrono::Duration::nanoseconds(1)
         );
         assert!(sdk.ensure_valid().is_ok());
+    }
+    #[test]
+    fn private_clock_failure_kinds_distinguish_backward_and_exhausted_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new(directory.path().into(), [45; 32], "failure-kind".into()).unwrap();
+        let application = ApplicationClock::open(&vault).unwrap();
+        application
+            .set(&vault, Some("2090-01-01T00:00:01Z"))
+            .unwrap();
+        let sdk = SdkEventClock::new(application.clone(), &Default::default());
+        assert_eq!(sdk.now(), application.now());
+        application.state.write().unwrap().controlled =
+            Some(recurrence::timestamp("2090-01-01T00:00:00Z").unwrap());
+        assert!(sdk.ensure_valid().is_err());
+        assert_eq!(
+            sdk.logical.lock().unwrap().failure,
+            Some("backward_observation")
+        );
+
+        let frozen = ApplicationClock::open(&vault).unwrap();
+        let exhausted = SdkEventClock::new(frozen.clone(), &Default::default());
+        exhausted.logical.lock().unwrap().last = Some(
+            DateTime::parse_from_rfc3339("2090-01-01T00:00:01.999999999Z")
+                .unwrap()
+                .with_timezone(&Utc),
+        );
+        exhausted.now();
+        assert_eq!(
+            exhausted.logical.lock().unwrap().failure,
+            Some("causal_second_exhausted")
+        );
+    }
+    #[test]
+    fn private_clock_detail_requires_exact_receiver_child_contract() {
+        let enabled = |name: &str| match name {
+            "PAYKIT_PRIVATE_RECEIVER_CHILD" => Some("1".into()),
+            "PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS" => Some("receiver-diagnostics.json".into()),
+            _ => None,
+        };
+        assert!(private_clock_diagnostic_enabled(enabled));
+        assert!(!private_clock_diagnostic_enabled(|name| match name {
+            "PAYKIT_PRIVATE_RECEIVER_CHILD" => Some("1".into()),
+            "PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS" => Some("application.cbor".into()),
+            _ => None,
+        }));
+        let observed = DateTime::parse_from_rfc3339("2090-01-01T00:00:01.000000002Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            private_clock_diagnostic_line(
+                "backward_observation",
+                "system",
+                Some(observed),
+                None
+            ),
+            "SDK private clock diagnostic: kind=backward_observation mode=system observedUtc=2090-01-01T00:00:01.000000002Z lastUtc=none"
+        );
+    }
+    #[test]
+    fn application_clock_samples_mode_and_timestamp_from_one_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new(directory.path().into(), [46; 32], "clock-sample".into()).unwrap();
+        let application = ApplicationClock::open(&vault).unwrap();
+        assert_eq!(application.sample().unwrap().1, "system");
+        application
+            .set(&vault, Some("2090-01-01T00:00:00Z"))
+            .unwrap();
+        assert_eq!(
+            application.sample().unwrap(),
+            (
+                recurrence::timestamp("2090-01-01T00:00:00Z").unwrap(),
+                "controlled"
+            )
+        );
+    }
+    #[test]
+    fn poisoned_controlled_clock_never_falls_back_to_system_time() {
+        let directory = tempfile::tempdir().unwrap();
+        let vault = Vault::new(directory.path().into(), [47; 32], "poisoned-clock".into()).unwrap();
+        let application = ApplicationClock::open(&vault).unwrap();
+        application
+            .set(&vault, Some("2090-01-01T00:00:00Z"))
+            .unwrap();
+        let state = application.state.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = state.write().unwrap();
+            panic!("poison clock for regression");
+        })
+        .join()
+        .is_err());
+        assert!(application.sample().is_err());
+        assert!(std::panic::catch_unwind(|| application.now()).is_err());
     }
     #[test]
     fn controlled_time_survives_restart_and_rejects_backwards_reset() {
