@@ -194,6 +194,17 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   await command('receiver.restart', { receiverId: bob.id }); await command('payment.reconcile', { receiverId: bob.id, executionId: lostLightning.execution.id });
   const recoveredLightning = (await view(bob)).executions.find(e => e.id === lostLightning.execution.id); assert.equal(recoveredLightning.status, 'succeeded');
   assert.equal((await fixture.counts()).lnd.executionSuccess, lostLightningCount + 1);
+  assert.equal(recoveredLightning.paymentHash, lostLightning.execution.paymentHash);
+  // Complete payee settlement before later scenarios expire and clean receiving reservations.
+  const walletHistory = async () => ({
+    core: await Promise.all([alice, bob, carol].map(transactions)),
+    lightning: await Promise.all([0, 1, 2].map(async index => (await fixture.lnd(index, 'listpayments', '--include_incomplete')).payments.map(p => ({ hash: p.payment_hash, index: p.payment_index, status: p.status, valueSats: p.value_sat })))),
+  });
+  const beforeSettlement = await walletHistory();
+  const recoveredProof = await submit(lostLightningId, recoveredLightning, bob, carol);
+  assert.equal((await verify(lostLightningId, recoveredProof, 1, carol)).status, 'verified');
+  assert.deepEqual(await walletHistory(), beforeSettlement);
+  assert.equal((await fixture.counts()).lnd.executionSuccess, lostLightningCount + 1);
   stage('execution-reconciliation');
 
   await publish(bob, ONCHAIN); const blockedId = await accepted(); const snapshots = await transactions(alice); const executionCount = (await view(alice)).executions.length;

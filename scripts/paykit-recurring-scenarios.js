@@ -286,20 +286,20 @@ async function run({ initial, state, command, request, stage, signal, walletFixt
     const ready = await fixture.waitReady('core', nonce);
     let originalDigest = ready.signedTransactionDigest;
     if (phase === 'broadcast') {
-      const inFlight = execution(await view(alice), r.id, 0); assert(inFlight?.txid);
-      originalDigest = createHash('sha256').update(Buffer.from(fixture.core('getrawtransaction', [inFlight.txid, false]), 'hex')).digest('hex');
+      assert.match(ready.transactionId, /^[a-f0-9]{64}$/);
+      originalDigest = createHash('sha256').update(Buffer.from(fixture.core('getrawtransaction', [ready.transactionId, false]), 'hex')).digest('hex');
     }
     await fixture.stopCore(); fixture.release('core', nonce, 'drop');
     const outcome = await pending; if (outcome.error) throw outcome.error;
     const interrupted = execution(await view(alice), r.id, 0); assert.equal(interrupted.status, 'uncertain');
     if (phase === 'unsigned') assert.equal(interrupted.txid, null);
-    else assert.match(interrupted.txid, /^[a-f0-9]{64}$/);
+    else assert.equal(interrupted.txid, ready.transactionId);
     await fixture.startCore();
     assert(!fixture.core('listwallets').includes(walletName), 'Core must leave the persisted participant wallet unloaded for this regression');
     assert.deepEqual(walletDirectory(), walletDirectoryBefore);
     await command('payment.reconcile', { receiverId: alice.id, executionId: interrupted.id });
     const recovered = execution(await view(alice), r.id, 0); assert.equal(recovered.id, interrupted.id); assert.equal(recovered.status, 'succeeded');
-    if (phase === 'broadcast') assert.equal(recovered.txid, interrupted.txid);
+    if (phase === 'broadcast') { assert.equal(recovered.txid, interrupted.txid); assert.equal(recovered.txid, ready.transactionId); }
     const raw = fixture.core('getrawtransaction', [recovered.txid, false]);
     const transactionDigest = createHash('sha256').update(Buffer.from(raw, 'hex')).digest('hex'); assert.equal(transactionDigest, originalDigest);
     if (phase === 'unsigned') {
