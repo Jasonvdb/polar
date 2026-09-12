@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('assert/strict');
 const { randomUUID } = require('crypto');
-const { serviceCli, validateCatalog, validateDiagnostics } = require('./paykit-interface-scenarios');
+const { serviceCli, validateCatalog, validateDiagnostics, validateDiagnosticsParity } = require('./paykit-interface-scenarios');
 
 const command = index => ({ id: `command-${index}`, panelId: 'workspace', requiredParameters: [], optionalParameters: [], genericCommandAllowed: true });
 
@@ -19,6 +19,54 @@ test('diagnostic fixtures reject secret-shaped and unknown fields', () => {
   assert.equal(validateDiagnostics(value, environmentId), value);
   assert.throws(() => validateDiagnostics({ ...value, apiToken: 'secret' }, environmentId));
   assert.throws(() => validateDiagnostics({ ...value, operations: [{ ...value.operations[0], preimage: 'a'.repeat(64) }] }, environmentId));
+  assert.throws(() => validateDiagnostics({ ...value, receivers: [{ ...value.receivers[0], path: '/data/receiver' }] }, environmentId));
+  assert.throws(() => validateDiagnostics({ ...value, operations: [{ ...value.operations[0], errorCode: '/run/paykit/token' }] }, environmentId));
+});
+
+test('diagnostic parity accepts successive cursor and status progress', () => {
+  const environmentId = randomUUID();
+  const receiverId = randomUUID();
+  const operationId = randomUUID();
+  const earlier = validateDiagnostics({
+    apiVersion: 1,
+    environmentId,
+    ready: false,
+    fundingStatus: 'running',
+    receivers: [{ id: receiverId, status: 'starting', generation: 1 }],
+    operations: [{ id: operationId, command: 'preset.create', status: 'queued' }],
+    lastEventSequence: 96,
+  }, environmentId);
+  const later = validateDiagnostics({
+    apiVersion: 1,
+    environmentId,
+    ready: true,
+    fundingStatus: 'ready',
+    receivers: [{ id: receiverId, status: 'running', generation: 1 }],
+    operations: [{ id: operationId, command: 'preset.create', status: 'succeeded' }],
+    lastEventSequence: 97,
+  }, environmentId);
+
+  assert.doesNotThrow(() => validateDiagnosticsParity(earlier, later));
+});
+
+test('diagnostic parity rejects identity, command, cursor, and terminal-status mismatches', () => {
+  const environmentId = randomUUID();
+  const operationId = randomUUID();
+  const value = validateDiagnostics({
+    apiVersion: 1,
+    environmentId,
+    ready: true,
+    fundingStatus: 'ready',
+    receivers: [{ id: randomUUID(), status: 'running', generation: 1 }],
+    operations: [{ id: operationId, command: 'preset.create', status: 'succeeded' }],
+    lastEventSequence: 3,
+  }, environmentId);
+
+  assert.throws(() => validateDiagnosticsParity(value, { ...value, environmentId: randomUUID() }));
+  assert.throws(() => validateDiagnosticsParity(value, { ...value, lastEventSequence: 2 }));
+  assert.throws(() => validateDiagnosticsParity(value, { ...value, receivers: [{ ...value.receivers[0], id: randomUUID() }] }));
+  assert.throws(() => validateDiagnosticsParity(value, { ...value, operations: [{ ...value.operations[0], command: 'preset.fund' }] }));
+  assert.throws(() => validateDiagnosticsParity(value, { ...value, operations: [{ ...value.operations[0], status: 'failed' }] }));
 });
 
 test('service CLI targets the loopback API inside its container', () => {

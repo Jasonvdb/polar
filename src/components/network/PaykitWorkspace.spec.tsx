@@ -218,6 +218,49 @@ describe('Paykit workspace', () => {
     expect(view.getByText('Alice / Wallet')).toBeVisible();
     expect(view.getByLabelText('Link peer public key')).toHaveValue('');
   });
+  it('binds a matching manual submission to the guide that opened its controls', async () => {
+    const operationId = newPaykitId();
+    service.command.mockImplementation(async () => {
+      service.diagnostics.mockResolvedValue({
+        apiVersion: 1,
+        environmentId: environment.environmentId,
+        ready: true,
+        fundingStatus: 'notStarted',
+        receivers: [],
+        operations: [
+          {
+            id: operationId,
+            command: 'preset.create',
+            status: 'succeeded',
+          },
+        ],
+        lastEventSequence: 1,
+      });
+      return { operationId };
+    });
+    const view = setup();
+
+    fireEvent.click(view.getByRole('tab', { name: 'Guides' }));
+    await view.findByText('Preset participants are visible.');
+    fireEvent.click(view.getByText('Open Workspace controls'));
+    expect(view.getByRole('tab', { name: 'Workspace' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    fireEvent.click(view.getByText('Create Alice / Bob / Carol preset'));
+    await waitFor(() =>
+      expect(service.command).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ command: 'preset.create', input: {} }),
+      ),
+    );
+    fireEvent.click(view.getByRole('tab', { name: 'Guides' }));
+
+    expect(
+      await view.findByText('Current operation: succeeded', {}, { timeout: 2500 }),
+    ).toBeVisible();
+    expect(view.getAllByText(new RegExp(operationId))).toHaveLength(2);
+  });
 });
 
 it('resets receiver drafts on selection and preserves uncertain peer-command identity across edits', async () => {

@@ -39,7 +39,9 @@ import PaykitLinks from './PaykitLinks';
 import PaykitProfilesContacts from './PaykitProfilesContacts';
 import PaykitBackupRecovery from './PaykitBackupRecovery';
 import PaykitImageSetup from './PaykitImageSetup';
-import PaykitGuidedScenarios from './PaykitGuidedScenarios';
+import PaykitGuidedScenarios, {
+  PaykitGuideOperationContext,
+} from './PaykitGuidedScenarios';
 
 const workbenchPages = [
   ['workspace', 'Workspace'],
@@ -73,6 +75,10 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
   const [kind, setKind] = useState<'wallet' | 'server'>('wallet');
   const [retry, setRetry] = useState<PaykitCommandRequest>();
   const [operationId, setOperationId] = useState('');
+  const [guideOperationContext, setGuideOperationContext] =
+    useState<PaykitGuideOperationContext>();
+  const [retryGuideOperationContext, setRetryGuideOperationContext] =
+    useState<PaykitGuideOperationContext>();
   const [guardedOperationId, setGuardedOperationId] = useState('');
   const [receiptOperationId, setReceiptOperationId] = useState('');
   const [catalog, setCatalog] = useState<PaykitGuideCatalog>();
@@ -93,6 +99,8 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
     setState(undefined);
     setReceiptOperationId('');
     setGuardedOperationId('');
+    setGuideOperationContext(undefined);
+    setRetryGuideOperationContext(undefined);
     setConnectionError('');
     const poll = async () => {
       try {
@@ -203,23 +211,50 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
       setBusy(false);
     }
   };
-  const submit = async (request: PaykitCommandRequest) => {
+  const matchingGuideOperationContext = (
+    request: PaykitCommandRequest,
+  ): PaykitGuideOperationContext | undefined => {
+    if (!guideView || !catalog) return undefined;
+    const scenario = catalog.scenarios.find(item => item.id === guideView.scenarioId);
+    const step = scenario?.steps.find(item => item.id === guideView.stepId);
+    if (!step || step.command !== request.command) return undefined;
+    const needsReceiver = step.requiredParameters.includes('receiverId');
+    if (needsReceiver && request.input.receiverId !== receiverId) return undefined;
+    return {
+      scenarioId: guideView.scenarioId,
+      stepId: step.id,
+      receiverId,
+    };
+  };
+  const submit = async (
+    request: PaykitCommandRequest,
+    retainedGuideContext?: PaykitGuideOperationContext | null,
+  ) => {
     validatePaykitCommand(request);
+    const submittedGuideContext =
+      retainedGuideContext === undefined
+        ? matchingGuideOperationContext(request)
+        : retainedGuideContext || undefined;
     setRetry(request);
+    setRetryGuideOperationContext(submittedGuideContext);
     try {
       const result = await paykitService.command(network.id, request);
       setOperationId(result.operationId);
+      setGuideOperationContext(submittedGuideContext);
       if (guardedCommand(request.command)) setGuardedOperationId(result.operationId);
       if (request.command.startsWith('receipt.'))
         setReceiptOperationId(result.operationId);
       setRetry(undefined);
+      setRetryGuideOperationContext(undefined);
     } catch (e: any) {
       // A rejected request was never accepted. Transport errors remain uncertain.
-      if (
+      const rejectedBeforeAcceptance =
         /HTTP 4[0-9]{2}/.test(e.message) ||
-        e.message.startsWith('Paykit command not submitted:')
-      )
+        e.message.startsWith('Paykit command not submitted:');
+      if (rejectedBeforeAcceptance) {
         setRetry(undefined);
+        setRetryGuideOperationContext(undefined);
+      }
       throw e;
     }
   };
@@ -324,7 +359,12 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
               type="warning"
               message="Command acceptance is uncertain. Retry the same command ID before submitting another action."
               action={
-                <Button loading={busy} onClick={() => perform(() => submit(retry))}>
+                <Button
+                  loading={busy}
+                  onClick={() =>
+                    perform(() => submit(retry, retryGuideOperationContext || null))
+                  }
+                >
                   Retry command
                 </Button>
               }
@@ -403,6 +443,7 @@ const PaykitWorkspace: React.FC<{ network: Network }> = ({ network }) => {
             selectedPeer={guidePeer}
             acknowledgedStepIds={acknowledgedSteps}
             pendingOperationId={operationId || undefined}
+            pendingOperationContext={guideOperationContext}
             onNavigate={navigateGuide}
             onSelectReceiver={focusGuideReceiver}
             onSelectPeer={setGuidePeer}

@@ -28,16 +28,18 @@ export interface PaykitGuidedScenariosProps {
   selectedPeer?: PaykitGuidePeerFocus;
   acknowledgedStepIds?: string[];
   pendingOperationId?: string;
-  pendingOperationContext?: {
-    scenarioId: string;
-    stepId: string;
-    receiverId?: string;
-  };
+  pendingOperationContext?: PaykitGuideOperationContext;
   onNavigate: (scenarioId: string, stepId: string) => void;
   onSelectReceiver: (receiverId: string) => void;
   onSelectPeer: (peer: PaykitGuidePeerFocus) => void;
   onOpenPanel: (panelId: string) => void;
   onAcknowledgeStep: (scenarioId: string, stepId: string) => void;
+}
+
+export interface PaykitGuideOperationContext {
+  scenarioId: string;
+  stepId: string;
+  receiverId?: string;
 }
 
 const peerParameters = ['peerPublicKey', 'peerReceiverPath'];
@@ -247,7 +249,10 @@ const PaykitGuidedScenarios: React.FC<PaykitGuidedScenariosProps> = props => {
           <Button
             type="primary"
             disabled={!choicesReady}
-            onClick={() => onOpenPanel(step.panelId)}
+            onClick={() => {
+              onNavigate(scenario.id, step.id);
+              onOpenPanel(step.panelId);
+            }}
           >
             Open {panel?.title || step.panelId} controls
           </Button>

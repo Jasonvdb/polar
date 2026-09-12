@@ -24,11 +24,52 @@ function validateDiagnostics(value, environmentId) {
   assert.deepEqual(Object.keys(value).sort(), ['apiVersion', 'environmentId', 'fundingStatus', 'lastEventSequence', 'operations', 'ready', 'receivers'].sort());
   assert.equal(value.apiVersion, 1);
   assert.equal(value.environmentId, environmentId);
-  assert(value.receivers.every(receiver => Object.keys(receiver).every(key => ['id', 'status', 'generation'].includes(key))));
-  assert(value.operations.every(operation => Object.keys(operation).every(key => ['id', 'command', 'status', 'errorCode'].includes(key))));
+  assert.equal(typeof value.ready, 'boolean');
+  assert(['notStarted', 'running', 'ready', 'failed', 'uncertain', 'unavailable'].includes(value.fundingStatus));
+  assert(Number.isSafeInteger(value.lastEventSequence) && value.lastEventSequence >= 0);
+  assert(Array.isArray(value.receivers));
+  assert(Array.isArray(value.operations));
+  for (const receiver of value.receivers) {
+    assert.deepEqual(Object.keys(receiver).sort(), ['generation', 'id', 'status']);
+    assert.equal(typeof receiver.id, 'string');
+    assert(['stopped', 'starting', 'running', 'error'].includes(receiver.status));
+    assert(Number.isSafeInteger(receiver.generation) && receiver.generation >= 0);
+  }
+  for (const operation of value.operations) {
+    const expectedKeys = operation.errorCode === undefined
+      ? ['command', 'id', 'status']
+      : ['command', 'errorCode', 'id', 'status'];
+    assert.deepEqual(Object.keys(operation).sort(), expectedKeys);
+    assert.equal(typeof operation.id, 'string');
+    assert.equal(typeof operation.command, 'string');
+    assert(['queued', 'running', 'succeeded', 'failed'].includes(operation.status));
+    if (operation.errorCode !== undefined) assert.equal(typeof operation.errorCode, 'string');
+  }
   const serialized = JSON.stringify(value);
   for (const forbidden of ['token', 'passphrase', 'preimage', 'privateKey', '/run/paykit', '/data/']) assert(!serialized.includes(forbidden));
   return value;
+}
+
+function validateDiagnosticsParity(earlier, later) {
+  assert.equal(later.apiVersion, earlier.apiVersion);
+  assert.equal(later.environmentId, earlier.environmentId);
+  assert(later.lastEventSequence >= earlier.lastEventSequence);
+  assert.deepEqual(
+    later.receivers.map(receiver => receiver.id).sort(),
+    earlier.receivers.map(receiver => receiver.id).sort(),
+  );
+  const earlierOperations = new Map(earlier.operations.map(operation => [operation.id, operation]));
+  assert.deepEqual(
+    later.operations.map(operation => [operation.id, operation.command]).sort(),
+    earlier.operations.map(operation => [operation.id, operation.command]).sort(),
+  );
+  const progress = { queued: 0, running: 1, succeeded: 2, failed: 2 };
+  for (const operation of later.operations) {
+    const previous = earlierOperations.get(operation.id);
+    assert(previous);
+    assert(progress[operation.status] >= progress[previous.status]);
+    if (progress[previous.status] === 2) assert.equal(operation.status, previous.status);
+  }
 }
 
 async function run({ request, state, command, stage, docker, serviceContainer }) {
@@ -59,7 +100,7 @@ async function run({ request, state, command, stage, docker, serviceContainer })
   assert.equal(diagnosticResponse.status, 200);
   const apiDiagnostics = validateDiagnostics(diagnosticResponse.data, current.environmentId);
   const cliDiagnostics = validateDiagnostics(JSON.parse(serviceCli(docker, serviceContainer, 'diagnostics')), current.environmentId);
-  assert.deepEqual(cliDiagnostics, apiDiagnostics);
+  validateDiagnosticsParity(apiDiagnostics, cliDiagnostics);
 }
 
-module.exports = { run, stages, serviceCli, validateCatalog, validateDiagnostics };
+module.exports = { run, stages, serviceCli, validateCatalog, validateDiagnostics, validateDiagnosticsParity };
