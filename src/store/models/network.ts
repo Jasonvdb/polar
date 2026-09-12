@@ -1096,7 +1096,7 @@ const networkModel: NetworkModel = {
       if (!network) throw new Error(l('networkByIdErr', { networkId: id }));
       if (network.paykit)
         throw new Error(
-          'Paykit network export requires Backup and Recovery, which is not available yet.',
+          'Whole-network export for a network containing Paykit is not available yet. Use Paykit Backup and Recovery to back up individual receivers.',
         );
       // only export stopped networks
       if (![Status.Error, Status.Stopped].includes(network.status)) {

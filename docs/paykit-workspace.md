@@ -156,8 +156,10 @@ Keep both the network data and main-process credential directory when restarting
 or moving this development installation. Missing credentials require recovery;
 Polar does not generate a replacement identity for an existing environment.
 Deleting a network deletes its Paykit data and credentials after stopping it.
-Paykit export and import are deliberately unavailable until validated Backup and
-Recovery is implemented. Ordinary Polar network archives remain supported.
+Encrypted backup and recovery for individual receivers is available in the Paykit
+workspace. Whole Polar network export and import for networks containing Paykit
+remains unavailable until that archive flow preserves and validates Paykit data and
+credentials. Polar network archives without Paykit remain supported.
 
 ## Encrypted links and private delivery
 
