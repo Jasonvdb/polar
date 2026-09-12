@@ -158,8 +158,47 @@ impl WalletAdapter {
         amount: String,
         expiry: u32,
     ) -> anyhow::Result<Vec<String>> {
+        self.begin_list_scoped(list, peer, amount, expiry, None)
+    }
+    pub fn begin_list_for_methods(
+        &self,
+        list: Uuid,
+        peer: Option<(String, String)>,
+        amount: String,
+        expiry: u32,
+        methods: &[String],
+    ) -> anyhow::Result<Vec<String>> {
+        anyhow::ensure!(!methods.is_empty(), "receiving method scope is empty");
+        self.begin_list_scoped(list, peer, amount, expiry, Some(methods))
+    }
+    fn begin_list_scoped(
+        &self,
+        list: Uuid,
+        peer: Option<(String, String)>,
+        amount: String,
+        expiry: u32,
+        requested_methods: Option<&[String]>,
+    ) -> anyhow::Result<Vec<String>> {
         let wallets = wallet_rpc::configured(self.environment)?;
         self.update(|s| {
+            let methods: Vec<_> = match requested_methods {
+                Some(requested) => s
+                    .methods
+                    .enabled_methods
+                    .iter()
+                    .filter(|method| requested.contains(method))
+                    .cloned()
+                    .collect(),
+                None => s.methods.enabled_methods.clone(),
+            };
+            anyhow::ensure!(
+                !methods.is_empty()
+                    && requested_methods.is_none_or(|requested| {
+                        methods.len() == requested.len()
+                            && requested.iter().all(|method| methods.contains(method))
+                    }),
+                "receiving methods must be uniquely enabled"
+            );
             let existing: Vec<_> = s
                 .records
                 .iter()
@@ -169,14 +208,16 @@ impl WalletAdapter {
             if !existing.is_empty() {
                 return Ok(existing);
             }
-            anyhow::ensure!(
-                !s.methods.enabled_methods.is_empty(),
-                "configure receiving methods first"
-            );
             let wallet = wallets
                 .iter()
                 .find(|w| Some(&w.id) == s.methods.wallet_id.as_ref())
                 .ok_or_else(|| anyhow::anyhow!("configured wallet missing"))?;
+            anyhow::ensure!(
+                methods
+                    .iter()
+                    .all(|method| wallet.view().supported_methods.contains(method)),
+                "configured wallet does not support receiving method"
+            );
             anyhow::ensure!(
                 !s.records
                     .iter()
@@ -186,7 +227,7 @@ impl WalletAdapter {
             let now = self.clock.now();
             let expires = (now + chrono::Duration::seconds(expiry.into())).to_rfc3339();
             let mut ids = vec![];
-            for method in &s.methods.enabled_methods {
+            for method in &methods {
                 let id = Uuid::new_v5(&list, method.as_bytes()).to_string();
                 ids.push(id.clone());
                 let mut preimage = [0; 32];
@@ -636,6 +677,21 @@ mod tests {
             "owner".into(),
         )
         .unwrap()
+    }
+    #[test]
+    fn empty_scoped_list_is_rejected_without_ledger_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapter = adapter(dir.path());
+        let before = serde_json::to_value(adapter.snapshot().unwrap()).unwrap();
+
+        assert!(adapter
+            .begin_list_for_methods(Uuid::new_v4(), None, "1000".into(), 3600, &[])
+            .is_err());
+
+        assert_eq!(
+            serde_json::to_value(adapter.snapshot().unwrap()).unwrap(),
+            before
+        );
     }
     fn resolution(id: &str, version: u64, path: &str) -> ResolutionView {
         ResolutionView {

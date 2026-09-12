@@ -10,6 +10,8 @@ import {
   isPaykitUtcInstant,
   isPaykitEndpointCommitment,
   isPaykitRequestEndpointBinding,
+  paykitCommandFields,
+  paykitCommands,
   safePaykitAvatar,
   newPaykitId,
   PaykitEnvironment,
@@ -21,6 +23,12 @@ import {
 } from '../src/shared/paykitApi';
 import { bitcoinCredentials } from '../src/shared/bitcoinConfig';
 import { getNamespacedContainerName, paykitConfig } from '../src/shared/paykitConfig';
+import {
+  PaykitDiagnostics,
+  PaykitGuideCatalog,
+  PaykitGuideScenario,
+  PaykitGuideStep,
+} from '../src/shared/paykitGuides';
 
 import {
   bakePaykitMacaroon,
@@ -1297,7 +1305,289 @@ export const publicState = (value: any, environmentId: string) => {
   };
 };
 
+const exactKeys = (value: unknown, allowed: string[], label: string) => {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    throw new Error(`Invalid Paykit ${label}`);
+  if (Object.keys(value as object).some(key => !allowed.includes(key)))
+    throw new Error(`Invalid Paykit ${label}`);
+  return value as Record<string, any>;
+};
+const bounded = (value: unknown, maximum = 500) => {
+  if (typeof value !== 'string' || value.length < 1 || value.length > maximum)
+    throw new Error('Invalid Paykit public interface');
+  return value;
+};
+const guidePanelIds = new Set([
+  'workspace',
+  'links',
+  'profiles',
+  'methods',
+  'requests',
+  'proofs',
+  'receipts',
+  'subscriptions',
+  'backup',
+]);
+const publicStep = (raw: unknown): PaykitGuideStep => {
+  const value = exactKeys(
+    raw,
+    [
+      'id',
+      'panelId',
+      'command',
+      'requiredParameters',
+      'checkpoint',
+      'recoveryHint',
+      'transport',
+    ],
+    'scenario step',
+  );
+  if (
+    !['command', 'fileDescriptorBackup'].includes(value.transport) ||
+    !paykitCommands.includes(value.command) ||
+    !guidePanelIds.has(value.panelId) ||
+    !Array.isArray(value.requiredParameters) ||
+    value.requiredParameters.some(
+      (field: unknown) =>
+        typeof field !== 'string' ||
+        !(paykitCommandFields as Record<string, string[]>)[value.command].includes(field),
+    )
+  )
+    throw new Error('Invalid Paykit scenario step');
+  return {
+    id: bounded(value.id, 100),
+    panelId: bounded(value.panelId, 100),
+    command: value.command,
+    requiredParameters: [...value.requiredParameters],
+    checkpoint: bounded(value.checkpoint),
+    recoveryHint: bounded(value.recoveryHint),
+    transport: value.transport,
+  };
+};
+const publicScenario = (raw: unknown): PaykitGuideScenario => {
+  const value = exactKeys(raw, ['id', 'title', 'prerequisites', 'steps'], 'scenario');
+  if (
+    !Array.isArray(value.prerequisites) ||
+    value.prerequisites.some((item: unknown) => typeof item !== 'string') ||
+    !Array.isArray(value.steps)
+  )
+    throw new Error('Invalid Paykit scenario');
+  return {
+    id: bounded(value.id, 100),
+    title: bounded(value.title),
+    prerequisites: value.prerequisites.map((item: unknown) => bounded(item)),
+    steps: value.steps.map(publicStep),
+  };
+};
+export const publicCatalog = (raw: unknown): PaykitGuideCatalog => {
+  const value = exactKeys(
+    raw,
+    ['apiVersion', 'catalogVersion', 'panels', 'commands', 'scenarios'],
+    'catalog',
+  );
+  if (
+    value.apiVersion !== 1 ||
+    !Number.isSafeInteger(value.catalogVersion) ||
+    value.catalogVersion < 1 ||
+    !Array.isArray(value.panels) ||
+    !Array.isArray(value.commands) ||
+    !Array.isArray(value.scenarios)
+  )
+    throw new Error('Invalid Paykit catalog');
+  const panels = value.panels.map((rawPanel: unknown) => {
+    const panel = exactKeys(rawPanel, ['id', 'title'], 'catalog panel');
+    return { id: bounded(panel.id, 100), title: bounded(panel.title) };
+  });
+  const panelIds = new Set(panels.map(panel => panel.id));
+  if (
+    panelIds.size !== panels.length ||
+    panels.some(panel => !guidePanelIds.has(panel.id))
+  )
+    throw new Error('Invalid Paykit catalog panels');
+  const commands = value.commands.map((rawCommand: unknown) => {
+    const command = exactKeys(
+      rawCommand,
+      [
+        'id',
+        'panelId',
+        'requiredParameters',
+        'optionalParameters',
+        'genericCommandAllowed',
+      ],
+      'catalog command',
+    );
+    if (
+      !paykitCommands.includes(command.id) ||
+      !panelIds.has(command.panelId) ||
+      !Array.isArray(command.requiredParameters) ||
+      !Array.isArray(command.optionalParameters) ||
+      [...command.requiredParameters, ...command.optionalParameters].some(
+        field => typeof field !== 'string',
+      ) ||
+      typeof command.genericCommandAllowed !== 'boolean'
+    )
+      throw new Error('Invalid Paykit catalog command');
+    const commandFields = [...command.requiredParameters, ...command.optionalParameters];
+    if (
+      new Set(commandFields).size !== commandFields.length ||
+      commandFields.length !==
+        (paykitCommandFields as Record<string, string[]>)[command.id].length ||
+      (paykitCommandFields as Record<string, string[]>)[command.id].some(
+        field => !commandFields.includes(field),
+      )
+    )
+      throw new Error('Invalid Paykit catalog command parameters');
+    return {
+      id: command.id,
+      panelId: command.panelId,
+      requiredParameters: [...command.requiredParameters],
+      optionalParameters: [...command.optionalParameters],
+      genericCommandAllowed: command.genericCommandAllowed,
+    };
+  });
+  if (
+    commands.length !== paykitCommands.length ||
+    new Set(commands.map(command => command.id)).size !== paykitCommands.length ||
+    paykitCommands.some(command => !commands.some(item => item.id === command))
+  )
+    throw new Error('Incomplete Paykit command catalog');
+  const scenarios = value.scenarios.map(publicScenario);
+  if (new Set(scenarios.map(scenario => scenario.id)).size !== scenarios.length)
+    throw new Error('Invalid Paykit catalog scenarios');
+  return {
+    apiVersion: 1,
+    catalogVersion: value.catalogVersion,
+    panels,
+    commands,
+    scenarios,
+  };
+};
+export const publicDiagnostics = (
+  raw: unknown,
+  environmentId: string,
+): PaykitDiagnostics => {
+  const value = exactKeys(
+    raw,
+    [
+      'apiVersion',
+      'environmentId',
+      'ready',
+      'fundingStatus',
+      'receivers',
+      'operations',
+      'lastEventSequence',
+    ],
+    'diagnostics',
+  );
+  const funding = [
+    'notStarted',
+    'running',
+    'ready',
+    'failed',
+    'uncertain',
+    'unavailable',
+  ];
+  if (
+    value.apiVersion !== 1 ||
+    value.environmentId !== environmentId ||
+    typeof value.ready !== 'boolean' ||
+    !funding.includes(value.fundingStatus) ||
+    !Array.isArray(value.receivers) ||
+    !Array.isArray(value.operations) ||
+    !Number.isSafeInteger(value.lastEventSequence) ||
+    value.lastEventSequence < 0
+  )
+    throw new Error('Invalid Paykit diagnostics');
+  const receivers = value.receivers.map((rawReceiver: unknown) => {
+    const receiver = exactKeys(
+      rawReceiver,
+      ['id', 'status', 'generation'],
+      'receiver diagnostic',
+    );
+    if (
+      !isUuid(receiver.id) ||
+      !['stopped', 'starting', 'running', 'error'].includes(receiver.status) ||
+      !Number.isSafeInteger(receiver.generation) ||
+      receiver.generation < 0
+    )
+      throw new Error('Invalid Paykit receiver diagnostic');
+    return { id: receiver.id, status: receiver.status, generation: receiver.generation };
+  });
+  const operations = value.operations.map((rawOperation: unknown) => {
+    const operation = exactKeys(
+      rawOperation,
+      ['id', 'command', 'status', 'errorCode'],
+      'operation diagnostic',
+    );
+    const safeErrorCodes = [
+      'invalid_input',
+      'unsupported_command',
+      'command_conflict',
+      'unavailable',
+      'reconciliation_required',
+      'not_found',
+      'conflict',
+      'expired',
+    ];
+    if (
+      !isUuid(operation.id) ||
+      (operation.command !== 'unknown' && !paykitCommands.includes(operation.command)) ||
+      !['queued', 'running', 'succeeded', 'failed'].includes(operation.status) ||
+      (operation.errorCode !== undefined && !safeErrorCodes.includes(operation.errorCode))
+    )
+      throw new Error('Invalid Paykit operation diagnostic');
+    return {
+      id: operation.id,
+      command: operation.command,
+      status: operation.status,
+      ...(operation.errorCode === undefined ? {} : { errorCode: operation.errorCode }),
+    };
+  });
+  return {
+    apiVersion: 1,
+    environmentId,
+    ready: value.ready,
+    fundingStatus: value.fundingStatus,
+    receivers,
+    operations,
+    lastEventSequence: value.lastEventSequence,
+  };
+};
+
+const safeScenarioId = (value: unknown, label: string) => {
+  if (
+    typeof value !== 'string' ||
+    !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value) ||
+    value.length > 100
+  )
+    throw new Error(`Invalid Paykit ${label}`);
+  return value;
+};
+
 export async function paykitProxy(args: PaykitRequest): Promise<any> {
+  const request = exactKeys(
+    args,
+    ['networkId', 'action', 'operationId', 'scenarioId', 'stepId', 'request'],
+    'request',
+  );
+  const allowedByAction: Record<string, string[]> = {
+    provision: ['networkId', 'action'],
+    state: ['networkId', 'action'],
+    catalog: ['networkId', 'action'],
+    scenario: ['networkId', 'action', 'scenarioId'],
+    diagnostics: ['networkId', 'action'],
+    operation: ['networkId', 'action', 'operationId'],
+    command: ['networkId', 'action', 'request'],
+    scenarioStep: ['networkId', 'action', 'scenarioId', 'stepId', 'request'],
+    checkPort: ['networkId', 'action'],
+    remove: ['networkId', 'action'],
+  };
+  if (
+    typeof request.action !== 'string' ||
+    !allowedByAction[request.action] ||
+    Object.keys(request).some(key => !allowedByAction[request.action].includes(key))
+  )
+    throw new Error('Invalid Paykit request');
   const network = await getNetwork(args.networkId);
   if (args.action === 'provision') {
     const binding = await provision(args.networkId);
@@ -1313,16 +1603,27 @@ export async function paykitProxy(args: PaykitRequest): Promise<any> {
   ) {
     throw new Error('Paykit environment binding does not match this network');
   }
-  if (args.action === 'command') validatePaykitCommand(args.request);
+  if (args.action === 'command' || args.action === 'scenarioStep')
+    validatePaykitCommand(args.request);
   const authorizeWalletId =
-    args.action === 'command'
+    args.action === 'command' || args.action === 'scenarioStep'
       ? args.request.command === 'preset.fund'
         ? '*'
         : args.request.command === 'payment.execute'
         ? (args.request.input.walletId as string)
         : undefined
       : undefined;
-  if (['checkPort', 'state', 'command'].includes(args.action)) {
+  if (
+    [
+      'checkPort',
+      'state',
+      'catalog',
+      'scenario',
+      'diagnostics',
+      'command',
+      'scenarioStep',
+    ].includes(args.action)
+  ) {
     try {
       await refreshWallets(network, binding, authorizeWalletId);
     } catch (error: any) {
@@ -1344,6 +1645,21 @@ export async function paykitProxy(args: PaykitRequest): Promise<any> {
   }
   if (args.action === 'state')
     return publicState(await callService(binding, '/v1/state'), binding.environmentId);
+  if (args.action === 'catalog')
+    return publicCatalog(await callService(binding, '/v1/catalog'));
+  if (args.action === 'scenario') {
+    const scenarioId = safeScenarioId(args.scenarioId, 'scenario ID');
+    const scenario = publicScenario(
+      await callService(binding, `/v1/scenarios/${scenarioId}`),
+    );
+    if (scenario.id !== scenarioId) throw new Error('Paykit scenario response mismatch');
+    return scenario;
+  }
+  if (args.action === 'diagnostics')
+    return publicDiagnostics(
+      await callService(binding, '/v1/diagnostics'),
+      binding.environmentId,
+    );
   if (args.action === 'operation') {
     if (!isUuid(args.operationId)) throw new Error('Invalid Paykit operation ID');
     return publicOperation(
@@ -1352,6 +1668,23 @@ export async function paykitProxy(args: PaykitRequest): Promise<any> {
   }
   if (args.action === 'command') {
     validatePaykitCommand(args.request);
+    const result = await callService(binding, '/v1/commands', args.request);
+    if (!isUuid(result.operationId)) throw new Error('Invalid Paykit operation response');
+    return { operationId: result.operationId };
+  }
+  if (args.action === 'scenarioStep') {
+    const scenarioId = safeScenarioId(args.scenarioId, 'scenario ID');
+    const stepId = safeScenarioId(args.stepId, 'scenario step ID');
+    const scenario = publicScenario(
+      await callService(binding, `/v1/scenarios/${scenarioId}`),
+    );
+    if (scenario.id !== scenarioId) throw new Error('Paykit scenario response mismatch');
+    const step = scenario.steps.find(item => item.id === stepId);
+    if (!step) throw new Error('Unknown Paykit scenario step');
+    if (step.transport !== 'command')
+      throw new Error('This Paykit scenario step requires the local backup UI');
+    if (step.command !== args.request.command)
+      throw new Error('Paykit scenario command mismatch');
     const result = await callService(binding, '/v1/commands', args.request);
     if (!isUuid(result.operationId)) throw new Error('Invalid Paykit operation response');
     return { operationId: result.operationId };

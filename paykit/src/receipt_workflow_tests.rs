@@ -41,6 +41,17 @@ fn request(i: &receipt_input::Prepare) -> paykit_sdk::PaymentRequestRecord {
     })).unwrap()
 }
 fn open(directory: &Path, receiver: Uuid) -> Runtime {
+    open_with_metadata(
+        directory,
+        receiver,
+        json!({"description":"Coffee"}).as_object().unwrap().clone(),
+    )
+}
+fn open_with_metadata(
+    directory: &Path,
+    receiver: Uuid,
+    metadata: serde_json::Map<String, Value>,
+) -> Runtime {
     let vault = Arc::new(Vault::new(directory.into(), [43; 32], receiver.to_string()).unwrap());
     if !directory.join("sdk.cbor").exists() {
         let i = input(receiver);
@@ -52,7 +63,7 @@ fn open(directory: &Path, receiver: Uuid) -> Runtime {
             accepted_payment_endpoint_identifiers: vec![
                 paykit_lib::PaymentEndpointIdentifier::new(payment_model::ONCHAIN).unwrap(),
             ],
-            metadata: json!({"description":"Coffee"}).as_object().unwrap().clone(),
+            metadata,
         };
         let request_id = paykit_lib::PaymentRequestId::new(i.request_id.to_string()).unwrap();
         let proposal = paykit_lib::PaymentRequestEvent::Request(paykit_lib::PaymentRequest::new(
@@ -175,6 +186,27 @@ fn open(directory: &Path, receiver: Uuid) -> Runtime {
     )
     .unwrap();
     Runtime::new(sdk, storage, vault, receiver, owner(), sessions, payments).unwrap()
+}
+
+#[tokio::test]
+async fn compact_and_legacy_request_descriptions_prepare_equivalent_receipts() {
+    for metadata in [
+        json!({"description":"Coffee"}),
+        json!({"polarPaykit":{"v":1,"d":"Coffee","e":[["p","o","bcrt1qendpoint",Uuid::new_v4().to_string()]]}}),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver = Uuid::new_v4();
+        let runtime =
+            open_with_metadata(dir.path(), receiver, metadata.as_object().unwrap().clone());
+        let id = runtime.prepare_receipt(input(receiver)).await.unwrap();
+        let snapshot = runtime.issuance(id).await.unwrap().unwrap();
+        assert_eq!(
+            issuance_view(receiver, &snapshot, None)
+                .unwrap()
+                .description,
+            "Coffee"
+        );
+    }
 }
 
 #[test]

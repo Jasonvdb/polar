@@ -5,7 +5,7 @@ The full disposable scenario suite preserves the original 48 stages and adds 12 
 Build the production service normally and the non-shipping fixture explicitly:
 
 ```sh
-docker build -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
+docker build --target production -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
 docker build --target receipt-fixture -t polar-paykit/receipt-fixture:local -f paykit/Dockerfile paykit
 PAYKIT_RECEIPT_FIXTURE_IMAGE=polar-paykit/receipt-fixture:local node scripts/paykit-ci.js
 node scripts/paykit-ci.js --verify-report /absolute/path/from/runner/output

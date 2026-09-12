@@ -35,6 +35,75 @@ describe('Paykit MCP parity', () => {
       store.getActions().mcp.paykit({ networkId: 2, action: 'state' }),
     ).rejects.toThrow();
   });
+  it('exposes public discovery, diagnostics and same-ID guided submission', async () => {
+    const store = createStore(createMockRootModel(), { injections });
+    store.getActions().network.setNetworks([getNetwork(1, 'test')]);
+    const catalog = {
+      apiVersion: 1 as const,
+      catalogVersion: 1,
+      panels: [],
+      commands: [],
+      scenarios: [],
+    };
+    service.catalog.mockResolvedValue(catalog);
+    service.diagnostics.mockResolvedValue({
+      apiVersion: 1,
+      environmentId: newPaykitId(),
+      ready: true,
+      fundingStatus: 'ready',
+      receivers: [],
+      operations: [],
+      lastEventSequence: 0,
+    });
+    await expect(
+      store.getActions().mcp.paykit({ networkId: 1, action: 'catalog' }),
+    ).resolves.toEqual(catalog);
+    await store.getActions().mcp.paykit({ networkId: 1, action: 'diagnostics' });
+    const request = {
+      commandId: newPaykitId(),
+      command: 'preset.create' as const,
+      input: {},
+    };
+    service.scenarioStep.mockResolvedValue({ operationId: request.commandId });
+    await expect(
+      store.getActions().mcp.paykit({
+        networkId: 1,
+        action: 'scenarioStep',
+        scenarioId: 'funded-workspace',
+        stepId: 'create-preset',
+        request,
+      }),
+    ).resolves.toEqual({ operationId: request.commandId });
+    expect(service.scenarioStep).toHaveBeenCalledWith(
+      1,
+      'funded-workspace',
+      'create-preset',
+      request,
+    );
+  });
+
+  it('rejects unknown action fields and secret-bearing transfer-shaped arguments', async () => {
+    const store = createStore(createMockRootModel(), { injections });
+    store.getActions().network.setNetworks([getNetwork(1, 'test')]);
+    await expect(
+      store.getActions().mcp.paykit({
+        networkId: 1,
+        action: 'catalog',
+        archivePath: '/tmp/archive',
+      } as any),
+    ).rejects.toThrow('Invalid Paykit arguments');
+    await expect(
+      store.getActions().mcp.paykit({
+        networkId: 1,
+        action: 'scenarioStep',
+        scenarioId: '../escape',
+        stepId: 'create-preset',
+        passphrase: 'secret',
+      } as any),
+    ).rejects.toThrow('Invalid Paykit arguments');
+    expect(JSON.stringify(paykitDefinition)).not.toContain('prepareExport');
+    expect(paykitDefinition.inputSchema.additionalProperties).toBe(false);
+  });
 });
 
 it('documents every command and forwards receiver path arrays without changing them', async () => {

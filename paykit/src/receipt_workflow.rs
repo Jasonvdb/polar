@@ -296,13 +296,10 @@ fn receipt_draft(
         "unsupported receipt terms"
     );
     payment_model::sats(&terms.amount.value)?;
-    let description = terms
-        .metadata
-        .get("description")
-        .and_then(Value::as_str)
+    let description = super::requests::request_description(terms)
         .ok_or_else(|| anyhow::anyhow!("description missing"))?;
     anyhow::ensure!(
-        receipt_input::text_valid(description, false),
+        receipt_input::text_valid(&description, false),
         "invalid description"
     );
     let proof_record = request

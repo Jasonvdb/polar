@@ -5,6 +5,7 @@ import { Status } from 'shared/types';
 import { paykitService } from 'lib/paykit/paykitService';
 import { getNetwork, renderWithProviders } from 'utils/tests';
 import PaykitWorkspace from './PaykitWorkspace';
+import { PaykitGuideCatalog } from 'shared/paykitGuides';
 
 jest.mock('lib/paykit/paykitService');
 const service = paykitService as jest.Mocked<typeof paykitService>;
@@ -21,6 +22,58 @@ const state: PaykitState = {
   operations: [],
   lastEventSequence: 0,
 };
+const guideCatalog: PaykitGuideCatalog = {
+  apiVersion: 1,
+  catalogVersion: 1,
+  panels: [
+    { id: 'workspace', title: 'Workspace' },
+    { id: 'links', title: 'Links' },
+  ],
+  commands: [],
+  scenarios: [
+    {
+      id: 'funded-workspace',
+      title: 'Funded workspace guide',
+      prerequisites: ['The service is ready.'],
+      steps: [
+        {
+          id: 'create-preset',
+          panelId: 'workspace',
+          command: 'preset.create',
+          requiredParameters: [],
+          checkpoint: 'Preset participants are visible.',
+          recoveryHint: 'Inspect the original operation.',
+          transport: 'command',
+        },
+        {
+          id: 'fund-preset',
+          panelId: 'workspace',
+          command: 'preset.fund',
+          requiredParameters: [],
+          checkpoint: 'Scoped resumed funding checkpoint.',
+          recoveryHint: 'Reconcile the funding operation.',
+          transport: 'command',
+        },
+      ],
+    },
+    {
+      id: 'multi-receiver-links',
+      title: 'Link two receivers',
+      prerequisites: ['Both receivers are running.'],
+      steps: [
+        {
+          id: 'initiate',
+          panelId: 'links',
+          command: 'delivery.sync',
+          requiredParameters: ['receiverId'],
+          checkpoint: 'Delivery sync is visible.',
+          recoveryHint: 'Inspect the receiver operation.',
+          transport: 'command',
+        },
+      ],
+    },
+  ],
+};
 const setup = (enabled = true, status = Status.Started) => {
   const network = {
     ...getNetwork(1, 'test', status),
@@ -30,11 +83,30 @@ const setup = (enabled = true, status = Status.Started) => {
     initialState: { network: { networks: [network] } },
   });
 };
+beforeEach(() => localStorage.clear());
 describe('Paykit workspace', () => {
-  beforeEach(() => service.state.mockResolvedValue(state));
+  beforeEach(() => {
+    service.state.mockResolvedValue(state);
+    service.catalog.mockResolvedValue(guideCatalog);
+    service.diagnostics.mockResolvedValue({
+      apiVersion: 1,
+      environmentId: environment.environmentId,
+      ready: true,
+      fundingStatus: 'notStarted',
+      receivers: [],
+      operations: [],
+      lastEventSequence: 0,
+    });
+    service.imageStatus.mockResolvedValue({
+      status: 'ready',
+      message: 'Paykit service image is ready',
+      recentOutput: [],
+      imageTag: 'polar-paykit/service:test',
+    });
+  });
   it('enables only stopped networks and never calls the API before startup', async () => {
     const view = setup(false);
-    expect(view.getByText('Enable Paykit').closest('button')).toBeDisabled();
+    expect((await view.findByText('Enable Paykit')).closest('button')).toBeDisabled();
     expect(service.state).not.toHaveBeenCalled();
   });
   it('keeps the command ID across uncertain acceptance and prevents another command', async () => {
@@ -82,6 +154,112 @@ describe('Paykit workspace', () => {
         }),
       ),
     );
+  });
+  it('resumes guide navigation only from this environment and network scope', async () => {
+    localStorage.setItem(
+      `paykit-guide:${environment.environmentId}:1`,
+      JSON.stringify({ scenarioId: 'funded-workspace', stepId: 'fund-preset' }),
+    );
+    localStorage.setItem(
+      `paykit-guide:${environment.environmentId}:2`,
+      JSON.stringify({ scenarioId: 'funded-workspace', stepId: 'create-preset' }),
+    );
+    const view = setup();
+    expect(await view.findByText('Scoped resumed funding checkpoint.')).toBeVisible();
+    expect(service.catalog).toHaveBeenCalledWith(1);
+    expect(service.diagnostics).toHaveBeenCalledWith(1);
+  });
+  it('uses guide actor focus for the manual panel and navigates to that page', async () => {
+    localStorage.setItem(
+      `paykit-guide:${environment.environmentId}:1`,
+      JSON.stringify({ scenarioId: 'multi-receiver-links', stepId: 'initiate' }),
+    );
+    service.state.mockResolvedValue({
+      ...state,
+      participants: [
+        { id: 'alice', name: 'Alice', publicKey: 'alice-key' },
+        { id: 'bob', name: 'Bob', publicKey: 'bob-key' },
+      ],
+      receivers: [
+        {
+          id: 'alice-wallet',
+          participantId: 'alice',
+          name: 'Wallet',
+          path: 'alice/wallet',
+          status: 'running',
+          generation: 1,
+          noisePublicKey: 'alice-noise',
+        },
+        {
+          id: 'bob-wallet',
+          participantId: 'bob',
+          name: 'Wallet',
+          path: 'bob/wallet',
+          status: 'running',
+          generation: 1,
+          noisePublicKey: 'bob-noise',
+        },
+      ],
+      receiverWorkspaces: [],
+    });
+    const view = setup();
+    await view.findByText('Guided Paykit scenarios');
+    await view.findByText('Delivery sync is visible.');
+    const openLinks = view.getByText('Open Links controls').closest('button')!;
+    expect(openLinks).toBeDisabled();
+    fireEvent.mouseDown(view.getByRole('combobox', { name: 'Guide actor receiver' }));
+    fireEvent.click(view.getByText('Alice / Wallet (alice/wallet)'));
+    expect(openLinks).not.toBeDisabled();
+    fireEvent.click(openLinks);
+    expect(view.getByRole('tab', { name: 'Links' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(view.getByText('Alice / Wallet')).toBeVisible();
+    expect(view.getByLabelText('Link peer public key')).toHaveValue('');
+  });
+  it('binds a matching manual submission to the guide that opened its controls', async () => {
+    const operationId = newPaykitId();
+    service.command.mockImplementation(async () => {
+      service.diagnostics.mockResolvedValue({
+        apiVersion: 1,
+        environmentId: environment.environmentId,
+        ready: true,
+        fundingStatus: 'notStarted',
+        receivers: [],
+        operations: [
+          {
+            id: operationId,
+            command: 'preset.create',
+            status: 'succeeded',
+          },
+        ],
+        lastEventSequence: 1,
+      });
+      return { operationId };
+    });
+    const view = setup();
+
+    fireEvent.click(view.getByRole('tab', { name: 'Guides' }));
+    await view.findByText('Preset participants are visible.');
+    fireEvent.click(view.getByText('Open Workspace controls'));
+    expect(view.getByRole('tab', { name: 'Workspace' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    fireEvent.click(view.getByText('Create Alice / Bob / Carol preset'));
+    await waitFor(() =>
+      expect(service.command).toHaveBeenCalledWith(
+        1,
+        expect.objectContaining({ command: 'preset.create', input: {} }),
+      ),
+    );
+    fireEvent.click(view.getByRole('tab', { name: 'Guides' }));
+
+    expect(
+      await view.findByText('Current operation: succeeded', {}, { timeout: 2500 }),
+    ).toBeVisible();
+    expect(view.getAllByText(new RegExp(operationId))).toHaveLength(2);
   });
 });
 
@@ -472,6 +650,7 @@ it('shows actionable oversized-proposal failure and lets the user shorten terms 
   };
   select('Participant', 'Proposal Bob');
   select('Receiver', 'Proposal wallet (running)');
+  fireEvent.click(view.getByRole('tab', { name: 'Subscriptions' }));
   for (const [label, value] of [
     ['Subscription payer public key', 'y'.repeat(52)],
     ['Subscription payer receiver path', 'alice/wallet'],

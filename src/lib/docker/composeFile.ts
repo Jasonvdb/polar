@@ -1,6 +1,7 @@
 import { join } from 'path';
 import { PaykitEnvironment } from 'shared/paykitApi';
 import { paykitConfig } from 'shared/paykitConfig';
+import { PAYKIT_IMAGE_TAG } from 'shared/paykitImageMetadata';
 import { getProjectName, getNamespacedContainerName } from 'shared/paykitConfig';
 import {
   BitcoinNode,
@@ -271,7 +272,7 @@ class ComposeFile {
       },
     });
     this.addService({
-      image: 'polar-paykit/service:pr2',
+      image: PAYKIT_IMAGE_TAG,
       hostname: 'paykit',
       user: '${PAYKIT_UID:-1000}:${PAYKIT_GID:-1000}',
       container_name: getNamespacedContainerName(networkId, 'paykit'),

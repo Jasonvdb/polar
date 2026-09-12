@@ -117,8 +117,18 @@ test('resources-only, stale, incomplete and unclean reports fail validation', t 
   const report = { schemaVersion: 1, runId: 'current', passed: true, completedAt: new Date().toISOString(), cleanup, survivingEnvironmentVerified: true, survivingWalletEnvironmentVerified: true, environments: ['a', 'b'].map(environmentId => ({ environmentId, passed: true, stages: requiredStages, recurringEvidence: recurringEvidence(), participantKeys: [1, 2, 3].map(i => `${environmentId}-p${i}`), receiverNoiseKeys: [1, 2, 3, 4].map(i => `${environmentId}-r${i}`) })) };
   const write = value => fs.writeFileSync(path.join(root, 'report.json'), JSON.stringify(value));
   write(report); assert.equal(validateReport(root).passed, true);
-  assert.equal(requiredStages.length, 80);
-  assert.equal(new Set(requiredStages).size, 80);
+  assert.equal(requiredStages.length, 81);
+  assert(requiredStages.includes('interface-parity'));
+  assert.equal(new Set(requiredStages).size, requiredStages.length);
+  for (const stages of [
+    requiredStages.filter(stage => stage !== 'interface-parity'),
+    [...requiredStages, 'interface-parity'],
+    requiredStages.map(stage => stage === 'interface-parity' ? 'interface-smoke' : stage),
+  ]) {
+    write({ ...report, environments: report.environments.map(environment => ({ ...environment, stages })) });
+    assert.throws(() => validateReport(root));
+  }
+  write(report);
   write({ ...report, survivingWalletEnvironmentVerified: false }); assert.throws(() => validateReport(root));
   for (const missing of ['issuance-reconciliation', 'storage-commit-safety', 'funded-preset', 'onchain-settlement', 'lightning-settlement', 'execution-reconciliation', 'execution-storage-safety', 'proof-delivery-recovery', 'backup-export', 'backup-invalid-archives', 'backup-local-loss', 'backup-wallet-survivors', 'backup-empty-oracle', 'backup-relink', 'backup-ready', 'recurring-raw-proof-hold', 'recurring-onchain-manual', 'recurring-lightning-autopay', 'recurring-failure-safety', 'recurring-core-unsigned-restart', 'recurring-core-broadcast-restart']) {
     write({ ...report, environments: report.environments.map(environment => ({ ...environment, stages: environment.stages.filter(stage => stage !== missing) })) });

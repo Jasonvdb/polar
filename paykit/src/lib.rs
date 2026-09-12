@@ -1,8 +1,11 @@
 //! Local Paykit workbench service and durable receiver adapters.
 pub mod api;
 pub mod backup;
+pub mod client;
 pub mod commands;
 pub mod config;
+pub mod diagnostics;
+pub mod interfaces;
 pub mod model;
 mod participants;
 pub mod receiver;

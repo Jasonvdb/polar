@@ -5,7 +5,7 @@ The `paykit/` Rust workspace packages a persistent Pubky 0.11.0 StaticTestnet an
 Build the ARM64 or AMD64 service image from the `paykit` context:
 
 ```sh
-docker build -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
+docker build --target production -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
 ```
 
 The Dockerfile pins multiarchitecture builder/runtime manifests. `Cargo.lock` pins the SDK to `5ef8caf8d9a812f571a954fd3b7afe5ef22fd10f`. It retains `pubky-noise 0.1.0-rc7` from that SDK's committed lockfile: the later rc8 prerelease changes snapshot APIs incompatibly. All builds use `--locked`.
@@ -93,7 +93,7 @@ Inside the service's network namespace, `polar-paykit inspect-marker OWNER_PUBLI
 
 Run `cargo fmt --manifest-path paykit/Cargo.toml --check`, `cargo clippy --manifest-path paykit/Cargo.toml --locked --all-targets -- -D warnings`, `cargo test --manifest-path paykit/Cargo.toml --locked` and `cargo doc --manifest-path paykit/Cargo.toml --locked --no-deps`.
 
-The unit/API suite starts no services. Real scenarios additionally create participants and both Bob receivers, inspect Pubky markers, independently restart a receiver, restart the full service, verify names/identities/markers/SDK grants, retry commands and preserve a second environment throughout. Network archives containing Paykit are currently rejected until the encrypted recovery format ships.
+The unit/API suite starts no services. Real scenarios additionally create participants and both Bob receivers, inspect Pubky markers, independently restart a receiver, restart the full service, verify names/identities/markers/SDK grants, retry commands and preserve a second environment throughout. Encrypted backup and recovery is available for individual receivers. Whole Polar network archives containing Paykit are currently rejected until that archive flow preserves and validates Paykit data and credentials.
 
 ## Encrypted links, profiles and contacts
 

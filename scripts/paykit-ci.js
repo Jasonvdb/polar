@@ -11,7 +11,7 @@ const { createWalletFixture } = require('./paykit-wallet-fixture');
 const { createReceiptFixture, validateReceiptEvidence } = require('./paykit-receipt-fixture');
 const { createBackupFixture } = require('./paykit-backup-fixture');
 const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
-const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-backup-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, ...require('./paykit-recurring-scenarios').stages, 'complete'];
+const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-interface-scenarios').stages, ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-backup-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, ...require('./paykit-recurring-scenarios').stages, 'complete'];
 
 function validateReport(root) {
   const report = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));

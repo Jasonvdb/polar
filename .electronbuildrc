@@ -7,6 +7,12 @@
   "directories": {
     "buildResources": "assets"
   },
+  "extraResources": [
+    {
+      "from": "build-resources/paykit-service",
+      "to": "paykit-service"
+    }
+  ],
   "mac": {
     "category": "public.app-category.utilities",
     "identity": null,

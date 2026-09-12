@@ -105,6 +105,13 @@ async function run({ initial, state, command, request, stage, docker, serviceCon
   await configure(alice, fixture.walletIds.alice); await configure(bob, fixture.walletIds.bob); await configure(server, fixture.walletIds.bob); await configure(carol, fixture.walletIds.carol);
   await link(alice, bob); await link(alice, carol); await link(bob, carol); stage('funded-preset');
 
+  await command('paymentList.publish', { receiverId: bob.id, amountSats: '1000', expirySeconds: 3600 });
+  const dual = await command('request.create', { ...peer(bob, alice), amountSats: '1000', description: 'Native dual-rail payment', expirySeconds: 3600, acceptedMethods: [ONCHAIN, BOLT11] });
+  const dualRequest = dual.operation.result.workspace.requests[0];
+  assert.deepEqual(dualRequest.acceptedMethods, [ONCHAIN, BOLT11]);
+  assert.equal(dualRequest.endpointBindings.length, 2);
+  await wait(s => workspace(s, alice).requests.some(r => r.id === dualRequest.id && r.endpointBindings.length === 2));
+
   let id = await proposal();
   await command('request.accept', { receiverId: bob.id, requestId: id }, randomUUID(), 'failed');
   await command('request.reject', { receiverId: alice.id, requestId: id });

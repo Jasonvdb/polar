@@ -34,6 +34,9 @@ pub struct ApiState {
 pub fn router(state: ApiState) -> Router {
     let protected = Router::new()
         .route("/v1/state", get(snapshot))
+        .route("/v1/catalog", get(catalog))
+        .route("/v1/scenarios/{id}", get(scenario))
+        .route("/v1/diagnostics", get(diagnostics))
         .route("/v1/commands", post(command))
         .route("/v1/operations/{id}", get(operation))
         .route("/v1/events", get(events))
@@ -48,6 +51,27 @@ pub fn router(state: ApiState) -> Router {
         .route("/health", get(health))
         .merge(protected)
         .with_state(state)
+}
+
+async fn catalog() -> Json<crate::interfaces::Catalog> {
+    Json(crate::interfaces::catalog())
+}
+
+async fn scenario(Path(id): Path<String>) -> Response {
+    match crate::interfaces::scenario(&id) {
+        Ok(value) => Json(value).into_response(),
+        Err(error) => failure(StatusCode::NOT_FOUND, error),
+    }
+}
+
+async fn diagnostics(State(state): State<ApiState>) -> Response {
+    match state.repository.public_state() {
+        Ok(value) => Json(crate::diagnostics::build(&value)).into_response(),
+        Err(_) => failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            PublicError::new("unavailable", "Public diagnostics are unavailable."),
+        ),
+    }
 }
 
 async fn create_transfer(State(state): State<ApiState>, request: Request) -> Response {

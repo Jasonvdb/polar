@@ -5,6 +5,8 @@ import { join, resolve, sep } from 'path';
 import {
   paykitProxy,
   publicOperation,
+  publicCatalog,
+  publicDiagnostics,
   publicState,
   walletBindings,
   fundingWalletIds,
@@ -19,7 +21,29 @@ jest.mock('../../electron/paykitWalletAuth', () => ({
   bakePaykitMacaroon: jest.fn(),
 }));
 import { paykitConfig } from './paykitConfig';
+import { paykitCommands, paykitCommandFields } from './paykitApi';
+import { ipcRenderer } from 'electron';
+import { initAppIpcListener } from '../../electron/appIpcListener';
+import ipcChannels from './ipcChannels';
 
+jest.mock('electron-is-dev', () => true);
+jest.mock('../../electron/paykitImageBuilder', () => ({
+  paykitImageBuilder: { handle: jest.fn() },
+}));
+jest.mock('../../electron/httpProxy', () => ({ httpProxy: jest.fn() }));
+jest.mock('../../electron/litd/litdProxyServer', () => ({
+  clearLitdProxyCache: jest.fn(),
+}));
+jest.mock('../../electron/lnd/lndProxyServer', () => ({
+  clearLndProxyCache: jest.fn(),
+}));
+jest.mock('../../electron/tapd/tapdProxyServer', () => ({
+  clearTapdProxyCache: jest.fn(),
+}));
+jest.mock('../../electron/utils/zip', () => ({
+  zip: jest.fn(),
+  unzip: jest.fn(),
+}));
 jest.mock('fs', () => ({
   constants: jest.requireActual('fs').constants,
   existsSync: () => false,
@@ -177,6 +201,92 @@ describe('Main process Paykit boundary', () => {
       sync: jest.fn(),
       close: jest.fn(),
     } as any);
+  });
+  it('accepts exactly the complete public catalog and strips no unknown fields silently', () => {
+    const catalog = {
+      apiVersion: 1,
+      catalogVersion: 1,
+      panels: [{ id: 'workspace', title: 'Workspace' }],
+      commands: paykitCommands.map(id => ({
+        id,
+        panelId: 'workspace',
+        requiredParameters: paykitCommandFields[id],
+        optionalParameters: [],
+        genericCommandAllowed: !id.startsWith('backup.'),
+      })),
+      scenarios: [
+        {
+          id: 'funded-workspace',
+          title: 'Funded workspace',
+          prerequisites: ['Service ready'],
+          steps: [
+            {
+              id: 'create-preset',
+              panelId: 'workspace',
+              command: 'preset.create',
+              requiredParameters: [],
+              checkpoint: 'Ready',
+              recoveryHint: 'Inspect operation',
+              transport: 'command',
+            },
+          ],
+        },
+      ],
+    };
+    expect(publicCatalog(catalog)).toEqual(catalog);
+    expect(() => publicCatalog({ ...catalog, secret: '/private/token' })).toThrow(
+      'catalog',
+    );
+    expect(() =>
+      publicCatalog({ ...catalog, commands: catalog.commands.slice(1) }),
+    ).toThrow('Incomplete');
+    expect(() =>
+      publicCatalog({
+        ...catalog,
+        scenarios: [
+          {
+            ...catalog.scenarios[0],
+            steps: [{ ...catalog.scenarios[0].steps[0], archivePath: '/tmp/archive' }],
+          },
+        ],
+      }),
+    ).toThrow('scenario step');
+  });
+
+  it('allows only the bounded diagnostic projection and matching environment', () => {
+    const diagnostic = {
+      apiVersion: 1,
+      environmentId: envId,
+      ready: true,
+      fundingStatus: 'ready',
+      receivers: [
+        { id: 'af9f976d-b4ff-5feb-af0e-4fad185109f1', status: 'running', generation: 1 },
+      ],
+      operations: [
+        {
+          id: 'c9c50396-ff65-4b44-a486-955a40f7c3f9',
+          command: 'preset.create',
+          status: 'failed',
+          errorCode: 'unavailable',
+        },
+      ],
+      lastEventSequence: 7,
+    };
+    expect(publicDiagnostics(diagnostic, envId)).toEqual(diagnostic);
+    expect(JSON.stringify(publicDiagnostics(diagnostic, envId))).not.toContain('token');
+    expect(() => publicDiagnostics({ ...diagnostic, apiToken: 'secret' }, envId)).toThrow(
+      'diagnostics',
+    );
+    expect(() => publicDiagnostics(diagnostic, 'different')).toThrow('diagnostics');
+    expect(() =>
+      publicDiagnostics(
+        {
+          ...diagnostic,
+          operations: [{ ...diagnostic.operations[0], message: '/private/path' }],
+        },
+        envId,
+      ),
+    ).toThrow('operation diagnostic');
   });
   it('projects only public state and rejects a different environment', () => {
     const raw = {
@@ -369,6 +479,65 @@ describe('Main process Paykit boundary', () => {
       expect(flags).toBe('wx');
       expect(mode).toBe(0o600);
     }
+  });
+
+  it('accepts sender reply metadata at IPC while preserving strict request keys', async () => {
+    fsMock.readFile.mockImplementation(async path => {
+      if (
+        `${path}`.endsWith('network-1.json') ||
+        `${path}`.endsWith('wallet-config.json')
+      )
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      return JSON.stringify({ networks: [network()] });
+    });
+    const handlers = new Map<string, (...args: any[]) => void>();
+    const responses = new Map<string, (...args: any[]) => void>();
+    initAppIpcListener({
+      on: jest.fn((channel, handler) => handlers.set(channel, handler)),
+    } as any);
+    (ipcRenderer.once as jest.Mock).mockImplementation((channel, handler) =>
+      responses.set(channel, handler),
+    );
+    (ipcRenderer.send as jest.Mock).mockImplementation((channel, payload) => {
+      const handler = handlers.get(channel)!;
+      handler(
+        {
+          reply: (replyChannel: string, result: any) =>
+            responses.get(replyChannel)!(null, result),
+        },
+        payload,
+      );
+    });
+
+    // Load the renderer sender at test runtime so Electron's production compiler
+    // does not pull renderer-only aliases through this shared test file.
+    const { createIpcSender } = jest.requireActual('../lib/ipc/ipcService');
+    const ipc = createIpcSender('Paykit test', 'app');
+    await expect(
+      ipc(ipcChannels.paykit, { networkId: 1, action: 'provision' }),
+    ).resolves.toMatchObject({ apiVersion: 1, servicePort: expect.any(Number) });
+    fsMock.readFile.mockImplementation(async path => {
+      if (`${path}`.endsWith(`${sep}networks.json`))
+        return JSON.stringify({ networks: [{ ...network(), paykit: binding }] });
+      if (`${path}`.endsWith(`${sep}network-1.json`)) return JSON.stringify(binding);
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    await expect(
+      ipc(ipcChannels.paykit, {
+        networkId: 1,
+        action: 'command',
+        request: { commandId: envId, command: 'preset.fund', input: {} },
+      }),
+    ).rejects.toThrow(
+      'Paykit command not submitted: The funded preset requires three LND',
+    );
+    await expect(
+      ipc(ipcChannels.paykit, {
+        networkId: 1,
+        action: 'provision',
+        unexpected: true,
+      } as any),
+    ).rejects.toThrow('Invalid Paykit request');
   });
 });
 
