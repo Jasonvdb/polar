@@ -1549,6 +1549,12 @@ describe('Network model', () => {
       servicePort: 30091,
     };
     beforeEach(() => {
+      service.imageStatus.mockResolvedValue({
+        status: 'ready',
+        message: 'Paykit service image is ready',
+        recentOutput: [],
+        imageTag: 'polar-paykit/service:test',
+      });
       const network = getNetwork(1, 'Paykit', Status.Stopped);
       network.nodes = { bitcoin: [], lightning: [], tap: [] };
       store.getActions().network.setNetworks([network]);
@@ -1579,6 +1585,19 @@ describe('Network model', () => {
       expect(service.checkPort).toHaveBeenCalledWith(1);
       expect(service.state).toHaveBeenCalledTimes(2);
       expect(firstNetwork().status).toBe(Status.Started);
+    });
+    it('keeps an existing environment stopped until its service image is valid', async () => {
+      store.getActions().network.setPaykit({ id: 1, environment });
+      service.imageStatus.mockResolvedValue({
+        status: 'needed',
+        message: 'Build the service image',
+        recentOutput: [],
+      });
+      await expect(store.getActions().network.start(1)).rejects.toThrow(
+        'Open the Paykit workspace',
+      );
+      expect(firstNetwork().status).toBe(Status.Stopped);
+      expect(dockerServiceMock.start).not.toHaveBeenCalled();
     });
     it('cleans partially started services and reports a failed readiness gate', async () => {
       store.getActions().network.setPaykit({ id: 1, environment });

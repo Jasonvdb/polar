@@ -6,6 +6,9 @@ import { testManagedImages } from 'utils/tests';
 import ComposeFile from './composeFile';
 
 jest.mock('os');
+jest.mock('shared/paykitImageMetadata', () => ({
+  PAYKIT_IMAGE_TAG: 'polar-paykit/service:test-digest',
+}));
 
 const mockOS = os as jest.Mocked<typeof os>;
 
@@ -243,6 +246,7 @@ describe('Paykit compose isolation', () => {
       servicePort: 30099,
     });
     const { paykit, 'paykit-postgres': database } = file.content.services;
+    expect(paykit.image).toBe('polar-paykit/service:test-digest');
     expect(paykit.container_name).toBe('polar-paykit-n9-paykit');
     expect(paykit.ports).toEqual(['127.0.0.1:30099:10090']);
     expect(database.ports).toEqual([]);

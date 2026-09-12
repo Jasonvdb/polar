@@ -3,6 +3,7 @@ import {
   PaykitCommandRequest,
   paykitCommands,
   paykitCommandFields,
+  validatePaykitCommand,
 } from 'shared/paykitApi';
 import { RootModel } from 'store/models';
 import { StoreInjections } from 'types';
@@ -12,29 +13,64 @@ import { McpToolDefinition } from './types';
 
 interface PaykitArgs {
   networkId: number;
-  action: 'enable' | 'state' | 'operation' | 'command';
+  action:
+    | 'enable'
+    | 'state'
+    | 'catalog'
+    | 'scenario'
+    | 'diagnostics'
+    | 'operation'
+    | 'command'
+    | 'scenarioStep'
+    | 'imageStatus'
+    | 'imageBuild'
+    | 'imageCancel';
   operationId?: string;
+  scenarioId?: string;
+  stepId?: string;
+  jobId?: string;
   request?: PaykitCommandRequest;
 }
 export const paykitDefinition: McpToolDefinition = {
   name: 'paykit',
   description:
-    'Enable a persistent Paykit environment on a stopped network, query public state or an operation, or submit a command. Commands return an operationId immediately; poll operation/state for completion. Reuse commandId when retrying an uncertain submission. Backup commands accept only a receiverId and an opaque transferId already staged through the local UI; MCP never accepts archive paths, bytes, or passphrases. Secrets are never returned.',
+    'Enable a persistent Paykit environment, query public state, catalog, guided scenarios, diagnostics or an operation, submit a durable command or validated scenario step, and inspect or start packaged image setup. Commands return an operationId immediately; poll operation/state for completion. Reuse commandId when retrying an uncertain submission. Backup commands accept only a receiverId and an opaque transferId already staged through the local UI; MCP never accepts archive paths, bytes, file descriptors, or passphrases. Secrets are never returned.',
   inputSchema: {
     type: 'object',
+    additionalProperties: false,
     required: ['networkId', 'action'],
     properties: {
       networkId: { type: 'number' },
-      action: { type: 'string', enum: ['enable', 'state', 'operation', 'command'] },
+      action: {
+        type: 'string',
+        enum: [
+          'enable',
+          'state',
+          'catalog',
+          'scenario',
+          'diagnostics',
+          'operation',
+          'command',
+          'scenarioStep',
+          'imageStatus',
+          'imageBuild',
+          'imageCancel',
+        ],
+      },
       operationId: { type: 'string', format: 'uuid' },
+      scenarioId: { type: 'string', pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' },
+      stepId: { type: 'string', pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' },
+      jobId: { type: 'string', minLength: 1, maxLength: 100 },
       request: {
         type: 'object',
+        additionalProperties: false,
         required: ['commandId', 'command', 'input'],
         properties: {
           commandId: { type: 'string', format: 'uuid' },
           command: { type: 'string', enum: [...paykitCommands] },
           input: {
             type: 'object',
+            additionalProperties: true,
             description:
               Object.entries(paykitCommandFields)
                 .map(
@@ -57,19 +93,70 @@ export const paykitTool = thunk<
   RootModel,
   Promise<unknown>
 >(async (_, args, { getStoreState, getStoreActions }): Promise<unknown> => {
+  if (!args || typeof args !== 'object' || Array.isArray(args))
+    throw new Error('Invalid Paykit arguments');
   validateNetworkId(args.networkId);
   getStoreState().network.networkById(args.networkId);
+  const allowed: Record<PaykitArgs['action'], string[]> = {
+    enable: ['networkId', 'action'],
+    state: ['networkId', 'action'],
+    catalog: ['networkId', 'action'],
+    scenario: ['networkId', 'action', 'scenarioId'],
+    diagnostics: ['networkId', 'action'],
+    operation: ['networkId', 'action', 'operationId'],
+    command: ['networkId', 'action', 'request'],
+    scenarioStep: ['networkId', 'action', 'scenarioId', 'stepId', 'request'],
+    imageStatus: ['networkId', 'action'],
+    imageBuild: ['networkId', 'action'],
+    imageCancel: ['networkId', 'action', 'jobId'],
+  };
+  if (
+    !allowed[args.action] ||
+    Object.keys(args).some(key => !allowed[args.action].includes(key))
+  )
+    throw new Error('Invalid Paykit arguments');
+  const safeGuideId = (value: unknown): value is string =>
+    typeof value === 'string' &&
+    value.length <= 100 &&
+    /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
   switch (args.action) {
     case 'enable':
       return getStoreActions().network.enablePaykit(args.networkId);
     case 'state':
       return paykitService.state(args.networkId);
+    case 'catalog':
+      return paykitService.catalog(args.networkId);
+    case 'scenario':
+      if (!safeGuideId(args.scenarioId))
+        throw new Error('A valid scenarioId is required');
+      return paykitService.scenario(args.networkId, args.scenarioId);
+    case 'diagnostics':
+      return paykitService.diagnostics(args.networkId);
     case 'operation':
       if (!args.operationId) throw new Error('An operationId is required');
       return paykitService.operation(args.networkId, args.operationId);
     case 'command':
       if (!args.request) throw new Error('A command request is required');
+      validatePaykitCommand(args.request);
       return paykitService.command(args.networkId, args.request);
+    case 'scenarioStep':
+      if (!safeGuideId(args.scenarioId) || !safeGuideId(args.stepId) || !args.request)
+        throw new Error('scenarioId, stepId and request are required');
+      validatePaykitCommand(args.request);
+      return paykitService.scenarioStep(
+        args.networkId,
+        args.scenarioId,
+        args.stepId,
+        args.request,
+      );
+    case 'imageStatus':
+      return paykitService.imageStatus();
+    case 'imageBuild':
+      return paykitService.buildImage();
+    case 'imageCancel':
+      if (typeof args.jobId !== 'string' || !args.jobId || args.jobId.length > 100)
+        throw new Error('A jobId is required');
+      return paykitService.cancelImageBuild(args.jobId);
     default:
       throw new Error('Unsupported Paykit action');
   }

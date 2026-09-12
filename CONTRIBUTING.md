@@ -58,6 +58,26 @@ $ yarn package
 
 Note: It will only create an executable for the current operating system. So if you are running this on a Mac, it will create a Mac compatible binary.
 
+The build first generates a deterministic, versioned Paykit service context in
+`build-resources/paykit-service`; Electron Builder includes that context as an extra
+resource. On first GUI use, Polar builds its Docker `production` target locally. To
+inspect the context-generation contract separately, run:
+
+```sh
+$ yarn prepare:paykit-context
+$ yarn test:paykit-context
+```
+
+For a direct development service image, always select the shipping target explicitly:
+
+```sh
+$ docker build --target production -t polar-paykit/service:local -f paykit/Dockerfile paykit
+```
+
+The macOS configuration sets `identity: null`, so a locally generated DMG is unsigned
+and is not a notarized release. The packaging workflow retains build artifacts for
+inspection; it does not publish them to an application registry.
+
 ### Updating from GitHub
 
 If some time has passed since you cloned the Github repo and there are updates pushed to GitHub, you should pull those changes into your local copy of the source code. You must also update any new dependencies. After pulling the latest updates, you can use the commands above to run in dev mode or package a new binary to use.

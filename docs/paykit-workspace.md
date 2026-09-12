@@ -1,14 +1,61 @@
 # Paykit participant workspace
 
-Enable Paykit from a stopped network's **Paykit** tab, then start the network.
+## Install and enable on a fresh Mac
+
+Install Docker Desktop, open it, and wait for the Docker engine to be running before
+opening Polar Paykit. Install the app from its DMG by dragging it to **Applications**.
+Local packages from this repository are unsigned and are not claimed to be notarized
+or published; macOS may require an explicit allowance in **System Settings → Privacy
+& Security**.
+
+Create a Polar network with one Bitcoin Core node and at least three LND nodes that
+share that Core backend. Keep the network stopped, open its **Paykit** tab, and follow
+the setup card:
+
+1. **Build service image** builds the versioned service context packaged inside the
+   desktop app. It does not require a shell or a separately published registry image.
+2. During the build, the card shows bounded recent output and progress when Docker
+   reports it. **Cancel build** stops the current job without enabling Paykit.
+3. If Docker Desktop is unavailable or the build fails, correct the reported problem
+   and choose **Retry setup**. A first build downloads pinned dependencies and can take
+   several minutes.
+4. After **Paykit service image is ready**, choose **Enable Paykit**, then start the
+   network. Docker pulls the pinned PostgreSQL image when it is not already local.
+
 The **Network** tab retains the Bitcoin/Lightning workbench. Paykit readiness is
 checked separately; a failed startup stops the partially started environment and
-shows an error. Stop and start the network to restart the whole environment.
+shows an error. An unavailable host port also fails visibly. Stop and start the
+network to restart the whole environment.
 
-For this development increment, build `polar-paykit/service:pr2` using the
-[backend setup](paykit-backend.md) before starting an enabled network. Docker
-pulls the pinned PostgreSQL 18 image if it is not already installed. Missing
-service images and unavailable host ports cause a visible startup failure.
+## Using the workbench
+
+The Paykit tabs expose ten usable feature areas without shell commands:
+
+1. participants and independently restartable wallet/server receivers;
+2. encrypted peer links and paused, resumed, or synchronized private delivery;
+3. public profiles, bounded avatars, private contacts, and explicit public sharing;
+4. on-chain and BOLT11 receiving methods, public lists, and private reservations;
+5. exact payment requests with explicit payer, receiver path, amount, and rails;
+6. real local payments with durable execution and reconciliation;
+7. proof submission and independent settlement verification;
+8. encrypted receipt preparation, publication, access, retrieval, and decryption;
+9. recurring requests, period endpoints, manual payment, autopay, and receiver time;
+10. encrypted receiver backup, inspection, restore, reconciliation, and relinking.
+
+Select the participant first and then the exact receiver. The receiver selection is
+the actor for every manual panel, and only a running receiver can use receiver-backed
+controls. Changing receivers clears unfinished peer and form context where required.
+For peer actions, select or enter both the peer public key and full receiver path;
+the application never infers a wallet/server receiver from the public key alone.
+
+The **Guides** tab contains versioned scenarios for funded setup, multi-receiver
+links, profiles/contacts, both payment rails, requests/payments, proofs, receipts,
+recurrence, and backup/relinking. A guide selects an actor and, when needed, an exact
+peer, then opens the existing manual panel. It never performs the action. Complete
+the form, run the named action yourself, inspect the operation and state, and choose
+**I observed this checkpoint** only after the checkpoint is independently visible.
+Acknowledgement records navigation progress; it is not backend proof. A failed
+operation shows its public error code and the catalog's recovery hint.
 
 Create named participants, or choose **Create funded Alice / Bob / Carol preset**
 on a network with at least three LND nodes sharing a Bitcoin Core backend. This
@@ -32,18 +79,58 @@ holding Electron's MCP request open.
 
 ## MCP and CLI
 
-The MCP `paykit` tool uses the same commands as the CLI and UI:
+The MCP `paykit` tool uses the same command catalog and public diagnostics as the CLI
+and UI:
 
 - `{ "networkId": 1, "action": "enable" }` provisions a stopped network.
 - `{ "networkId": 1, "action": "state" }` returns public state.
 - `{ "networkId": 1, "action": "command", "request": { "commandId": "<UUID>", "command": "preset.create", "input": {} } }` returns `{ "operationId": "<UUID>" }`.
 - `{ "networkId": 1, "action": "operation", "operationId": "<UUID>" }` polls completion.
+- `{ "networkId": 1, "action": "catalog" }` returns the versioned panels, command
+  parameters, and scenarios.
+- `{ "networkId": 1, "action": "scenario", "scenarioId": "funded-workspace" }`
+  returns one guide without executing it.
+- `{ "networkId": 1, "action": "diagnostics" }` returns readiness, funding status,
+  receiver lifecycle/generation, operation status/public error code, and the latest
+  event sequence.
+- `{ "networkId": 1, "action": "scenarioStep", "scenarioId": "funded-workspace",
+"stepId": "create-preset", "request": { "commandId": "<UUID>", "command":
+"preset.create", "input": {} } }` validates the command against that guide step and
+  returns its operation ID.
 
 Commands are `participant.create`, `participant.rename`, `receiver.create`,
 `receiver.rename`, `receiver.start`, `receiver.stop`, `receiver.restart` and
 `preset.create`. Receiving, links, profiles and request/payment/proof commands
 are documented below and in tool metadata, including every required field. The backend guide
 covers CLI invocation, authenticated HTTP and the replayable event stream.
+
+The service CLI reads `PAYKIT_API_URL` and `PAYKIT_TOKEN_FILE`. Those are trusted
+local service context, so do not paste the token into command arguments, screenshots,
+bug reports, or shared logs. Examples below assume the executable is available in the
+service environment and the two variables already point to one local network:
+
+```sh
+polar-paykit catalog
+polar-paykit scenario funded-workspace
+polar-paykit diagnostics
+polar-paykit scenario-step funded-workspace create-preset '{}' --no-wait
+polar-paykit command preset.create '{}' --no-wait
+polar-paykit wait OPERATION_UUID --timeout-seconds 120
+```
+
+Without `--no-wait`, `command` and `scenario-step` print the accepted operation ID and
+wait for a terminal result for up to 120 seconds. If a wait times out, query or wait
+on that operation ID. Retry uncertain command acceptance with the identical command
+UUID; do not create a second payment or other side effect. Backup archive bytes and
+passphrases use the desktop file dialogs (or inherited file descriptors in the Unix
+CLI); MCP does not accept archive paths, bytes, descriptors, or passphrases.
+
+Diagnostics are deliberately narrow and secret-safe. They contain no API token,
+wallet credentials, filesystem paths, private keys, preimages, Noise/session keys,
+receipt keys, archive material, or raw backend messages. Use the operation ID, public
+error code, receiver status/generation, funding status, and event sequence when
+reporting a problem. Build output shown during image setup is bounded and replaces
+recognized local paths; still review anything you copy from your own screen.
 
 ## Persistence and isolation
 

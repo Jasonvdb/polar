@@ -93,3 +93,4 @@ yarn-error.log*
 
 # Paykit Rust build products
 /paykit/target/
+/build-resources/paykit-service/

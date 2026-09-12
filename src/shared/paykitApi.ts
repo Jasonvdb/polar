@@ -108,9 +108,18 @@ export interface PaykitCommandRequest {
 export type PaykitRequest = {
   networkId: number;
 } & (
-  | { action: 'provision' | 'state' | 'checkPort' | 'remove' }
+  | {
+      action: 'provision' | 'state' | 'catalog' | 'diagnostics' | 'checkPort' | 'remove';
+    }
+  | { action: 'scenario'; scenarioId: string }
   | { action: 'operation'; operationId: string }
   | { action: 'command'; request: PaykitCommandRequest }
+  | {
+      action: 'scenarioStep';
+      scenarioId: string;
+      stepId: string;
+      request: PaykitCommandRequest;
+    }
 );
 export type PaykitTransferRequest =
   | {
@@ -759,7 +768,14 @@ const validatePaykitRecurrence = (value: unknown) => {
 };
 
 export const validatePaykitCommand = (request: PaykitCommandRequest) => {
-  if (!request || !isUuid(request.commandId) || !paykitCommands.includes(request.command))
+  if (
+    !request ||
+    typeof request !== 'object' ||
+    Array.isArray(request) ||
+    Object.keys(request).some(key => !['commandId', 'command', 'input'].includes(key)) ||
+    !isUuid(request.commandId) ||
+    !paykitCommands.includes(request.command)
+  )
     throw new Error('Invalid Paykit command or command ID');
   const expected = paykitCommandFields[request.command];
   if (

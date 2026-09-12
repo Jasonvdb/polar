@@ -5,7 +5,7 @@ The `paykit/` Rust workspace packages a persistent Pubky 0.11.0 StaticTestnet an
 Build the ARM64 or AMD64 service image from the `paykit` context:
 
 ```sh
-docker build -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
+docker build --target production -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
 ```
 
 The Dockerfile pins multiarchitecture builder/runtime manifests. `Cargo.lock` pins the SDK to `5ef8caf8d9a812f571a954fd3b7afe5ef22fd10f`. It retains `pubky-noise 0.1.0-rc7` from that SDK's committed lockfile: the later rc8 prerelease changes snapshot APIs incompatibly. All builds use `--locked`.

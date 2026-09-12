@@ -1,6 +1,34 @@
 # Polar Paykit
 
-An isolated Paykit workbench built on Polar. See [development and isolation setup](CONTRIBUTING.md#polar-paykit-isolation). Paykit features are being delivered incrementally; this foundation preserves the existing editable Bitcoin and Lightning network tools.
+An isolated Paykit workbench built on Polar. The desktop UI covers participant and
+receiver management, encrypted links and delivery, profiles and contacts, payment
+methods and lists, requests, real payments, proofs, receipts, subscriptions, and
+encrypted backup/recovery. See the [Paykit workspace guide](docs/paykit-workspace.md)
+for the complete GUI path and matching CLI/MCP operations.
+
+## Fresh Mac setup
+
+1. Install and open [Docker Desktop](https://www.docker.com/products/docker-desktop).
+   Wait until its engine reports that it is running. Polar uses Docker for its local
+   Bitcoin, Lightning, Pubky, PostgreSQL, and Paykit services.
+2. Open the Polar Paykit DMG, drag **Polar Paykit** into **Applications**, and launch
+   it. A locally built DMG is unsigned (`identity: null`); macOS may require you to
+   allow that local build from **System Settings → Privacy & Security**. This repository
+   does not claim a notarized or published release.
+3. Create a network with one Bitcoin Core node and at least three LND nodes connected
+   to that Core node. Stop the network if it is running.
+4. Open the network's **Paykit** tab. On first use choose **Build service image**. The
+   app builds the bundled, version-matched service context; no Terminal command or
+   registry image is required. You can **Cancel build**, then **Retry setup** after a
+   Docker or network failure.
+5. When the image reports ready, choose **Enable Paykit**, start the network, and use
+   **Create funded Alice / Bob / Carol preset**. Funding is ready only after the UI
+   shows verified wallet and channel balances.
+
+The first image build downloads pinned build dependencies and can take several
+minutes. Keep the app open while it runs. For a walkthrough of all features, receiver
+focus rules, guided checkpoints, and recovery, continue with the
+[workspace guide](docs/paykit-workspace.md#using-the-workbench).
 
 # Polar
 

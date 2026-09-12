@@ -92,10 +92,18 @@ async fn run(args: &[String]) -> anyhow::Result<()> {
             )
             .await
         }
-        Some("state") | Some("command") | Some("operation") | Some("health") => cli(args).await,
+        Some("state")
+        | Some("command")
+        | Some("operation")
+        | Some("health")
+        | Some("catalog")
+        | Some("scenario")
+        | Some("scenario-step")
+        | Some("diagnostics")
+        | Some("wait") => cli(args).await,
         Some("backup") => backup_cli(args).await,
         _ => {
-            eprintln!("Usage: polar-paykit serve | state | health | operation UUID | command NAME JSON [COMMAND_UUID]\nCLI: PAYKIT_API_URL and PAYKIT_TOKEN_FILE; operations wait up to 120 seconds.");
+            eprintln!("Usage: polar-paykit serve | state | health | catalog | scenario ID | diagnostics | operation UUID | wait UUID [--timeout-seconds N] | command NAME JSON [COMMAND_UUID] [--no-wait] | scenario-step SCENARIO STEP JSON [COMMAND_UUID] [--no-wait]\nCLI: PAYKIT_API_URL and PAYKIT_TOKEN_FILE; default operation wait is 120 seconds.");
             Ok(())
         }
     }
@@ -309,85 +317,140 @@ async fn serve() -> anyhow::Result<()> {
 }
 
 async fn cli(args: &[String]) -> anyhow::Result<()> {
-    let base = std::env::var("PAYKIT_API_URL")?;
-    ensure_loopback_url(&base)?;
-    let token = zeroize::Zeroizing::new(std::fs::read_to_string(std::env::var(
-        "PAYKIT_TOKEN_FILE",
-    )?)?);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()?;
-    let path = match args[0].as_str() {
-        "state" => "/v1/state".into(),
-        "health" => "/health".into(),
-        "operation" => format!(
-            "/v1/operations/{}",
-            args.get(1)
-                .ok_or_else(|| anyhow::anyhow!("operation UUID required"))?
-                .parse::<uuid::Uuid>()?
-        ),
-        _ => "/v1/commands".into(),
-    };
-    if args[0] != "command" {
-        let value = client
-            .get(format!("{base}{path}"))
-            .bearer_auth(token.trim())
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<serde_json::Value>()
-            .await?;
-        println!("{}", serde_json::to_string_pretty(&value)?);
-        return Ok(());
+    let client = polar_paykit::client::Client::from_env()?;
+    match args[0].as_str() {
+        "state" => print_json(&client.get::<serde_json::Value>("/v1/state").await?),
+        "health" => print_json(&client.get::<serde_json::Value>("/health").await?),
+        "catalog" => print_json(&client.get::<serde_json::Value>("/v1/catalog").await?),
+        "diagnostics" => print_json(&client.get::<serde_json::Value>("/v1/diagnostics").await?),
+        "scenario" => {
+            let id = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("scenario ID required"))?;
+            print_json(
+                &client
+                    .get::<serde_json::Value>(&format!("/v1/scenarios/{id}"))
+                    .await?,
+            )
+        }
+        "operation" => {
+            let id = required_uuid(args.get(1), "operation UUID required")?;
+            print_json(&client.operation(id).await?)
+        }
+        "wait" => {
+            let id = required_uuid(args.get(1), "operation UUID required")?;
+            wait_and_print(&client, id, timeout_seconds(args)?).await
+        }
+        "command" => submit_cli_command(&client, args, None).await,
+        "scenario-step" => {
+            let scenario = args
+                .get(1)
+                .ok_or_else(|| anyhow::anyhow!("scenario ID required"))?;
+            let step = args
+                .get(2)
+                .ok_or_else(|| anyhow::anyhow!("scenario step ID required"))?;
+            submit_cli_command(&client, args, Some((scenario, step))).await
+        }
+        _ => anyhow::bail!("unsupported CLI action"),
     }
+}
+
+fn print_json(value: &impl serde::Serialize) -> anyhow::Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn required_uuid(value: Option<&String>, message: &str) -> anyhow::Result<uuid::Uuid> {
+    value
+        .ok_or_else(|| anyhow::anyhow!("{message}"))?
+        .parse()
+        .map_err(Into::into)
+}
+
+fn timeout_seconds(args: &[String]) -> anyhow::Result<Duration> {
+    let Some(index) = args.iter().position(|value| value == "--timeout-seconds") else {
+        return Ok(Duration::from_secs(120));
+    };
+    let seconds: u64 = args
+        .get(index + 1)
+        .ok_or_else(|| anyhow::anyhow!("timeout value required"))?
+        .parse()?;
+    anyhow::ensure!(
+        (1..=3600).contains(&seconds),
+        "timeout must be 1..3600 seconds"
+    );
+    Ok(Duration::from_secs(seconds))
+}
+
+async fn submit_cli_command(
+    client: &polar_paykit::client::Client,
+    args: &[String],
+    selected_step: Option<(&String, &String)>,
+) -> anyhow::Result<()> {
+    let offset = usize::from(selected_step.is_some());
+    let command_name = if let Some((scenario_id, step_id)) = selected_step {
+        polar_paykit::interfaces::scenario(scenario_id)?
+            .steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| anyhow::anyhow!("scenario step not found"))?
+            .command
+            .to_owned()
+    } else {
+        args.get(1)
+            .ok_or_else(|| anyhow::anyhow!("command name required"))?
+            .clone()
+    };
+    let input_index = 2 + offset;
+    let command_id_index = input_index + 1;
     let command = polar_paykit::model::Command {
         command_id: args
-            .get(3)
-            .map(|v| v.parse())
+            .get(command_id_index)
+            .filter(|value| !value.starts_with("--"))
+            .map(|value| value.parse())
             .transpose()?
             .unwrap_or_else(uuid::Uuid::new_v4),
-        command: args
-            .get(1)
-            .ok_or_else(|| anyhow::anyhow!("command name required"))?
-            .clone(),
+        command: command_name,
         input: serde_json::from_str(
-            args.get(2)
+            args.get(input_index)
                 .ok_or_else(|| anyhow::anyhow!("JSON input required"))?,
         )?,
     };
-    let response = client
-        .post(format!("{base}{path}"))
-        .bearer_auth(token.trim())
-        .json(&command)
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<serde_json::Value>()
-        .await?;
-    let id = response["operationId"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("missing operation id"))?;
+    if let Some((scenario_id, step_id)) = selected_step {
+        polar_paykit::interfaces::validate_scenario_step(scenario_id, step_id, &command)?;
+    }
+    let id = client.submit(&command).await?;
+    if args.iter().any(|value| value == "--no-wait") {
+        return print_json(&serde_json::json!({"operationId": id}));
+    }
     eprintln!("Accepted operation {id}");
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    loop {
-        let result = client
-            .get(format!("{base}/v1/operations/{id}"))
-            .bearer_auth(token.trim())
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<serde_json::Value>()
-            .await?;
-        if result["status"] == "succeeded" || result["status"] == "failed" {
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            anyhow::ensure!(result["status"] == "succeeded", "operation failed");
-            return Ok(());
+    wait_and_print(client, id, timeout_seconds(args)?).await
+}
+
+async fn wait_and_print(
+    client: &polar_paykit::client::Client,
+    id: uuid::Uuid,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    match client.wait(id, timeout).await {
+        Ok(operation) => {
+            print_json(&operation)?;
+            if operation.status == polar_paykit::model::OperationStatus::Failed {
+                let code = operation
+                    .error
+                    .as_ref()
+                    .map_or("operation_failed", |error| error.code.as_str());
+                anyhow::bail!("operation {id} failed: {code}");
+            }
+            Ok(())
         }
-        anyhow::ensure!(
-            tokio::time::Instant::now() < deadline,
-            "operation wait timed out; poll the existing operation"
-        );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        Err(polar_paykit::client::ClientError::Timeout { operation_id }) => {
+            print_json(
+                &serde_json::json!({"operationId":operation_id,"status":"timeout","error":{"code":"operation_timeout","message":"The operation did not finish before the requested timeout."}}),
+            )?;
+            anyhow::bail!("operation {operation_id} wait timed out")
+        }
+        Err(error) => Err(error.into()),
     }
 }
 

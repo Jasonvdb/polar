@@ -142,6 +142,8 @@ async function run({ base, tokenFile, serviceContainer, postgresContainer, walle
     await command('receiver.restart', { receiverId: wallet.id });
     inspectMarker(wallet);
   }
+  if (serviceContainer)
+    await require('./paykit-interface-scenarios').run({ request, state, command, stage, docker, serviceContainer });
   await require('./paykit-workspace-scenarios').run({ initial, state, command, request, stage, docker, serviceContainer, signal });
   if (scope === 'full') {
     const context = { initial, state, command, request, stage, docker, serviceContainer, signal, walletFixture };

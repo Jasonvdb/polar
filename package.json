@@ -28,7 +28,8 @@
     "package:ci": "yarn package --publish never",
     "package:electron": "electron-builder build -c.extraMetadata.main=build/main/electron/index.js --config .electronbuildrc",
     "postinstall": "electron-builder install-app-deps && patch-package && husky",
-    "prebuild": "tsc -p electron/tsconfig.json && yarn theme",
+    "prepare:paykit-context": "node scripts/package-paykit-context.js",
+    "prebuild": "yarn prepare:paykit-context && tsc -p electron/tsconfig.json && yarn theme",
     "release": "standard-version --no-verify --skip.commit --skip.tag",
     "start": "rescripts --openssl-legacy-provider start",
     "test": "cross-env DEBUG_PRINT_LIMIT=15000 rescripts test --env=jest-environment-jsdom-sixteen",
@@ -41,7 +42,9 @@
     "theme": "yarn theme:light && yarn theme:dark",
     "theme:light": "lessc --quiet --include-path=node_modules --js ./src/theme/light.less ./public/themes/light.css",
     "theme:dark": "lessc --quiet --include-path=node_modules --js ./src/theme/dark.less ./public/themes/dark.css",
-    "tsc": "tsc --noEmit"
+    "pretsc": "yarn prepare:paykit-context",
+    "tsc": "tsc --noEmit",
+    "test:paykit-context": "node --test scripts/package-paykit-context.test.js"
   },
   "dependencies": {
     "@lightningpolar/litd-api": "0.16.0-alpha",

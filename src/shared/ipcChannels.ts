@@ -5,6 +5,7 @@ export default {
   http: 'http',
   paykit: 'paykit',
   paykitTransfer: 'paykit-transfer',
+  paykitImage: 'paykit-image',
   zip: 'zip',
   unzip: 'unzip',
   // MCP channels

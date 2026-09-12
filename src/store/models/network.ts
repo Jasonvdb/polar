@@ -782,6 +782,14 @@ const networkModel: NetworkModel = {
       if (missingImages.length) {
         throw new Error(`${l('missingImages')}: ${missingImages.join(', ')}`);
       }
+      if (network.paykit) {
+        const image = await paykitService.imageStatus();
+        if (image.status !== 'ready') {
+          throw new Error(
+            'Paykit service image setup is required. Open the Paykit workspace to build or retry it, then start the network again.',
+          );
+        }
+      }
       const { id } = network;
       actions.setStatus({ id: id, status: Status.Starting });
       try {

@@ -5,6 +5,7 @@ import { join } from 'path';
 import { ipcChannels } from '../src/shared';
 import { APP_ROOT, BASE_URL } from './constants';
 import { paykitProxy, paykitTransferProxy } from './paykitProxy';
+import { paykitImageBuilder } from './paykitImageBuilder';
 import { httpProxy } from './httpProxy';
 import { clearLitdProxyCache } from './litd/litdProxyServer';
 import { clearLndProxyCache } from './lnd/lndProxyServer';
@@ -71,6 +72,7 @@ const listeners: {
   [ipcChannels.http]: httpProxy,
   [ipcChannels.paykit]: paykitProxy,
   [ipcChannels.paykitTransfer]: paykitTransferProxy,
+  [ipcChannels.paykitImage]: request => paykitImageBuilder.handle(request),
   [ipcChannels.zip]: zip,
   [ipcChannels.unzip]: unzip,
 };

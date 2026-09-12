@@ -5,6 +5,8 @@ import { join, resolve, sep } from 'path';
 import {
   paykitProxy,
   publicOperation,
+  publicCatalog,
+  publicDiagnostics,
   publicState,
   walletBindings,
   fundingWalletIds,
@@ -19,6 +21,7 @@ jest.mock('../../electron/paykitWalletAuth', () => ({
   bakePaykitMacaroon: jest.fn(),
 }));
 import { paykitConfig } from './paykitConfig';
+import { paykitCommands, paykitCommandFields } from './paykitApi';
 
 jest.mock('fs', () => ({
   constants: jest.requireActual('fs').constants,
@@ -177,6 +180,92 @@ describe('Main process Paykit boundary', () => {
       sync: jest.fn(),
       close: jest.fn(),
     } as any);
+  });
+  it('accepts exactly the complete public catalog and strips no unknown fields silently', () => {
+    const catalog = {
+      apiVersion: 1,
+      catalogVersion: 1,
+      panels: [{ id: 'workspace', title: 'Workspace' }],
+      commands: paykitCommands.map(id => ({
+        id,
+        panelId: 'workspace',
+        requiredParameters: paykitCommandFields[id],
+        optionalParameters: [],
+        genericCommandAllowed: !id.startsWith('backup.'),
+      })),
+      scenarios: [
+        {
+          id: 'funded-workspace',
+          title: 'Funded workspace',
+          prerequisites: ['Service ready'],
+          steps: [
+            {
+              id: 'create-preset',
+              panelId: 'workspace',
+              command: 'preset.create',
+              requiredParameters: [],
+              checkpoint: 'Ready',
+              recoveryHint: 'Inspect operation',
+              transport: 'command',
+            },
+          ],
+        },
+      ],
+    };
+    expect(publicCatalog(catalog)).toEqual(catalog);
+    expect(() => publicCatalog({ ...catalog, secret: '/private/token' })).toThrow(
+      'catalog',
+    );
+    expect(() =>
+      publicCatalog({ ...catalog, commands: catalog.commands.slice(1) }),
+    ).toThrow('Incomplete');
+    expect(() =>
+      publicCatalog({
+        ...catalog,
+        scenarios: [
+          {
+            ...catalog.scenarios[0],
+            steps: [{ ...catalog.scenarios[0].steps[0], archivePath: '/tmp/archive' }],
+          },
+        ],
+      }),
+    ).toThrow('scenario step');
+  });
+
+  it('allows only the bounded diagnostic projection and matching environment', () => {
+    const diagnostic = {
+      apiVersion: 1,
+      environmentId: envId,
+      ready: true,
+      fundingStatus: 'ready',
+      receivers: [
+        { id: 'af9f976d-b4ff-5feb-af0e-4fad185109f1', status: 'running', generation: 1 },
+      ],
+      operations: [
+        {
+          id: 'c9c50396-ff65-4b44-a486-955a40f7c3f9',
+          command: 'preset.create',
+          status: 'failed',
+          errorCode: 'unavailable',
+        },
+      ],
+      lastEventSequence: 7,
+    };
+    expect(publicDiagnostics(diagnostic, envId)).toEqual(diagnostic);
+    expect(JSON.stringify(publicDiagnostics(diagnostic, envId))).not.toContain('token');
+    expect(() => publicDiagnostics({ ...diagnostic, apiToken: 'secret' }, envId)).toThrow(
+      'diagnostics',
+    );
+    expect(() => publicDiagnostics(diagnostic, 'different')).toThrow('diagnostics');
+    expect(() =>
+      publicDiagnostics(
+        {
+          ...diagnostic,
+          operations: [{ ...diagnostic.operations[0], message: '/private/path' }],
+        },
+        envId,
+      ),
+    ).toThrow('operation diagnostic');
   });
   it('projects only public state and rejects a different environment', () => {
     const raw = {

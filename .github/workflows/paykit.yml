@@ -37,7 +37,7 @@ jobs:
       - name: Harness failure guards
         run: node --test scripts/paykit-*.test.js
       - name: Build local service
-        run: docker build -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
+        run: docker build --target production -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
       - name: Build non-shipping receipt fixture
         run: docker build --target receipt-fixture -t polar-paykit/receipt-fixture:ci -f paykit/Dockerfile paykit
       - name: Build non-shipping backup fixture
