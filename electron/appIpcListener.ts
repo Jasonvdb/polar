@@ -77,6 +77,19 @@ const listeners: {
   [ipcChannels.unzip]: unzip,
 };
 
+const paykitRequestArgs = (channel: string, responseChan: string, args: any[]) => {
+  if (channel !== ipcChannels.paykit || !args[0] || typeof args[0] !== 'object')
+    return args;
+  const { replyTo, ...request } = args[0];
+  const suffix =
+    typeof replyTo === 'string' && replyTo.startsWith(`${responseChan}-`)
+      ? replyTo.slice(responseChan.length + 1)
+      : '';
+  // replyTo is transport metadata created by createIpcSender. Strip only the
+  // channel's expected numeric reply token; every other key remains public input.
+  return /^\d+$/.test(suffix) ? [request, ...args.slice(1)] : args;
+};
+
 /**
  * Sets up the IPC listeners for the main process and maps them to async
  * functions.
@@ -104,7 +117,7 @@ export const initAppIpcListener = (ipc: IpcMain) => {
       }
       try {
         // attempt to execute the associated function
-        const result = await func(...args);
+        const result = await func(...paykitRequestArgs(channel, responseChan, args));
         // merge the result with default values since LND omits falsey values
         log(`send response "${uniqueChan}"`, JSON.stringify(result, null, 2));
         // response to the calling process with a reply

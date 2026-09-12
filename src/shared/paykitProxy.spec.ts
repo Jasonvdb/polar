@@ -22,7 +22,29 @@ jest.mock('../../electron/paykitWalletAuth', () => ({
 }));
 import { paykitConfig } from './paykitConfig';
 import { paykitCommands, paykitCommandFields } from './paykitApi';
+import { ipcRenderer } from 'electron';
+import { initAppIpcListener } from '../../electron/appIpcListener';
+import { createIpcSender } from '../lib/ipc/ipcService';
+import ipcChannels from './ipcChannels';
 
+jest.mock('electron-is-dev', () => true);
+jest.mock('../../electron/paykitImageBuilder', () => ({
+  paykitImageBuilder: { handle: jest.fn() },
+}));
+jest.mock('../../electron/httpProxy', () => ({ httpProxy: jest.fn() }));
+jest.mock('../../electron/litd/litdProxyServer', () => ({
+  clearLitdProxyCache: jest.fn(),
+}));
+jest.mock('../../electron/lnd/lndProxyServer', () => ({
+  clearLndProxyCache: jest.fn(),
+}));
+jest.mock('../../electron/tapd/tapdProxyServer', () => ({
+  clearTapdProxyCache: jest.fn(),
+}));
+jest.mock('../../electron/utils/zip', () => ({
+  zip: jest.fn(),
+  unzip: jest.fn(),
+}));
 jest.mock('fs', () => ({
   constants: jest.requireActual('fs').constants,
   existsSync: () => false,
@@ -458,6 +480,62 @@ describe('Main process Paykit boundary', () => {
       expect(flags).toBe('wx');
       expect(mode).toBe(0o600);
     }
+  });
+
+  it('accepts sender reply metadata at IPC while preserving strict request keys', async () => {
+    fsMock.readFile.mockImplementation(async path => {
+      if (
+        `${path}`.endsWith('network-1.json') ||
+        `${path}`.endsWith('wallet-config.json')
+      )
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      return JSON.stringify({ networks: [network()] });
+    });
+    const handlers = new Map<string, (...args: any[]) => void>();
+    const responses = new Map<string, (...args: any[]) => void>();
+    initAppIpcListener({
+      on: jest.fn((channel, handler) => handlers.set(channel, handler)),
+    } as any);
+    (ipcRenderer.once as jest.Mock).mockImplementation((channel, handler) =>
+      responses.set(channel, handler),
+    );
+    (ipcRenderer.send as jest.Mock).mockImplementation((channel, payload) => {
+      const handler = handlers.get(channel)!;
+      handler(
+        {
+          reply: (replyChannel: string, result: any) =>
+            responses.get(replyChannel)!(null, result),
+        },
+        payload,
+      );
+    });
+
+    const ipc = createIpcSender('Paykit test', 'app');
+    await expect(
+      ipc(ipcChannels.paykit, { networkId: 1, action: 'provision' }),
+    ).resolves.toMatchObject({ apiVersion: 1, servicePort: expect.any(Number) });
+    fsMock.readFile.mockImplementation(async path => {
+      if (`${path}`.endsWith(`${sep}networks.json`))
+        return JSON.stringify({ networks: [{ ...network(), paykit: binding }] });
+      if (`${path}`.endsWith(`${sep}network-1.json`)) return JSON.stringify(binding);
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+    });
+    await expect(
+      ipc(ipcChannels.paykit, {
+        networkId: 1,
+        action: 'command',
+        request: { commandId: envId, command: 'preset.fund', input: {} },
+      }),
+    ).rejects.toThrow(
+      'Paykit command not submitted: The funded preset requires three LND',
+    );
+    await expect(
+      ipc(ipcChannels.paykit, {
+        networkId: 1,
+        action: 'provision',
+        unexpected: true,
+      } as any),
+    ).rejects.toThrow('Invalid Paykit request');
   });
 });
 
