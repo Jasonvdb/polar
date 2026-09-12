@@ -70,3 +70,25 @@ test('shipping image builds select production and keep fixtures out of its stage
   assert.match(productionStage[1], /CMD \["serve"\]/);
   assert.doesNotMatch(productionStage[1], /paykit-(?:backup|receipt)-fixture/);
 });
+
+test('package workflow runs image CI broadly and keeps release packaging gated', () => {
+  const repositoryRoot = path.resolve(__dirname, '..');
+  const workflow = fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'package.yml'), 'utf8');
+
+  assert.match(workflow, /pull_request:/);
+  for (const branch of ["'master'", "'codex/**'", "'release/*'"])
+    assert.ok(workflow.includes(`- ${branch}`));
+  assert.match(workflow, /package:\n[\s\S]*?if: startsWith\(github\.ref_name, 'release\/'\)/);
+  assert.match(workflow, /--publish never/);
+});
+
+test('package image smoke invokes the binary without its serve CMD and checks status', () => {
+  const repositoryRoot = path.resolve(__dirname, '..');
+  const workflow = fs.readFileSync(path.join(repositoryRoot, '.github', 'workflows', 'package.yml'), 'utf8');
+
+  assert.match(workflow, /--entrypoint \/bin\/sh polar-paykit\/service:ci -c 'exec polar-paykit'/);
+  assert.match(workflow, /status=\$\?/);
+  assert.match(workflow, /if \[ "\$status" -ne 0 \]; then[\s\S]*?printf[\s\S]*?exit "\$status"/);
+  assert.match(workflow, /grep -F 'Usage: polar-paykit' <<<"\$output"/);
+  assert.doesNotMatch(workflow, /docker run --rm polar-paykit\/service:ci 2>&1 \| grep/);
+});

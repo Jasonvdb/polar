@@ -1,8 +1,11 @@
 name: Package
 
 on:
+  pull_request:
   push:
     branches:
+      - 'master'
+      - 'codex/**'
       - 'release/*'
 
 permissions:
@@ -26,7 +29,15 @@ jobs:
       - name: verify image architecture and service CLI
         run: |
           test "$(docker image inspect polar-paykit/service:ci --format '{{.Architecture}}')" = "${{ matrix.arch }}"
-          docker run --rm polar-paykit/service:ci 2>&1 | grep -F 'Usage: polar-paykit'
+          set +e
+          output="$(docker run --rm --entrypoint /bin/sh polar-paykit/service:ci -c 'exec polar-paykit' 2>&1)"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            printf '%s\n' "$output" >&2
+            exit "$status"
+          fi
+          grep -F 'Usage: polar-paykit' <<<"$output"
 
   package:
     name: Package on ${{ matrix.os }}
