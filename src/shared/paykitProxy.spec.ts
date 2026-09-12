@@ -24,7 +24,6 @@ import { paykitConfig } from './paykitConfig';
 import { paykitCommands, paykitCommandFields } from './paykitApi';
 import { ipcRenderer } from 'electron';
 import { initAppIpcListener } from '../../electron/appIpcListener';
-import { createIpcSender } from '../lib/ipc/ipcService';
 import ipcChannels from './ipcChannels';
 
 jest.mock('electron-is-dev', () => true);
@@ -510,6 +509,9 @@ describe('Main process Paykit boundary', () => {
       );
     });
 
+    // Load the renderer sender at test runtime so Electron's production compiler
+    // does not pull renderer-only aliases through this shared test file.
+    const { createIpcSender } = jest.requireActual('../lib/ipc/ipcService');
     const ipc = createIpcSender('Paykit test', 'app');
     await expect(
       ipc(ipcChannels.paykit, { networkId: 1, action: 'provision' }),
