@@ -1079,7 +1079,7 @@ fn compact_request_metadata(value: &Value) -> anyhow::Result<DecodedRequestMetad
     })
 }
 
-fn request_description(terms: &paykit_sdk::PaymentRequestTermsRecord) -> Option<String> {
+pub(super) fn request_description(terms: &paykit_sdk::PaymentRequestTermsRecord) -> Option<String> {
     if let Some(value) = terms.metadata.get("polarPaykit") {
         return compact_request_metadata(value)
             .ok()
