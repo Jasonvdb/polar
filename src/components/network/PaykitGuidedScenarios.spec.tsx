@@ -69,6 +69,22 @@ const catalog: PaykitGuideCatalog = {
         },
       ],
     },
+    {
+      id: 'backup-and-relink',
+      title: 'Backup and relink',
+      prerequisites: ['A restored receiver is running.'],
+      steps: [
+        {
+          id: 'relink',
+          panelId: 'links',
+          command: 'link.initiate',
+          requiredParameters: ['receiverId', 'peerPublicKey', 'peerReceiverPath'],
+          checkpoint: 'The restored receiver has initiated a new link.',
+          recoveryHint: 'Verify the restored receiver and retry.',
+          transport: 'command',
+        },
+      ],
+    },
   ],
 };
 const diagnostics: PaykitDiagnostics = {
@@ -165,6 +181,10 @@ it('requires and forwards explicit actor and peer focus', () => {
 it('shows a failed operation and recovery without claiming the checkpoint passed', () => {
   const view = setup({
     pendingOperationId: 'operation-1',
+    pendingOperationContext: {
+      scenarioId: 'funded-workspace',
+      stepId: 'create-preset',
+    },
     diagnostics: {
       ...diagnostics,
       operations: [
@@ -181,6 +201,36 @@ it('shows a failed operation and recovery without claiming the checkpoint passed
   expect(view.getByText(/reconciliation_required/)).toBeInTheDocument();
   expect(view.getByText('I observed this checkpoint')).toBeEnabled();
   expect(view.queryByText('Checkpoint acknowledged')).not.toBeInTheDocument();
+});
+
+it('does not infer an operation from the same command in another guide context', () => {
+  const view = setup({
+    viewState: {
+      environmentId: 'environment',
+      networkId: 9,
+      scenarioId: 'backup-and-relink',
+      stepId: 'relink',
+    },
+    selectedReceiverId: 'bob-wallet',
+    pendingOperationId: 'alice-link-operation',
+    pendingOperationContext: {
+      scenarioId: 'multi-receiver-links',
+      stepId: 'initiate',
+      receiverId: 'alice-wallet',
+    },
+    diagnostics: {
+      ...diagnostics,
+      operations: [
+        {
+          id: 'alice-link-operation',
+          command: 'link.initiate',
+          status: 'succeeded',
+        },
+      ],
+    },
+  });
+
+  expect(view.queryByText(/Current operation:/)).not.toBeInTheDocument();
 });
 
 it('labels only an explicitly acknowledged step as complete', () => {

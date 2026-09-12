@@ -317,41 +317,148 @@ async fn serve() -> anyhow::Result<()> {
 }
 
 async fn cli(args: &[String]) -> anyhow::Result<()> {
+    let action = parse_cli_action(args)?;
     let client = polar_paykit::client::Client::from_env()?;
-    match args[0].as_str() {
-        "state" => print_json(&client.get::<serde_json::Value>("/v1/state").await?),
-        "health" => print_json(&client.get::<serde_json::Value>("/health").await?),
-        "catalog" => print_json(&client.get::<serde_json::Value>("/v1/catalog").await?),
-        "diagnostics" => print_json(&client.get::<serde_json::Value>("/v1/diagnostics").await?),
-        "scenario" => {
-            let id = args
-                .get(1)
-                .ok_or_else(|| anyhow::anyhow!("scenario ID required"))?;
-            print_json(
-                &client
-                    .get::<serde_json::Value>(&format!("/v1/scenarios/{id}"))
-                    .await?,
-            )
+    match action {
+        CliAction::Get(path) => print_json(&client.get::<serde_json::Value>(path).await?),
+        CliAction::Scenario(id) => print_json(
+            &client
+                .get::<serde_json::Value>(&format!("/v1/scenarios/{id}"))
+                .await?,
+        ),
+        CliAction::Operation(id) => print_json(&client.operation(id).await?),
+        CliAction::Wait { id, timeout } => wait_and_print(&client, id, timeout).await,
+        CliAction::Submit { command, wait } => submit_cli_command(&client, &command, wait).await,
+    }
+}
+
+enum CliAction {
+    Get(&'static str),
+    Scenario(String),
+    Operation(uuid::Uuid),
+    Wait {
+        id: uuid::Uuid,
+        timeout: Duration,
+    },
+    Submit {
+        command: polar_paykit::model::Command,
+        wait: bool,
+    },
+}
+
+fn parse_cli_action(args: &[String]) -> anyhow::Result<CliAction> {
+    match args.first().map(String::as_str) {
+        Some("state") => exact_get(args, "/v1/state"),
+        Some("health") => exact_get(args, "/health"),
+        Some("catalog") => exact_get(args, "/v1/catalog"),
+        Some("diagnostics") => exact_get(args, "/v1/diagnostics"),
+        Some("scenario") => {
+            ensure_len(args, 2, "scenario ID required")?;
+            ensure_positional(&args[1], "scenario ID")?;
+            Ok(CliAction::Scenario(args[1].clone()))
         }
-        "operation" => {
-            let id = required_uuid(args.get(1), "operation UUID required")?;
-            print_json(&client.operation(id).await?)
+        Some("operation") => {
+            ensure_len(args, 2, "operation UUID required")?;
+            Ok(CliAction::Operation(required_uuid(
+                args.get(1),
+                "operation UUID required",
+            )?))
         }
-        "wait" => {
-            let id = required_uuid(args.get(1), "operation UUID required")?;
-            wait_and_print(&client, id, timeout_seconds(args)?).await
-        }
-        "command" => submit_cli_command(&client, args, None).await,
-        "scenario-step" => {
-            let scenario = args
-                .get(1)
-                .ok_or_else(|| anyhow::anyhow!("scenario ID required"))?;
-            let step = args
-                .get(2)
-                .ok_or_else(|| anyhow::anyhow!("scenario step ID required"))?;
-            submit_cli_command(&client, args, Some((scenario, step))).await
-        }
+        Some("wait") => parse_wait(args),
+        Some("command") => parse_command(args, None),
+        Some("scenario-step") => parse_scenario_step(args),
         _ => anyhow::bail!("unsupported CLI action"),
+    }
+}
+
+fn exact_get(args: &[String], path: &'static str) -> anyhow::Result<CliAction> {
+    anyhow::ensure!(args.len() == 1, "unexpected CLI arguments");
+    Ok(CliAction::Get(path))
+}
+
+fn ensure_len(args: &[String], expected: usize, missing: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(args.len() >= expected, "{missing}");
+    anyhow::ensure!(args.len() == expected, "unexpected CLI arguments");
+    Ok(())
+}
+
+fn ensure_positional(value: &str, name: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(!value.starts_with("--"), "{name} required");
+    Ok(())
+}
+
+fn parse_wait(args: &[String]) -> anyhow::Result<CliAction> {
+    anyhow::ensure!(args.len() >= 2, "operation UUID required");
+    let id = required_uuid(args.get(1), "operation UUID required")?;
+    let timeout = match args.get(2).map(String::as_str) {
+        None => Duration::from_secs(120),
+        Some("--timeout-seconds") => {
+            ensure_len(args, 4, "timeout value required")?;
+            parse_timeout(&args[3])?
+        }
+        Some(_) => anyhow::bail!("unexpected CLI arguments"),
+    };
+    Ok(CliAction::Wait { id, timeout })
+}
+
+fn parse_timeout(value: &str) -> anyhow::Result<Duration> {
+    let seconds: u64 = value.parse()?;
+    anyhow::ensure!(
+        (1..=3600).contains(&seconds),
+        "timeout must be 1..3600 seconds"
+    );
+    Ok(Duration::from_secs(seconds))
+}
+
+fn parse_scenario_step(args: &[String]) -> anyhow::Result<CliAction> {
+    anyhow::ensure!(args.len() >= 3, "scenario and step IDs required");
+    ensure_positional(&args[1], "scenario ID")?;
+    ensure_positional(&args[2], "scenario step ID")?;
+    parse_command(args, Some((&args[1], &args[2])))
+}
+
+fn parse_command(
+    args: &[String],
+    selected_step: Option<(&str, &str)>,
+) -> anyhow::Result<CliAction> {
+    let offset = usize::from(selected_step.is_some());
+    let input_index = 2 + offset;
+    anyhow::ensure!(args.len() > input_index, "JSON input required");
+    if selected_step.is_none() {
+        ensure_positional(&args[1], "command name")?;
+    }
+    ensure_positional(&args[input_index], "JSON input")?;
+
+    let optional = &args[input_index + 1..];
+    let (command_id, wait) = parse_command_options(optional)?;
+    let command_name = match selected_step {
+        Some((scenario_id, step_id)) => polar_paykit::interfaces::scenario(scenario_id)?
+            .steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| anyhow::anyhow!("scenario step not found"))?
+            .command
+            .to_owned(),
+        None => args[1].clone(),
+    };
+    let command = polar_paykit::model::Command {
+        command_id,
+        command: command_name,
+        input: serde_json::from_str(&args[input_index])?,
+    };
+    if let Some((scenario_id, step_id)) = selected_step {
+        polar_paykit::interfaces::validate_scenario_step(scenario_id, step_id, &command)?;
+    }
+    Ok(CliAction::Submit { command, wait })
+}
+
+fn parse_command_options(args: &[String]) -> anyhow::Result<(uuid::Uuid, bool)> {
+    match args {
+        [] => Ok((uuid::Uuid::new_v4(), true)),
+        [flag] if flag == "--no-wait" => Ok((uuid::Uuid::new_v4(), false)),
+        [command_id] => Ok((command_id.parse()?, true)),
+        [command_id, flag] if flag == "--no-wait" => Ok((command_id.parse()?, false)),
+        _ => anyhow::bail!("unexpected CLI arguments"),
     }
 }
 
@@ -367,64 +474,17 @@ fn required_uuid(value: Option<&String>, message: &str) -> anyhow::Result<uuid::
         .map_err(Into::into)
 }
 
-fn timeout_seconds(args: &[String]) -> anyhow::Result<Duration> {
-    let Some(index) = args.iter().position(|value| value == "--timeout-seconds") else {
-        return Ok(Duration::from_secs(120));
-    };
-    let seconds: u64 = args
-        .get(index + 1)
-        .ok_or_else(|| anyhow::anyhow!("timeout value required"))?
-        .parse()?;
-    anyhow::ensure!(
-        (1..=3600).contains(&seconds),
-        "timeout must be 1..3600 seconds"
-    );
-    Ok(Duration::from_secs(seconds))
-}
-
 async fn submit_cli_command(
     client: &polar_paykit::client::Client,
-    args: &[String],
-    selected_step: Option<(&String, &String)>,
+    command: &polar_paykit::model::Command,
+    wait: bool,
 ) -> anyhow::Result<()> {
-    let offset = usize::from(selected_step.is_some());
-    let command_name = if let Some((scenario_id, step_id)) = selected_step {
-        polar_paykit::interfaces::scenario(scenario_id)?
-            .steps
-            .iter()
-            .find(|step| step.id == step_id)
-            .ok_or_else(|| anyhow::anyhow!("scenario step not found"))?
-            .command
-            .to_owned()
-    } else {
-        args.get(1)
-            .ok_or_else(|| anyhow::anyhow!("command name required"))?
-            .clone()
-    };
-    let input_index = 2 + offset;
-    let command_id_index = input_index + 1;
-    let command = polar_paykit::model::Command {
-        command_id: args
-            .get(command_id_index)
-            .filter(|value| !value.starts_with("--"))
-            .map(|value| value.parse())
-            .transpose()?
-            .unwrap_or_else(uuid::Uuid::new_v4),
-        command: command_name,
-        input: serde_json::from_str(
-            args.get(input_index)
-                .ok_or_else(|| anyhow::anyhow!("JSON input required"))?,
-        )?,
-    };
-    if let Some((scenario_id, step_id)) = selected_step {
-        polar_paykit::interfaces::validate_scenario_step(scenario_id, step_id, &command)?;
-    }
-    let id = client.submit(&command).await?;
-    if args.iter().any(|value| value == "--no-wait") {
+    let id = client.submit(command).await?;
+    if !wait {
         return print_json(&serde_json::json!({"operationId": id}));
     }
     eprintln!("Accepted operation {id}");
-    wait_and_print(client, id, timeout_seconds(args)?).await
+    wait_and_print(client, id, Duration::from_secs(120)).await
 }
 
 async fn wait_and_print(
@@ -466,7 +526,115 @@ fn ensure_loopback_url(base: &str) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::private_receiver_error_enabled;
+    use super::{parse_cli_action, private_receiver_error_enabled, CliAction};
+
+    fn cli_args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn parser_accepts_documented_read_shapes() {
+        for action in ["state", "health", "catalog", "diagnostics"] {
+            assert!(matches!(
+                parse_cli_action(&cli_args(&[action])).unwrap(),
+                CliAction::Get(_)
+            ));
+        }
+        assert!(matches!(
+            parse_cli_action(&cli_args(&["scenario", "funded-workspace"])).unwrap(),
+            CliAction::Scenario(_)
+        ));
+
+        let id = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            parse_cli_action(&cli_args(&["operation", &id])).unwrap(),
+            CliAction::Operation(_)
+        ));
+        assert!(matches!(
+            parse_cli_action(&cli_args(&["wait", &id])).unwrap(),
+            CliAction::Wait { timeout, .. } if timeout.as_secs() == 120
+        ));
+        assert!(matches!(
+            parse_cli_action(&cli_args(&["wait", &id, "--timeout-seconds", "9"])).unwrap(),
+            CliAction::Wait { timeout, .. } if timeout.as_secs() == 9
+        ));
+    }
+
+    #[test]
+    fn parser_accepts_documented_command_shapes() {
+        let id = uuid::Uuid::new_v4().to_string();
+        for suffix in [vec![], vec!["--no-wait"], vec![&id], vec![&id, "--no-wait"]] {
+            let mut args = vec!["command", "preset.create", "{}"];
+            args.extend(suffix.iter().copied());
+            assert!(matches!(
+                parse_cli_action(&cli_args(&args)).unwrap(),
+                CliAction::Submit { .. }
+            ));
+
+            let mut scenario_args =
+                vec!["scenario-step", "funded-workspace", "create-preset", "{}"];
+            scenario_args.extend(suffix);
+            assert!(matches!(
+                parse_cli_action(&cli_args(&scenario_args)).unwrap(),
+                CliAction::Submit { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn parser_rejects_unknown_duplicate_and_surplus_arguments() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let malformed = [
+            vec!["state", "extra"],
+            vec!["scenario", "funded-workspace", "extra"],
+            vec!["operation", &id, "extra"],
+            vec!["wait", &id, "--timeout-seconds", "5", "extra"],
+            vec![
+                "wait",
+                &id,
+                "--timeout-seconds",
+                "5",
+                "--timeout-seconds",
+                "6",
+            ],
+            vec!["command", "preset.create", "{}", "--no-wiat"],
+            vec!["command", "preset.create", "{}", "--no-wait", "--no-wait"],
+            vec!["command", "preset.create", "{}", &id, "extra"],
+        ];
+        for args in malformed {
+            assert!(
+                parse_cli_action(&cli_args(&args)).is_err(),
+                "accepted {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_missing_values_and_flags_in_positional_slots() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let malformed = [
+            vec!["scenario"],
+            vec!["operation"],
+            vec!["wait", &id, "--timeout-seconds"],
+            vec!["wait", &id, "--no-wait"],
+            vec!["command", "--no-wait", "{}"],
+            vec!["command", "preset.create", "--no-wait"],
+            vec!["scenario-step", "--no-wait", "create-preset", "{}"],
+            vec!["scenario-step", "funded-workspace", "--no-wait", "{}"],
+            vec![
+                "scenario-step",
+                "funded-workspace",
+                "create-preset",
+                "--no-wait",
+            ],
+        ];
+        for args in malformed {
+            assert!(
+                parse_cli_action(&cli_args(&args)).is_err(),
+                "accepted {args:?}"
+            );
+        }
+    }
 
     #[cfg(unix)]
     #[test]

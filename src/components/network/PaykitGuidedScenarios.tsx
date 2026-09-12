@@ -28,6 +28,11 @@ export interface PaykitGuidedScenariosProps {
   selectedPeer?: PaykitGuidePeerFocus;
   acknowledgedStepIds?: string[];
   pendingOperationId?: string;
+  pendingOperationContext?: {
+    scenarioId: string;
+    stepId: string;
+    receiverId?: string;
+  };
   onNavigate: (scenarioId: string, stepId: string) => void;
   onSelectReceiver: (receiverId: string) => void;
   onSelectPeer: (peer: PaykitGuidePeerFocus) => void;
@@ -48,6 +53,7 @@ const PaykitGuidedScenarios: React.FC<PaykitGuidedScenariosProps> = props => {
     selectedPeer,
     acknowledgedStepIds = [],
     pendingOperationId,
+    pendingOperationContext,
     onNavigate,
     onSelectReceiver,
     onSelectPeer,
@@ -84,17 +90,22 @@ const PaykitGuidedScenarios: React.FC<PaykitGuidedScenariosProps> = props => {
     onNavigate(scenario.id, scenario.steps[index].id);
   };
   const operation = useMemo(() => {
-    if (!step) return undefined;
-    if (pendingOperationId) {
-      const pending = diagnostics?.operations.find(
-        item => item.id === pendingOperationId && item.command === step.command,
-      );
-      if (pending) return pending;
-    }
-    return [...(diagnostics?.operations || [])]
-      .reverse()
-      .find(item => item.command === step.command);
-  }, [diagnostics, pendingOperationId, step]);
+    const explicitlyBound =
+      pendingOperationContext?.scenarioId === scenario.id &&
+      pendingOperationContext.stepId === step.id &&
+      pendingOperationContext.receiverId === selectedReceiverId;
+    if (!pendingOperationId || !explicitlyBound) return undefined;
+    return diagnostics?.operations.find(
+      item => item.id === pendingOperationId && item.command === step.command,
+    );
+  }, [
+    diagnostics,
+    pendingOperationContext,
+    pendingOperationId,
+    scenario,
+    selectedReceiverId,
+    step,
+  ]);
   const needsReceiver = step?.requiredParameters.includes('receiverId');
   const needsPeer = step?.requiredParameters.some(parameter =>
     peerParameters.includes(parameter),
