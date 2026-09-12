@@ -168,10 +168,7 @@ impl Runtime {
                 .into_iter()
                 .map(paykit_lib::PaymentEndpointIdentifier::new)
                 .collect::<Result<_, _>>()?,
-            metadata: json!({"description":i.description,"polarPaykitEndpoints":&bindings})
-                .as_object()
-                .expect("object literal")
-                .clone(),
+            metadata: request_metadata(&i.description, &bindings),
         };
         ensure_request_fits(&terms)?;
         for binding in &bindings {
@@ -543,6 +540,7 @@ impl Runtime {
             let recurrence = recurrence_result.ok().flatten();
             if let Some(terms) = record.terms.clone() {
                 let endpoint_bindings = bindings(&terms).unwrap_or_default();
+                let description = request_description(&terms).unwrap_or_default();
                 requests.push(RequestView {
                     recurrence: recurrence.clone(),
                     id: record.payment_request_id.clone(),
@@ -560,12 +558,7 @@ impl Runtime {
                     }
                     .into(),
                     amount_sats: terms.amount.value,
-                    description: terms
-                        .metadata
-                        .get("description")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .into(),
+                    description,
                     payment_reference: terms.payment_reference,
                     proposal_expires_at: terms.proposal_expires_at,
                     endpoint_bindings,
@@ -967,11 +960,15 @@ fn ensure_request_fits(terms: &paykit_lib::PaymentRequestTerms) -> anyhow::Resul
 pub(super) fn bindings(
     terms: &paykit_sdk::PaymentRequestTermsRecord,
 ) -> anyhow::Result<Vec<EndpointBinding>> {
-    let value = terms
-        .metadata
-        .get("polarPaykitEndpoints")
-        .ok_or_else(|| anyhow::anyhow!("request endpoint bindings missing"))?;
-    let bindings: Vec<EndpointBinding> = serde_json::from_value(value.clone())?;
+    let bindings = if let Some(value) = terms.metadata.get("polarPaykit") {
+        compact_request_metadata(value)?.bindings
+    } else {
+        let value = terms
+            .metadata
+            .get("polarPaykitEndpoints")
+            .ok_or_else(|| anyhow::anyhow!("request endpoint bindings missing"))?;
+        serde_json::from_value(value.clone())?
+    };
     anyhow::ensure!(
         !bindings.is_empty() && bindings.len() <= 256,
         "invalid request endpoint bindings"
@@ -1003,6 +1000,98 @@ pub(super) fn bindings(
     Ok(bindings)
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CompactRequestMetadata {
+    v: u8,
+    d: String,
+    e: Vec<(String, String, String, String)>,
+}
+
+struct DecodedRequestMetadata {
+    description: String,
+    bindings: Vec<EndpointBinding>,
+}
+
+fn request_metadata(
+    description: &str,
+    bindings: &[EndpointBinding],
+) -> serde_json::Map<String, Value> {
+    let endpoints: Vec<_> = bindings
+        .iter()
+        .map(|binding| {
+            json!([
+                compact_source(&binding.source),
+                compact_method(&binding.method),
+                binding.endpoint,
+                binding.reservation_id
+            ])
+        })
+        .collect();
+    json!({"polarPaykit":{"v":1,"d":description,"e":endpoints}})
+        .as_object()
+        .expect("object literal")
+        .clone()
+}
+
+fn compact_source(source: &str) -> &str {
+    match source {
+        "public" => "p",
+        "private" => "r",
+        other => other,
+    }
+}
+
+fn compact_method(method: &str) -> &str {
+    match method {
+        payment_model::ONCHAIN => "o",
+        payment_model::BOLT11 => "l",
+        other => other,
+    }
+}
+
+fn compact_request_metadata(value: &Value) -> anyhow::Result<DecodedRequestMetadata> {
+    let compact: CompactRequestMetadata = serde_json::from_value(value.clone())?;
+    anyhow::ensure!(compact.v == 1, "unsupported request metadata version");
+    let bindings = compact
+        .e
+        .into_iter()
+        .map(
+            |(source, method, endpoint, reservation_id)| EndpointBinding {
+                source: match source.as_str() {
+                    "p" => "public".into(),
+                    "r" => "private".into(),
+                    _ => source,
+                },
+                method: match method.as_str() {
+                    "o" => payment_model::ONCHAIN.into(),
+                    "l" => payment_model::BOLT11.into(),
+                    _ => method,
+                },
+                endpoint,
+                reservation_id,
+            },
+        )
+        .collect();
+    Ok(DecodedRequestMetadata {
+        description: compact.d,
+        bindings,
+    })
+}
+
+fn request_description(terms: &paykit_sdk::PaymentRequestTermsRecord) -> Option<String> {
+    if let Some(value) = terms.metadata.get("polarPaykit") {
+        return compact_request_metadata(value)
+            .ok()
+            .map(|metadata| metadata.description);
+    }
+    terms
+        .metadata
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod binding_tests {
     use super::*;
@@ -1022,6 +1111,22 @@ mod binding_tests {
             "terms": terms(),
             "payment_proofs": []
         })).unwrap()
+    }
+    fn dual_bindings() -> Vec<EndpointBinding> {
+        vec![
+            EndpointBinding {
+                source: "public".into(),
+                method: ONCHAIN.into(),
+                endpoint: "bcrt1q2nfxmhd4n3c8834pj72xagvyr9gl57n5r94fsl".into(),
+                reservation_id: Uuid::new_v4().to_string(),
+            },
+            EndpointBinding {
+                source: "public".into(),
+                method: crate::payment_model::BOLT11.into(),
+                endpoint: format!("lnbcrt10u1{}", "q".repeat(289)),
+                reservation_id: Uuid::new_v4().to_string(),
+            },
+        ]
     }
     #[test]
     fn rejected_proof_preflight_survives_reopen_without_poisoning_corrected_proof() {
@@ -1735,6 +1840,57 @@ mod binding_tests {
         injected.metadata.get_mut("polarPaykitEndpoints").unwrap()[0]["walletSecret"] =
             json!("injected");
         assert!(bindings(&injected).is_err());
+    }
+    #[test]
+    fn compact_dual_method_metadata_fits_and_round_trips() {
+        let expected = dual_bindings();
+        let terms = paykit_lib::PaymentRequestTerms {
+            amount: paykit_lib::PaymentAmount::new("1000", "sat").unwrap(),
+            payment_reference: paykit_lib::PaymentReference::new(format!(
+                "polar:{}",
+                Uuid::new_v4()
+            ))
+            .unwrap(),
+            proposal_expires_at: Some("2026-09-12T17:00:00Z".into()),
+            recurrence: None,
+            accepted_payment_endpoint_identifiers: vec![
+                paykit_lib::PaymentEndpointIdentifier::new(ONCHAIN).unwrap(),
+                paykit_lib::PaymentEndpointIdentifier::new(crate::payment_model::BOLT11).unwrap(),
+            ],
+            metadata: request_metadata("Native dual-rail payment", &expected),
+        };
+        let event = paykit_lib::PaymentRequestEvent::Request(paykit_lib::PaymentRequest::new(
+            paykit_lib::EventId::new_v4(),
+            paykit_lib::PaymentRequestId::new_v4(),
+            terms.clone(),
+        ));
+        let serialized = paykit_lib::serialize_payment_request_event(&event).unwrap();
+
+        assert!(serialized.len() <= paykit_lib::pubky_noise::snow_crypto::PUBKY_NOISE_MSG_LEN);
+        ensure_request_fits(&terms).unwrap();
+        let record = paykit_sdk::PaymentRequestTermsRecord::from(&terms);
+        assert_eq!(
+            request_description(&record).as_deref(),
+            Some("Native dual-rail payment")
+        );
+        assert!(bindings(&record).unwrap() == expected);
+    }
+
+    #[test]
+    fn compact_metadata_rejects_malformed_and_unknown_versions() {
+        let mut record = terms();
+        record.metadata = json!({"polarPaykit":{"v":2,"d":"description","e":[]}})
+            .as_object()
+            .unwrap()
+            .clone();
+        assert!(bindings(&record).is_err());
+
+        record.metadata =
+            json!({"polarPaykit":{"v":1,"d":"description","e":[["p","o","endpoint"]]}})
+                .as_object()
+                .unwrap()
+                .clone();
+        assert!(bindings(&record).is_err());
     }
     #[test]
     fn durable_claims_do_not_become_reusable_when_a_request_expires() {

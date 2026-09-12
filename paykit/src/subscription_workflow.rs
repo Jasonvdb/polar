@@ -174,14 +174,13 @@ impl Runtime {
         self.ensure_request_send_ready(&r).await?;
         let terms = r.terms.as_ref().expect("recurring terms");
         let enabled = self.payments.snapshot()?.methods.enabled_methods;
+        let methods =
+            accepted_enabled_methods(&enabled, &terms.accepted_payment_endpoint_identifiers);
         anyhow::ensure!(
-            !enabled.is_empty()
-                && enabled
-                    .iter()
-                    .all(|m| terms.accepted_payment_endpoint_identifiers.contains(m)),
+            !methods.is_empty(),
             "Configure receiving methods accepted by this subscription."
         );
-        let predicted: Vec<_> = enabled
+        let predicted: Vec<_> = methods
             .iter()
             .map(|method| EndpointCommitment {
                 source: i.source.clone(),
@@ -231,11 +230,12 @@ impl Runtime {
                 r.counterparty_receiver_path.to_string(),
             )
         });
-        let ids = self.payments.begin_list(
+        let ids = self.payments.begin_list_for_methods(
             c.command_id,
             peer,
             terms.amount.value.clone(),
             i.expiry_seconds,
+            &methods,
         )?;
         for id in &ids {
             self.payments.issue(id, false).await?;
@@ -649,6 +649,14 @@ fn offer_terms(
         accepted_payment_endpoint_identifiers: commitments.iter().map(|c| paykit_lib::PaymentEndpointIdentifier::new(&c.method)).collect::<Result<_,_>>()?,
         metadata: json!({"polarPaykitPeriodVersion":2,"parentRequestId":parent.payment_request_id,"periodIndex":index,"endpointCommitments":commitments}).as_object().expect("object").clone(),
     })
+}
+
+fn accepted_enabled_methods(enabled: &[String], accepted: &[String]) -> Vec<String> {
+    enabled
+        .iter()
+        .filter(|method| accepted.contains(method))
+        .cloned()
+        .collect()
 }
 fn serialized_offer(terms: &paykit_lib::PaymentRequestTerms) -> anyhow::Result<String> {
     // SDK-generated event/request UUIDs always have this same encoded length.
@@ -1198,5 +1206,19 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+    #[test]
+    fn period_methods_intersect_parent_terms_in_configured_order() {
+        let enabled = vec![
+            crate::payment_model::BOLT11.into(),
+            crate::payment_model::ONCHAIN.into(),
+        ];
+        let onchain_only = vec![crate::payment_model::ONCHAIN.into()];
+
+        assert_eq!(
+            accepted_enabled_methods(&enabled, &onchain_only),
+            onchain_only
+        );
+        assert!(accepted_enabled_methods(&enabled, &["unsupported".into()]).is_empty());
     }
 }
