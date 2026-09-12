@@ -12,6 +12,7 @@ license = "MIT"
 
 [dependencies]
 anyhow = "1"
+argon2 = "0.5"
 base64 = "0.22"
 bitcoin = "0.32"
 lightning-invoice = { version = "0.34", features = ["std"] }

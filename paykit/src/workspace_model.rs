@@ -4,6 +4,8 @@ use uuid::Uuid;
 #[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Workspace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery: Option<crate::model::Recovery>,
     #[serde(default)]
     pub application_clock: Option<crate::clock::ClockView>,
     #[serde(default)]
@@ -52,6 +54,8 @@ pub struct LinkView {
     pub generation: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub handshake_role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_preparation: Option<RecoveryPreparationView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_sync_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -64,6 +68,17 @@ pub struct LinkView {
     pub last_sent_message_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryPreparationView {
+    pub local_marker_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_marker_created_at: Option<String>,
+    pub remote_marker_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_marker_observed_at: Option<String>,
+    pub ready_for_handshake: bool,
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

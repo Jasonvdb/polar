@@ -26,6 +26,16 @@ const stripNode = (payload: any) => {
   }
   return payload;
 };
+const redactSensitive = (value: any): any => {
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [
+      key,
+      /^(passphrase|password)$/i.test(key) ? '[REDACTED]' : redactSensitive(item),
+    ]),
+  );
+};
 
 /**
  * A wrapper function to create an async function which sends messages over IPC and
@@ -54,7 +64,10 @@ export const createIpcSender = (serviceName: string, prefix: string) => {
           resolve(res);
         }
       });
-      debug(`${serviceName}: [request] "${reqChan}"`, toJSON(stripNode(uniqPayload)));
+      debug(
+        `${serviceName}: [request] "${reqChan}"`,
+        toJSON(redactSensitive(stripNode(uniqPayload))),
+      );
       ipcRenderer.send(reqChan, uniqPayload);
     });
   };

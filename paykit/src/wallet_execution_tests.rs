@@ -39,6 +39,48 @@ fn entry(owner: &str) -> Execution {
     e.authorized = true;
     e
 }
+
+#[test]
+fn backup_merge_is_idempotent_and_preserves_live_terminal_evidence() {
+    let mut execution = entry("paykit-alice");
+    execution.view.status = "succeeded".into();
+    execution.view.txid = Some("11".repeat(32));
+    let live = SpendState {
+        executions: vec![execution.clone()],
+        settlements: BTreeMap::from([("btc:proof:0".into(), "binding".into())]),
+    };
+
+    let (merged, report) = merge_backup(
+        &live,
+        vec![execution],
+        BTreeMap::from([("btc:proof:0".into(), "binding".into())]),
+    )
+    .unwrap();
+
+    assert_eq!(merged.executions.len(), 1);
+    assert_eq!(merged.settlements, live.settlements);
+    assert_eq!(report.imported, 0);
+    assert_eq!(report.retained_live, 1);
+    assert_eq!(report.terminal, 1);
+}
+
+#[test]
+fn backup_merge_rejects_same_txid_with_conflicting_outcome() {
+    let mut live_execution = entry("paykit-alice");
+    live_execution.view.status = "succeeded".into();
+    live_execution.view.txid = Some("22".repeat(32));
+    let live = SpendState {
+        executions: vec![live_execution.clone()],
+        settlements: BTreeMap::new(),
+    };
+    let mut archived = live_execution;
+    archived.view.id = Uuid::new_v4().to_string();
+    archived.view.status = "uncertain".into();
+
+    assert!(merge_backup(&live, vec![archived], BTreeMap::new()).is_err());
+    assert_eq!(live.executions.len(), 1);
+    assert_eq!(live.executions[0].view.status, "succeeded");
+}
 fn vault(path: &std::path::Path) -> Vault {
     Vault::new(path.into(), [9; 32], "execution-tests".into()).unwrap()
 }

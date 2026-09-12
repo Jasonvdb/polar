@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { randomUUID, createHash } = require('node:crypto');
-const { storageFaults, executionCommitFaults, visibleStorageFaults, readGuestLedger, readGuestExecutionLedger, gateControls, atomicJson, images } = require('./paykit-wallet-fixture');
+const { storageFaults, executionCommitFaults, visibleStorageFaults, readGuestLedger, readGuestExecutionLedger, gateControls, atomicJson, images, receiverStateLoss } = require('./paykit-wallet-fixture');
 
 function temporary(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-wallet-guard-'));
@@ -13,6 +13,30 @@ function temporary(t) {
 }
 test('wallet images are immutable full digests', () => {
   for (const image of Object.values(images)) assert.match(image, /@sha256:[a-f0-9]{64}$/);
+});
+
+test('two receiver losses retain distinct rollback copies', t => {
+  const data = fs.mkdtempSync(path.join(os.tmpdir(), 'paykit-double-loss-')); t.after(() => fs.rmSync(data, { recursive: true, force: true }));
+  const receiverId = '123e4567-e89b-42d3-a456-426614174000'; const stateRoot = path.join(data, 'state');
+  const source = path.join(stateRoot, 'receivers', receiverId); fs.mkdirSync(source, { recursive: true });
+  const events = [];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const complete = receiverStateLoss({ stateRoot, data, receiverId, recordStorage: value => events.push(value) });
+    fs.mkdirSync(source); complete();
+  }
+  const rollbacks = fs.readdirSync(path.join(data, 'backup-fixture-rollbacks'));
+  assert.equal(rollbacks.length, 2); assert.equal(new Set(rollbacks).size, 2);
+  assert.deepEqual(events.map(value => value.active), [true, false, true, false]);
+});
+test('receiver state loss accepts canonical UUIDv5 IDs and rejects malformed paths', t => {
+  const data = temporary(t); const stateRoot = path.join(data, 'state');
+  const receiverId = '0d05e0e2-35d6-52ec-bc56-538421b258d3';
+  const source = path.join(stateRoot, 'receivers', receiverId); fs.mkdirSync(source, { recursive: true });
+  const complete = receiverStateLoss({ stateRoot, data, receiverId, recordStorage: () => {} });
+  fs.mkdirSync(source); complete();
+  for (const malformed of ['not-a-uuid', '../receivers/123e4567-e89b-42d3-a456-426614174000', '123e4567-e89b-62d3-a456-426614174000']) {
+    assert.throws(() => receiverStateLoss({ stateRoot, data, receiverId: malformed, recordStorage: () => {} }));
+  }
 });
 test('exact payment commit failure leaves SDK and original ciphertext untouched and restores in finally', t => {
   const root = temporary(t); const receiverId = randomUUID();

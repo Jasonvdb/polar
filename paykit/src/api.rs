@@ -4,14 +4,14 @@ use crate::{
     repository::Repository,
 };
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Deserialize;
@@ -37,11 +37,128 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/commands", post(command))
         .route("/v1/operations/{id}", get(operation))
         .route("/v1/events", get(events))
+        .route("/v1/transfers", post(create_transfer))
+        .layer(DefaultBodyLimit::max(
+            crate::backup::MAX_ARCHIVE_BYTES + 2048,
+        ))
+        .route("/v1/transfers/{id}/archive", get(download_transfer))
+        .route("/v1/transfers/{id}", delete(cancel_transfer))
         .layer(middleware::from_fn_with_state(state.clone(), authenticate));
     Router::new()
         .route("/health", get(health))
         .merge(protected)
         .with_state(state)
+}
+
+async fn create_transfer(State(state): State<ApiState>, request: Request) -> Response {
+    if request
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        != Some("application/octet-stream")
+    {
+        return transfer_failure(PublicError::new(
+            "transfer_invalid",
+            "Expected an application/octet-stream transfer.",
+        ));
+    }
+    let bearer = Zeroizing::new(bearer(request.headers()).to_owned());
+    let owned_frame = match collect_transfer_body(request.into_body()).await {
+        Ok(frame) => frame,
+        Err(error) => return transfer_failure(error),
+    };
+    match crate::backup::TransferUpload::decode(&owned_frame)
+        .and_then(|upload| state.repository.transfers.create(upload, &bearer))
+    {
+        Ok(created) => (StatusCode::CREATED, Json(created)).into_response(),
+        Err(error) => transfer_failure(error),
+    }
+}
+
+async fn collect_transfer_body(
+    mut body: axum::body::Body,
+) -> Result<Zeroizing<Vec<u8>>, PublicError> {
+    use axum::body::HttpBody;
+    let mut owned = Zeroizing::new(Vec::new());
+    loop {
+        let frame =
+            std::future::poll_fn(|context| std::pin::Pin::new(&mut body).poll_frame(context)).await;
+        let Some(frame) = frame else { break };
+        let frame = frame.map_err(|_| {
+            PublicError::new("backup_too_large", "The backup exceeds the size limit.")
+        })?;
+        let Ok(chunk) = frame.into_data() else {
+            continue;
+        };
+        if owned.len().saturating_add(chunk.len()) > crate::backup::MAX_ARCHIVE_BYTES + 2048 {
+            return Err(PublicError::new(
+                "backup_too_large",
+                "The backup exceeds the size limit.",
+            ));
+        }
+        owned.extend_from_slice(&chunk);
+        if let Ok(mut uniquely_owned) = chunk.try_into_mut() {
+            uniquely_owned.fill(0);
+        }
+    }
+    Ok(owned)
+}
+
+async fn download_transfer(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(id) = id.parse::<Uuid>() else {
+        return transfer_failure(PublicError::new(
+            "transfer_invalid",
+            "The transfer ID is invalid.",
+        ));
+    };
+    match state.repository.transfers.download(id, bearer(&headers)) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes.to_vec(),
+        )
+            .into_response(),
+        Err(error) => transfer_failure(error),
+    }
+}
+
+async fn cancel_transfer(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let Ok(id) = id.parse::<Uuid>() else {
+        return transfer_failure(PublicError::new(
+            "transfer_invalid",
+            "The transfer ID is invalid.",
+        ));
+    };
+    match state.repository.transfers.cancel(id, bearer(&headers)) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => transfer_failure(error),
+    }
+}
+
+fn bearer(headers: &HeaderMap) -> &str {
+    headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("")
+}
+
+fn transfer_failure(error: PublicError) -> Response {
+    let status = match error.code.as_str() {
+        "transfer_expired" => StatusCode::NOT_FOUND,
+        "transfer_consumed" | "transfer_mismatch" | "transfer_capacity" => StatusCode::CONFLICT,
+        "backup_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    failure(status, error)
 }
 async fn authenticate(
     State(state): State<ApiState>,
@@ -257,6 +374,36 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("secret-do-not-echo"));
+    }
+    #[tokio::test]
+    async fn transfer_upload_is_authenticated_and_returns_only_public_handle_metadata() {
+        let (_dir, app, _, _shutdown) = fixture();
+        let receiver = Uuid::new_v4();
+        let passphrase = b"correct horse battery staple";
+        let mut frame = Vec::new();
+        frame.extend_from_slice(b"PKTR");
+        frame.extend_from_slice(&[1, 1]);
+        frame.extend_from_slice(receiver.as_bytes());
+        frame.extend_from_slice(&(passphrase.len() as u16).to_be_bytes());
+        frame.extend_from_slice(&0u32.to_be_bytes());
+        frame.extend_from_slice(passphrase);
+        let response = app
+            .oneshot(
+                Request::post("/v1/transfers")
+                    .header("authorization", format!("Bearer {}", "a".repeat(64)))
+                    .header("content-type", "application/octet-stream")
+                    .body(Body::from(frame))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["purpose"], "export");
+        assert!(value["transferId"].as_str().is_some());
+        assert!(value["expiresAt"].as_str().is_some());
+        assert!(!String::from_utf8_lossy(&body).contains("correct horse"));
     }
     #[tokio::test]
     async fn state_summarizes_large_operations_while_detail_retains_the_result() {

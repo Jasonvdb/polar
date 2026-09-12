@@ -5,6 +5,7 @@ use paykit_sdk::Clock;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct State {
     controlled: Option<DateTime<Utc>>,
 }

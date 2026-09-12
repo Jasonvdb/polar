@@ -40,10 +40,13 @@ jobs:
         run: docker build -t polar-paykit/service:pr2 -f paykit/Dockerfile paykit
       - name: Build non-shipping receipt fixture
         run: docker build --target receipt-fixture -t polar-paykit/receipt-fixture:ci -f paykit/Dockerfile paykit
+      - name: Build non-shipping backup fixture
+        run: docker build --target backup-fixture -t polar-paykit/backup-fixture:ci -f paykit/Dockerfile paykit
       - name: Real Pubky and PostgreSQL scenarios
         id: scenarios
         env:
           PAYKIT_RECEIPT_FIXTURE_IMAGE: polar-paykit/receipt-fixture:ci
+          PAYKIT_BACKUP_FIXTURE_IMAGE: polar-paykit/backup-fixture:ci
         run: node scripts/paykit-ci.js
       - name: Require complete scenario report
         env:

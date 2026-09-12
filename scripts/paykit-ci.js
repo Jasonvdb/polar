@@ -9,8 +9,9 @@ const { execFileSync, spawnSync } = require('child_process');
 const { run } = require('./paykit-scenarios');
 const { createWalletFixture } = require('./paykit-wallet-fixture');
 const { createReceiptFixture, validateReceiptEvidence } = require('./paykit-receipt-fixture');
+const { createBackupFixture } = require('./paykit-backup-fixture');
 const { sleep, serviceBase, requestJson, runCli } = require('./paykit-harness');
-const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, ...require('./paykit-recurring-scenarios').stages, 'complete'];
+const requiredStages = ['readiness', 'preset', 'deduplication', 'editable-identities', 'receiver-isolation', 'grant-validation', 'environment-restart', 'receiver-restart', 'database-outage', 'database-recovery', ...require('./paykit-workspace-scenarios').stages, ...require('./paykit-payment-scenarios').stages, ...require('./paykit-request-scenarios').stages, ...require('./paykit-backup-scenarios').stages, ...require('./paykit-receipt-scenarios').stages, ...require('./paykit-recurring-scenarios').stages, 'complete'];
 
 function validateReport(root) {
   const report = JSON.parse(fs.readFileSync(path.join(root, 'report.json'), 'utf8'));
@@ -49,12 +50,13 @@ function validateReport(root) {
       const completed = wallets.gateEvents.find(event => event.channel === channel && event.event === 'upstream.completed' && event.successfulExecution && wallets.gateEvents.some(drop => drop.event === 'response.dropped' && drop.channel === channel && drop.id === event.id && drop.nonce === event.nonce));
       assert(completed?.nonce, 'Missing lost successful execution response');
     }
-    for (const ledger of ['payments', 'workspace', 'requests', 'executions']) {
-      assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active && event.boundary === (ledger === 'executions' ? 'executions.cbor commit temp creation' : `${ledger}.cbor atomic rename`)), `Missing ${ledger} commit fault evidence`);
-    }
+    const atomicBoundaries = new Set(['payments.cbor atomic rename', 'workspace.cbor atomic rename', 'requests.cbor atomic rename', 'executions.cbor commit temp creation']);
+    for (const boundary of atomicBoundaries) assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active && event.boundary === boundary), `Missing ${boundary} fault evidence`);
     const finalFaults = new Map(wallets.storageFaults.map(event => [`${event.receiverId}:${event.boundary}`, event.active]));
     assert([...finalFaults.values()].every(active => active === false));
-    for (const fault of wallets.storageFaults.filter(event => event.phase === 'host' && event.active)) {
+    const activeHostFaults = wallets.storageFaults.filter(event => event.phase === 'host' && event.active);
+    assert(activeHostFaults.every(event => atomicBoundaries.has(event.boundary) || event.boundary === 'receiver backup local loss'), 'Unknown host storage fault boundary');
+    for (const fault of activeHostFaults.filter(event => atomicBoundaries.has(event.boundary))) {
       assert(fault.faultId);
       const events = wallets.storageFaults.filter(event => event.faultId === fault.faultId && event.receiverId === fault.receiverId);
       const execution = fault.boundary === 'executions.cbor commit temp creation';
@@ -62,7 +64,22 @@ function validateReport(root) {
       const restored = events.findIndex(event => event.phase === 'guest' && !event.active && ['originalFile', 'absent'].includes(event.observed) && (!execution || event.uid > 0 && event.writable === true));
       assert(blocked >= 0 && restored > blocked, 'Missing confirmed guest ledger boundaries');
     }
-    assert(wallets.storageFaults.some(event => event.phase === 'host' && event.active));
+    const pendingLocalLosses = new Set(); let completedLocalLosses = 0;
+    for (const event of wallets.storageFaults.filter(value => value.boundary === 'receiver backup local loss')) {
+      assert.equal(event.phase, 'host', 'Receiver backup local loss must be host evidence');
+      assert.equal(typeof event.receiverId, 'string', 'Receiver backup local loss requires a receiver ID');
+      assert(event.receiverId.trim(), 'Receiver backup local loss requires a receiver ID');
+      assert.equal(typeof event.active, 'boolean', 'Receiver backup local loss requires boolean state');
+      if (event.active) {
+        assert(!pendingLocalLosses.has(event.receiverId), 'Receiver backup local losses cannot overlap');
+        pendingLocalLosses.add(event.receiverId);
+      } else {
+        assert(pendingLocalLosses.delete(event.receiverId), 'Receiver backup local loss restoration has no matching start');
+        completedLocalLosses += 1;
+      }
+    }
+    assert(completedLocalLosses > 0, 'Missing receiver backup local loss evidence');
+    assert.equal(pendingLocalLosses.size, 0, 'Receiver backup local loss was not restored');
     assert.deepEqual(wallets.coreLifecycle.map(e => e.action), ['stopIntent','stopped','startIntent','started','stopIntent','stopped','startIntent','started']);
     for (let cycle = 0; cycle < 2; cycle++) {
       const events = wallets.coreLifecycle.slice(cycle * 4, cycle * 4 + 4);
@@ -206,6 +223,12 @@ function start() {
       '-e', `PAYKIT_PRIVATE_RECEIVER_DIAGNOSTICS=${PRIVATE_RECEIVER_DIAGNOSTIC_NAME}`,
       '-e', 'PAYKIT_TOKEN_FILE=/run/paykit/api-token', '-e', 'PAYKIT_POSTGRES_PASSWORD_FILE=/run/paykit/postgres-password', '-e', 'PAYKIT_POSTGRES_HOST=paykit-postgres', '-e', 'PAYKIT_WALLET_CONFIG_FILE=/run/paykit/wallet-config.json', image).trim();
     entry.service = service; recordContainer(service);
+    const backupFixture = createBackupFixture({ data, secrets, environmentId, runId, uid, docker, recordContainer,
+      serviceContainer: service, image: process.env.PAYKIT_BACKUP_FIXTURE_IMAGE,
+      recordEvidence: evidence => { entry.backupEvidence = evidence; record(); } });
+    walletFixture.pruneBackupExecutions = backupFixture.pruneExecutions;
+    walletFixture.markPeerUnsafe = backupFixture.markPeerUnsafe;
+    walletFixture.backupJournalProjection = backupFixture.journalProjection;
     const receiptFixture = createReceiptFixture({ data, secrets, environmentId, runId, uid, docker,
       recordContainer, serviceContainer: service, image: process.env.PAYKIT_RECEIPT_FIXTURE_IMAGE,
       recordEvidence: evidence => { entry.receiptEvidence = evidence; record(); } });

@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 const FILE: &str = "subscriptions.cbor";
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct SubscriptionState {
     preparations: BTreeMap<String, Preparation>,
     authorizations: BTreeMap<String, Authorization>,
@@ -338,7 +339,10 @@ impl Runtime {
         )
     }
     pub(super) async fn subscription_background(&mut self) -> anyhow::Result<()> {
-        if self.state.view.delivery_paused || !self.state.uncertain_peers.is_empty() {
+        if self.state.view.delivery_paused
+            || !self.recovery_allows_automation()
+            || !self.state.uncertain_peers.is_empty()
+        {
             return Ok(());
         }
         for r in self.sdk.payment_requests().await? {

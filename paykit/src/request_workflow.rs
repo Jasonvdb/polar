@@ -23,6 +23,21 @@ struct RequestState {
     transitions: BTreeMap<Uuid, String>,
     settlements: Vec<SettlementView>,
 }
+pub(crate) fn backup_request_state(
+    vault: &crate::storage::Vault,
+) -> anyhow::Result<ciborium::Value> {
+    let state: RequestState = vault.load("requests.cbor")?.unwrap_or_default();
+    Ok(ciborium::Value::serialized(&state)?)
+}
+
+pub(crate) fn restore_request_state(
+    vault: &crate::storage::Vault,
+    value: &ciborium::Value,
+) -> anyhow::Result<()> {
+    let state: RequestState = value.deserialized()?;
+    vault.save("requests.cbor", &state)
+}
+
 impl Runtime {
     fn request_state(&self) -> anyhow::Result<RequestState> {
         Ok(self.vault.load("requests.cbor")?.unwrap_or_default())
@@ -1739,5 +1754,77 @@ mod binding_tests {
             reopened.claims.get("reservation").map(String::as_str),
             Some("original-correlation")
         );
+    }
+
+    #[test]
+    fn backup_round_trip_preserves_verified_settlements_without_changing_wallet_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let receiver_vault =
+            crate::storage::Vault::new(dir.path().join("receiver"), [17; 32], "receiver".into())
+                .unwrap();
+        let wallet_vault = crate::storage::Vault::new(
+            dir.path().join("wallet"),
+            [17; 32],
+            "wallet-execution".into(),
+        )
+        .unwrap();
+        let settlement = |request_id: Uuid, proof_id: Uuid| SettlementView {
+            period_index: None,
+            billing_period: None,
+            proof_id: proof_id.to_string(),
+            request_id: request_id.to_string(),
+            status: "verified".into(),
+            required_confirmations: 1,
+            confirmations: 1,
+            verified_at: Some("2026-09-11T19:35:00Z".into()),
+            last_error: None,
+        };
+        let expected = RequestState {
+            settlements: vec![
+                settlement(Uuid::new_v4(), Uuid::new_v4()),
+                settlement(Uuid::new_v4(), Uuid::new_v4()),
+            ],
+            ..Default::default()
+        };
+        receiver_vault.save("requests.cbor", &expected).unwrap();
+        let wallet = SpendState {
+            settlements: BTreeMap::from([
+                ("btc:onchain-proof:0".into(), "onchain-binding".into()),
+                ("btc:lightning-proof".into(), "lightning-binding".into()),
+            ]),
+            ..Default::default()
+        };
+        wallet.save(&wallet_vault).unwrap();
+
+        let archived = backup_request_state(&receiver_vault).unwrap();
+        let restored_vault =
+            crate::storage::Vault::new(dir.path().join("restored"), [17; 32], "restored".into())
+                .unwrap();
+        restore_request_state(&restored_vault, &archived).unwrap();
+
+        let restored: RequestState = restored_vault.load("requests.cbor").unwrap().unwrap();
+        assert!(restored.settlements == expected.settlements);
+        assert!(restored
+            .settlements
+            .iter()
+            .all(|value| value.status == "verified" && value.verified_at.is_some()));
+        assert_eq!(
+            SpendState::open(&wallet_vault).unwrap().settlements,
+            wallet.settlements
+        );
+    }
+
+    #[test]
+    fn restore_request_state_rejects_malformed_archive_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let vault =
+            crate::storage::Vault::new(dir.path().into(), [17; 32], "receiver".into()).unwrap();
+        let malformed = ciborium::Value::Text("not request state".into());
+
+        assert!(restore_request_state(&vault, &malformed).is_err());
+        assert!(vault
+            .load::<RequestState>("requests.cbor")
+            .unwrap()
+            .is_none());
     }
 }

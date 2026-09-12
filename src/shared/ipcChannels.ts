@@ -4,6 +4,7 @@ export default {
   clearCache: 'clear-cache',
   http: 'http',
   paykit: 'paykit',
+  paykitTransfer: 'paykit-transfer',
   zip: 'zip',
   unzip: 'unzip',
   // MCP channels

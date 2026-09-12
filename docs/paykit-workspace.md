@@ -91,6 +91,13 @@ abandoned encrypted outbox for the selected peer. A cleanup or service failure
 keeps the peer blocked and records a failed operation. Initiating while the other
 receiver remains blocked can fail visibly and requires explicit recovery.
 
+For backup recovery, select the exact counterparty and choose **Prepare recovery**
+on the restored receiver, then on the healthy receiver, then once more on the
+restored receiver. The local and peer preparation indicators must both be ready
+on both sides before initiating and accepting the fresh link. Preparation does
+not start the handshake. Ordinary new links are available immediately and do not
+use this marker barrier.
+
 **Pause private delivery** persists the receiver-wide inbound/outbound pause.
 It retains links and queued messages; it does not pause link handshakes.
 **Sync private delivery** is unavailable while paused. Resume delivery to process

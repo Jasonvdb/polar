@@ -26,6 +26,16 @@ Electron provisions credentials outside network/export directories. No renderer-
 
 The service creates the database connection string internally for the embedded testnet and removes it before spawning receivers. API tokens, grants, owner keys, Noise keys and decrypted SDK snapshots are never public DTOs or log messages. The local testnet deliberately uses open signup and its documented deterministic test homeserver identity. It must stay in the isolated Docker environment.
 
+Receiver backup/recovery scenarios require the separately built non-shipping fixture in addition to the production service and receipt fixture:
+
+```sh
+docker build --target backup-fixture -t polar-paykit/backup-fixture:local -f paykit/Dockerfile paykit
+PAYKIT_BACKUP_FIXTURE_IMAGE=polar-paykit/backup-fixture:local \
+PAYKIT_RECEIPT_FIXTURE_IMAGE=polar-paykit/receipt-fixture:local node scripts/paykit-ci.js
+```
+
+The backup fixture is limited to the disposable runner's owned data root. It can remove exactly one named receiver's two test-created post-export execution records (one Core txid and one Lightning payment hash), or mark one existing linked checkpoint unsafe. The runner keeps exact rollback copies, rejects symlinks and foreign containers, and stops receiver children while changing the encrypted journal. Passwords and archive bytes remain in bounded in-memory HTTP bodies and never enter CLI arguments, environment variables, logs, or reports.
+
 ## Commands, queries and events
 
 `GET /health` returns `{apiVersion:1,ready}` with 200 or 503. Readiness covers startup/reconciliation and durable application storage; it is not a continuous PostgreSQL probe. Later service outages surface through failed backend operations and receiver errors. All `/v1/*` routes require `Authorization: Bearer TOKEN`.
@@ -91,18 +101,22 @@ Receiver processes now own a bounded stdin/stdout command channel. The superviso
 
 The v1 workspace commands are:
 
-| Commands                                                                                           | Input                                                      |
-| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| `link.initiate`, `link.accept`, `link.advance`, `link.block`, `link.unblock`, `link.sendEmptyList` | `{receiverId,peerPublicKey,peerReceiverPath}`              |
-| `delivery.pause`, `delivery.resume`, `delivery.sync`, `profile.delete`                             | `{receiverId}`                                             |
-| `profile.publish`                                                                                  | `{receiverId,displayName,about,avatarBase64?,avatarMime?}` |
-| `profile.fetch`, `contact.publish`, `contact.unpublish`                                            | `{receiverId,peerPublicKey,peerReceiverPath}`              |
-| `contact.save`                                                                                     | `{receiverId,peerPublicKey,label,receiverPaths}`           |
-| `contact.remove`, `contact.discover`                                                               | `{receiverId,peerPublicKey}`                               |
+| Commands                                                                                                                                               | Input                                                      |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| `link.prepareRecovery`, `link.retryRecoveryMarker`, `link.initiate`, `link.accept`, `link.advance`, `link.block`, `link.unblock`, `link.sendEmptyList` | `{receiverId,peerPublicKey,peerReceiverPath}`              |
+| `delivery.pause`, `delivery.resume`, `delivery.sync`, `profile.delete`                                                                                 | `{receiverId}`                                             |
+| `profile.publish`                                                                                                                                      | `{receiverId,displayName,about,avatarBase64?,avatarMime?}` |
+| `profile.fetch`, `contact.publish`, `contact.unpublish`                                                                                                | `{receiverId,peerPublicKey,peerReceiverPath}`              |
+| `contact.save`                                                                                                                                         | `{receiverId,peerPublicKey,label,receiverPaths}`           |
+| `contact.remove`, `contact.discover`                                                                                                                   | `{receiverId,peerPublicKey}`                               |
 
 Peer keys must be canonical Pubky z-base32 public keys. Receiver paths follow the pinned SDK grammar: a 1–64 character lowercase ASCII letter/digit/hyphen app segment other than `private`, followed by `/wallet` or `/server`. Discovery only lists real public receiver markers; it never saves contacts or accepts a link. Same-owner encrypted links are rejected.
 
 Initiation and acceptance are explicit. Background work advances existing linking peers and uses the SDK durable send queue and receive cursor for linked peers. It never automatically initiates a peer, unblocks a peer, or restarts a recovery-required handshake. Pause persists across restarts and prevents both outbound publication and inbound receipt; an empty list may still be queued while paused. `delivery.sync` fails visibly until resumed. Blocking clears the SDK link; unblocking requires explicit new linking.
+
+Backup recovery has a marker preparation barrier before its fresh handshake. Call `link.prepareRecovery` on the restored side, then the healthy counterparty, then the restored side again. Both exact peer projections must report `recoveryPreparation.readyForHandshake=true` before `link.initiate` and `link.accept`. Preparation observes and publishes current-episode markers without starting or advancing a handshake. Normal new links and explicit relinks without backup recovery evidence retain their existing flow. Public state exposes only marker presence, bounded timestamps, and readiness; SDK attempt identifiers and marker errors remain private.
+
+If healthy-side preparation reports a stale peer marker, pause private delivery on the healthy peer before rotating anything. Advance the recovering receiver's application clock beyond the old marker's whole second when the clock is fixed, then call `link.retryRecoveryMarker` on that recovering receiver with the same exact peer fields. The retry requires an existing local marker and either the application recovery target or SDK `recoveryRequired` state; it returns the same recovery-preparation result as `link.prepareRecovery` and never runs automatically. Prepare the healthy side and recovering side again, complete the fresh handshake, then explicitly resume healthy-side private delivery. A retry in the same whole second fails visibly, and backend errors remain visible to the caller.
 
 `link.sendEmptyList` demonstrates the actual encrypted Private Payment List protocol with zero payment endpoints. Its string `outboundMessageId` identifies durable queue acceptance. `lastSentMessageId` is projected only from an SDK record with successful sent status and timestamp; the recipient independently exposes `latestReceivedListId`. These identifiers are strings to preserve full u64 precision. This command only exchanges endpoint metadata; payment execution and funding use the separate commands below.
 

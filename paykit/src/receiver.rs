@@ -35,6 +35,9 @@ pub struct ReceiverSecrets {
     pub path: String,
     pub session: Option<String>,
 }
+pub(crate) fn noise_public_key(secret: [u8; 32]) -> String {
+    ReceiverNoiseSecretKey::new(secret).public_key().z32()
+}
 pub fn vault(config: &Config, id: Uuid) -> anyhow::Result<Vault> {
     Vault::new(
         config.data_dir.join("receivers").join(id.to_string()),
@@ -141,6 +144,89 @@ pub async fn shutdown() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     tokio::signal::ctrl_c().await?;
     Ok(())
+}
+
+pub(crate) async fn restore_sdk_state(
+    config: &Config,
+    storage: Arc<ReceiverStorage>,
+    credentials: Arc<Vault>,
+    secrets: ReceiverSecrets,
+    backup: paykit_sdk::SdkBackupState,
+) -> anyhow::Result<paykit_sdk::RestoreReport> {
+    let mut sdk_config = PaykitSdkConfig::new(PaykitReceiverPath::new(secrets.path.clone())?);
+    sdk_config.public_contact_sharing =
+        paykit_sdk::PublicContactSharingPolicy::ConfiguredPublicNamespace;
+    let exported_session = secrets
+        .session
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("backup session missing"))?;
+    let owner = PubkyLocalSecretKey::new(secrets.owner);
+    let noise = ReceiverNoiseSecretKey::new(secrets.noise);
+    let bootstrap = PubkySessionBootstrap::with_pubky(pubky_client()?, CLIENT_ID)?
+        .with_auth_relay("http://127.0.0.1:15412/inbox")?;
+    let session = bootstrap
+        .import_session(
+            exported_session,
+            Some(owner.clone()),
+            noise,
+            &sdk_config.required_session_capabilities(),
+        )
+        .await?;
+    anyhow::ensure!(
+        session.public_key == owner.public_key(),
+        "backup identity mismatch"
+    );
+    let provider = SessionProvider {
+        access: Arc::new(Mutex::new(Some(session.access))),
+        secrets: Arc::new(Mutex::new(secrets)),
+        vault: credentials.clone(),
+    };
+    let payments = crate::wallet_adapter::WalletAdapter::open(
+        credentials.clone(),
+        config.environment_id,
+        owner.public_key().to_string(),
+    )?;
+    let clock = storage.sdk_clock(payments.clock())?;
+    let sdk = PaykitSdk::try_with_clock(storage, provider, payments, sdk_config, clock)?;
+    Ok(sdk.restore_backup_state(backup).await?)
+}
+
+pub(crate) async fn validate_backup_session(secrets: &ReceiverSecrets) -> anyhow::Result<()> {
+    let config = PaykitSdkConfig::new(PaykitReceiverPath::new(secrets.path.clone())?);
+    let secret = secrets
+        .session
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("backup session missing"))?;
+    let owner = PubkyLocalSecretKey::new(secrets.owner);
+    let noise = ReceiverNoiseSecretKey::new(secrets.noise);
+    let bootstrap = PubkySessionBootstrap::with_pubky(pubky_client()?, CLIENT_ID)?
+        .with_auth_relay("http://127.0.0.1:15412/inbox")?;
+    let session = bootstrap
+        .import_session(
+            secret,
+            Some(owner.clone()),
+            noise,
+            &config.required_session_capabilities(),
+        )
+        .await?;
+    anyhow::ensure!(
+        session.public_key == owner.public_key(),
+        "backup identity mismatch"
+    );
+    Ok(())
+}
+
+pub(crate) async fn backup_marker_matches(
+    owner: &str,
+    path: &str,
+    expected_noise: &str,
+) -> anyhow::Result<bool> {
+    let value = inspect_marker(owner, path).await?;
+    Ok(value
+        .get("noise_public_key")
+        .or_else(|| value.get("noisePublicKey"))
+        .and_then(serde_json::Value::as_str)
+        == Some(expected_noise))
 }
 #[derive(Clone)]
 pub(crate) struct SessionProvider {
