@@ -94,5 +94,30 @@ describe('PaykitImageBuilder', () => {
     await builder.handle({ action: 'cancel', jobId: first.jobId! });
     expect(build.kill).toHaveBeenCalledWith('SIGTERM');
     expect(build.kill).toHaveBeenCalledTimes(1);
+    build.emit('close', null);
+    expect((await builder.handle({ action: 'status' })).status).toBe('cancelled');
+    expect(spawn).toHaveBeenCalledTimes(3);
+  });
+
+  test('keeps a build failure and its output across status polls', async () => {
+    const build: any = new EventEmitter();
+    build.stdout = new PassThrough();
+    build.stderr = new PassThrough();
+    build.kill = jest.fn();
+    const spawn = jest
+      .fn()
+      .mockImplementationOnce(() => processResult('arm64\n'))
+      .mockImplementationOnce(() => processResult('missing', 1))
+      .mockReturnValueOnce(build);
+    const builder = new PaykitImageBuilder(directory, spawn as any, trusted);
+
+    await builder.handle({ action: 'build' });
+    build.stderr.write('compiler process was Killed\n');
+    build.emit('close', 1);
+
+    const failed = await builder.handle({ action: 'status' });
+    expect(failed.status).toBe('failed');
+    expect(failed.recentOutput).toContain('compiler process was Killed');
+    expect(spawn).toHaveBeenCalledTimes(3);
   });
 });

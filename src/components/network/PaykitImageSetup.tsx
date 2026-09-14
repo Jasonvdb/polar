@@ -71,6 +71,9 @@ const PaykitImageSetup: React.FC<Props> = ({ onReady, disabled }) => {
       setEnabling(false);
     }
   };
+  const showOutput =
+    setup?.recentOutput.length &&
+    ['building', 'failed', 'cancelled'].includes(setup.status);
 
   if (!setup || setup.status === 'checking')
     return (
@@ -97,13 +100,15 @@ const PaykitImageSetup: React.FC<Props> = ({ onReady, disabled }) => {
           description={
             setup.error?.code === 'docker-unavailable'
               ? 'Open Docker Desktop and wait until it is running, then retry.'
+              : setup.error?.code === 'build-failed'
+              ? 'Review the retained build output below. If it reports “Killed” or exit code 101, give the Docker virtual machine at least 4 GB of memory, then retry.'
               : 'The first build downloads dependencies and may take several minutes.'
           }
         />
       )}
-      {setup.recentOutput.length > 0 && setup.status === 'building' && (
+      {showOutput && (
         <Typography.Paragraph
-          aria-label="Build progress"
+          aria-label="Build output"
           style={{ maxHeight: 120, overflow: 'auto', whiteSpace: 'pre-wrap' }}
         >
           {setup.recentOutput.slice(-8).join('\n')}
