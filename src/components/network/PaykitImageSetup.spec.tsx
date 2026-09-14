@@ -57,4 +57,20 @@ describe('Paykit image setup', () => {
     fireEvent.click(await view.findByText('Enable Paykit'));
     await waitFor(() => expect(enable).toHaveBeenCalledTimes(1));
   });
+
+  test('shows retained output and memory guidance after a build failure', async () => {
+    service.imageStatus.mockResolvedValue({
+      status: 'failed',
+      message: 'The service image build failed.',
+      recentOutput: ['The command returned a non-zero code: 101'],
+      error: { code: 'build-failed', message: 'The service image build failed.' },
+    });
+
+    const view = render(<PaykitImageSetup onReady={jest.fn()} />);
+
+    expect(await view.findByLabelText('Build output')).toHaveTextContent(
+      'non-zero code: 101',
+    );
+    expect(view.getByText(/at least 4 GB of memory/)).toBeInTheDocument();
+  });
 });

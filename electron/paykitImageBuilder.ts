@@ -56,6 +56,8 @@ export class PaykitImageBuilder {
   async handle(request: PaykitImageRequest): Promise<PaykitImageSetupState> {
     if (request.action === 'cancel') return this.cancel(request.jobId);
     if (request.action === 'build') return this.build();
+    if (this.state.status === 'failed' || this.state.status === 'cancelled')
+      return this.getState();
     return this.refresh();
   }
 

@@ -2,7 +2,7 @@ FROM rust:1.96.0-bookworm@sha256:5e2214abe154fe26e39f64488952e5c991eeed1d6d6da7c
 RUN apt-get update && apt-get install -y --no-install-recommends cmake clang libclang-dev pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
-ARG CARGO_BUILD_JOBS=2
+ARG CARGO_BUILD_JOBS=1
 # Cache only dependency artifacts. Delete every stub-package output and fingerprint.
 RUN mkdir src && printf 'fn main() {}\n' > src/main.rs \
     && cargo build --locked --release --bin polar-paykit -j ${CARGO_BUILD_JOBS} \
@@ -21,7 +21,7 @@ ENTRYPOINT ["polar-paykit"]
 CMD ["serve"]
 
 FROM build AS fixture-build
-ARG CARGO_BUILD_JOBS=2
+ARG CARGO_BUILD_JOBS=1
 RUN cargo build --locked --release --bin paykit-receipt-fixture -j ${CARGO_BUILD_JOBS}
 RUN cargo build --locked --release --bin paykit-backup-fixture -j ${CARGO_BUILD_JOBS}
 
