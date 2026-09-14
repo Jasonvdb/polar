@@ -357,7 +357,7 @@ restrict Chromium user namespaces; interactive launches and other platforms keep
 their normal sandbox settings. CI retains Electron child-process output and
 shared-library diagnostics as workflow artifacts to make startup failures visible.
 
-Before the first feature-branch push, enable GitHub Actions in `Jasonvdb/polar`.
+Before the first feature-branch push, enable GitHub Actions in `Jasonvdb/polar-paykit`.
 Fork CI runs for pushes to `codex/flow-vibe-*` branches and for pull requests, as
 well as the default branch and `ci/*` pushes. Check the fork's Actions tab for
 Linux, Windows, and macOS results. Packaging retains downloadable workflow

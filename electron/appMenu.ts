@@ -63,7 +63,7 @@ export const appMenuTemplate = () => {
         {
           label: 'Github Repo',
           click: function () {
-            shell.openExternal('https://github.com/Jasonvdb/polar');
+            shell.openExternal('https://github.com/Jasonvdb/polar-paykit');
           },
         },
       ],
